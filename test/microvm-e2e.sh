@@ -51,6 +51,15 @@ out="$(cage status 2>&1)"
 grep -q "^$A  *NOT logged in" <<<"$out" || fail "status should report not logged in: $out"
 ok "cage status probes the login inside the VM (not logged in, as expected)"
 
+# `cage login` reaches the vendor's sign-in inside the VM (through a real PTY). Antigravity's full-screen
+# UI needs a real terminal to answer its capability queries, so it is exercised by hand only.
+if [ "$A" != antigravity ]; then
+  timeout 90 script -qfec "$ROOT/cage login $A" "$CAGE_HOME/login.txt" </dev/null >/dev/null 2>&1 || true
+  grep -aqE 'https://(claude\.com|auth\.openai\.com|cursor\.com)/' "$CAGE_HOME/login.txt" \
+    || fail "cage login did not reach the sign-in URL: $(tr -d '\033' < "$CAGE_HOME/login.txt" | tail -c 600)"
+  ok "cage login reaches $A's sign-in URL inside the VM"
+fi
+
 # default microsandbox policy: internet yes; cloud metadata / private ranges no
 ax curl -sS -o /dev/null -m 20 https://github.com || fail "no internet from the guest"
 if ax curl -sS -o /dev/null -m 5 http://169.254.169.254/; then fail "cloud metadata endpoint reachable"; fi
