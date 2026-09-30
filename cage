@@ -85,7 +85,7 @@ tg_api() { # tg_api <token> <method> [query]
 bot_username() { # prints the bot's username for a working token; fails otherwise
   local r
   r="$(tg_api "$1" getMe 2>/dev/null)" || return 1
-  printf '%s' "$r" | grep -q '"ok":true' || return 1
+  [[ "$r" == *'"ok":true'* ]] || return 1   # no `| grep -q`: under pipefail its early exit can SIGPIPE the writer
   printf '%s' "$r" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p'
 }
 
@@ -242,7 +242,7 @@ cmd_setup() {
       [ -n "$id" ] && break
     done
     [ -n "$id" ] || die "no message arrived. Set CAGE_TELEGRAM_ALLOW in $CAGE_ENV to your numeric id (ask @userinfobot), then re-run"
-    name="$(printf '%s' "$updates" | sed -n 's/.*"from":{"id":'"$id"',"is_bot":false,"first_name":"\([^"]*\)".*/\1/p' | head -1)"
+    name="$(printf '%s' "$updates" | sed -n 's/.*"from":{"id":'"$id"',"is_bot":false,"first_name":"\([^"]*\)".*/\1/p' | head -1 || true)"
     prompt "Got a message from ${name:-a user} (id $id). Only this account will be able to use your bots. Correct? [Y/n] " answer
     case "$answer" in [nN]*) die "not saved; re-run cage setup" ;; esac
     set_env CAGE_TELEGRAM_ALLOW "$id"
