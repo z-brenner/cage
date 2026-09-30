@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: lint + host tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S warning cage guest/*.sh test/*.sh
+      - name: host tests (bash 5) + real cc-connect config validation
+        run: |
+          curl -fsSL https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          CAGE_TEST_CC_CONNECT="$RUNNER_TEMP/cc-connect-v1.5.0-linux-amd64" test/host.sh
+      - name: host tests (bash 3.2, as shipped on macOS)
+        run: docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2 bash test/host.sh
+
+  guest-smoke:
+    name: guest smoke (${{ matrix.agent }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [claude, codex, cursor, antigravity]
+    steps:
+      - uses: actions/checkout@v4
+      - run: test/guest-smoke.sh ${{ matrix.agent }}
+
+  microvm:
+    name: microVM e2e (${{ matrix.agent }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [claude, codex, cursor, antigravity]
+    steps:
+      - uses: actions/checkout@v4
+      - name: enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: install microsandbox
+        run: |
+          curl -fsSL https://install.microsandbox.dev | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: msb --version
+      - run: test/microvm-e2e.sh ${{ matrix.agent }}
