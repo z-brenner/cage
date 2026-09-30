@@ -1,0 +1,13 @@
+[Unit]
+Description=cage guest init (network, persistent home, SSH key)
+After=local-fs.target
+Before=ssh.service network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cage-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

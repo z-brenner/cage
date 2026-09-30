@@ -1,0 +1,33 @@
+{
+  "name": "cage",
+  "version": "0.1.0",
+  "description": "Personal multi-agent bot: drives Claude Code, Codex, Gemini CLI and Cursor on your own subscriptions, each agent caged in its own VM.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "cage": "bin/cage.js"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/cli.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-concurrency=4 test/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "guest",
+    "images",
+    "scripts"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  }
+}
