@@ -74,6 +74,43 @@ token_for() {
   echo "${!var:-}"
 }
 
+valid_token() { [[ "$1" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; }
+
+# Telegram Bot API call. The URL (it contains the token) goes to curl on stdin, never on a command line.
+tg_api() { # tg_api <token> <method> [query]
+  printf 'url = "%s/bot%s/%s%s"\n' "${CAGE_TELEGRAM_API:-https://api.telegram.org}" "$1" "$2" "${3:+?$3}" |
+    curl -sS -m 70 -K -
+}
+
+bot_username() { # prints the bot's username for a working token; fails otherwise
+  local r
+  r="$(tg_api "$1" getMe 2>/dev/null)" || return 1
+  printf '%s' "$r" | grep -q '"ok":true' || return 1
+  printf '%s' "$r" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p'
+}
+
+# Upserts KEY="VALUE" in the env file. Callers validate VALUE, so it never needs escaping.
+set_env() {
+  local tmp="$CAGE_ENV.tmp.$$"
+  (
+    umask 077
+    { grep -v "^$1=" "$CAGE_ENV" || true; } > "$tmp"
+    printf '%s="%s"\n' "$1" "$2" >> "$tmp"
+    mv "$tmp" "$CAGE_ENV"
+  )
+}
+
+prompt() { # prompt <message> <varname> [secret]
+  local reply=""
+  if [ -t 0 ]; then
+    if [ "${3:-}" = secret ]; then read -r -s -p "$1" reply; echo >&2; else read -r -p "$1" reply; fi
+  else
+    printf '%s\n' "$1" >&2   # still show the question when answers are piped in
+    read -r reply || true
+  fi
+  printf -v "$2" '%s' "$reply"
+}
+
 # Writes $CAGE_HOME/agents/<agent>/cc-connect.toml (0600). Values are validated, so no TOML escaping is needed.
 render_config() {
   local a="$1" token dir cmd cmdline=""
@@ -139,9 +176,9 @@ agent_exec() { # agent_exec <agent> <tty:yes|no> <command>
 
 cmd_init() {
   mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
-  if [ -f "$CAGE_ENV" ]; then say "$CAGE_ENV already exists; leaving it alone"; exit 0; fi
+  if [ -f "$CAGE_ENV" ]; then say "$CAGE_ENV already exists; leaving it alone"; return 0; fi
   (umask 077; cp "$CAGE_ROOT/cage.env.example" "$CAGE_ENV")
-  say "wrote $CAGE_ENV. Fill in your Telegram user id and one bot token per agent, then: cage doctor && cage up"
+  say "wrote $CAGE_ENV. Next: cage setup (or edit the file by hand)"
 }
 
 cmd_doctor() {
@@ -156,13 +193,138 @@ cmd_doctor() {
     load_env
     echo "✓ config $CAGE_ENV (agents: $CAGE_AGENTS)"
     [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]] && echo "✓ Telegram allowlist: $CAGE_TELEGRAM_ALLOW" || { echo "✗ CAGE_TELEGRAM_ALLOW is not set to numeric user id(s)"; ok=0; }
+    local t u
     for a in $CAGE_AGENTS; do
-      [[ "$(token_for "$a")" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] && echo "✓ bot token for $a" || { echo "✗ CAGE_TELEGRAM_TOKEN_$a missing"; ok=0; }
+      t="$(token_for "$a")"
+      if ! valid_token "$t"; then echo "✗ CAGE_TELEGRAM_TOKEN_$a missing (cage setup)"; ok=0
+      elif u="$(bot_username "$t")"; then echo "✓ $a bot: @$u"
+      else echo "✗ Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"; ok=0
+      fi
     done
   else
     echo "✗ no config at $CAGE_ENV (cage init)"; ok=0
   fi
   [ $ok = 1 ] || exit 1
+}
+
+cmd_setup() {
+  command -v curl >/dev/null || die "curl is required"
+  cmd_init
+  load_env
+  resolve_agents "$@"
+  local a token user first="" first_bot=""
+  for a in "${AGENTS[@]}"; do
+    token="$(token_for "$a")"
+    if valid_token "$token" && user="$(bot_username "$token")"; then
+      say "$a: keeping bot @$user"
+    else
+      say "$a needs its own Telegram bot: message @BotFather → /newbot (name it e.g. \"Dot $a\") and copy the token."
+      while true; do
+        prompt "Token for the $a bot: " token secret
+        if ! valid_token "$token"; then say "that is not a bot token (they look like 123456:ABC…)"; continue; fi
+        if user="$(bot_username "$token")"; then break; fi
+        say "Telegram rejected that token (or is unreachable); try again"
+      done
+      set_env "CAGE_TELEGRAM_TOKEN_$a" "$token"
+      say "$a → @$user"
+    fi
+    if [ -z "$first" ]; then first="$token"; first_bot="$user"; fi
+  done
+
+  if [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    say "allowlist already set: $CAGE_TELEGRAM_ALLOW"
+  else
+    say "Now open Telegram and send any message to @$first_bot (waiting up to 2 minutes)…"
+    local updates="" id="" name="" last="" answer="" i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      updates="$(tg_api "$first" getUpdates "timeout=10" 2>/dev/null || true)"
+      id="$(printf '%s' "$updates" | grep -o '"from":{"id":[0-9]*' | head -1 | grep -o '[0-9]*$' || true)"
+      [ -n "$id" ] && break
+    done
+    [ -n "$id" ] || die "no message arrived. Set CAGE_TELEGRAM_ALLOW in $CAGE_ENV to your numeric id (ask @userinfobot), then re-run"
+    name="$(printf '%s' "$updates" | sed -n 's/.*"from":{"id":'"$id"',"is_bot":false,"first_name":"\([^"]*\)".*/\1/p' | head -1)"
+    prompt "Got a message from ${name:-a user} (id $id). Only this account will be able to use your bots. Correct? [Y/n] " answer
+    case "$answer" in [nN]*) die "not saved; re-run cage setup" ;; esac
+    set_env CAGE_TELEGRAM_ALLOW "$id"
+    # Acknowledge that message so the bot doesn't answer it once cc-connect starts.
+    last="$(printf '%s' "$updates" | grep -o '"update_id":[0-9]*' | tail -1 | grep -o '[0-9]*$' || true)"
+    if [ -n "$last" ]; then tg_api "$first" getUpdates "offset=$((last + 1))&timeout=0" >/dev/null 2>&1 || true; fi
+    say "allowlisted Telegram user $id"
+  fi
+  say "setup complete ($CAGE_ENV). Next: cage doctor && cage up"
+}
+
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+# Runs `cage up` at login so the bots come back after a reboot (microsandbox has no daemon to restart VMs).
+cmd_autostart() {
+  local mode="${1:-}" label=dev.cage.up
+  case "$mode" in on|off) ;; *) die "usage: cage autostart on|off" ;; esac
+  local path_env="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+  case "$(uname -s)" in
+    Darwin)
+      local plist="$HOME/Library/LaunchAgents/$label.plist"
+      if [ "$mode" = off ]; then
+        launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
+        rm -f "$plist"
+        say "autostart off"
+        return 0
+      fi
+      mkdir -p "$(dirname "$plist")" "$CAGE_HOME"
+      cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array><string>$(xml_escape "$CAGE_ROOT/cage")</string><string>up</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(xml_escape "$path_env")</string>
+    <key>CAGE_HOME</key><string>$(xml_escape "$CAGE_HOME")</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$(xml_escape "$CAGE_HOME/autostart.log")</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$CAGE_HOME/autostart.log")</string>
+</dict>
+</plist>
+PLIST
+      launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$plist"
+      say "autostart on: $plist runs 'cage up' at login (log: $CAGE_HOME/autostart.log)"
+      ;;
+    Linux)
+      local unit="$HOME/.config/systemd/user/cage-up.service"
+      if [ "$mode" = off ]; then
+        systemctl --user disable cage-up.service 2>/dev/null || true
+        rm -f "$unit"
+        systemctl --user daemon-reload 2>/dev/null || true
+        say "autostart off"
+        return 0
+      fi
+      mkdir -p "$(dirname "$unit")"
+      cat > "$unit" <<UNIT
+[Unit]
+Description=cage: start agent microVMs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PATH=$path_env"
+Environment="CAGE_HOME=$CAGE_HOME"
+ExecStart="$CAGE_ROOT/cage" up
+
+[Install]
+WantedBy=default.target
+UNIT
+      systemctl --user daemon-reload
+      systemctl --user enable cage-up.service
+      say "autostart on: $unit runs 'cage up' at login. To start at boot without logging in: sudo loginctl enable-linger $(id -un)"
+      ;;
+    *) die "autostart supports macOS and Linux" ;;
+  esac
 }
 
 cmd_up() {
@@ -242,8 +404,9 @@ usage() {
 cage: Claude Code, Codex, Cursor and Antigravity on your own subscriptions,
 each in its own microVM (microsandbox), each reachable as a Telegram bot (cc-connect).
 
-  cage init                       write $CAGE_ENV from the example
-  cage doctor                     check host prerequisites and config
+  cage setup                      guided setup: checks each bot token with Telegram, learns your user id
+  cage init                       only write $CAGE_ENV from the example (to edit by hand)
+  cage doctor                     check host prerequisites, config and bot tokens
   cage up [agent...]              (re)create VMs; logins and work are kept. Run after editing config or rebooting
   cage login <agent>              sign in inside that agent's VM
   cage status                     VMs and login state
@@ -252,6 +415,7 @@ each in its own microVM (microsandbox), each reachable as a Telegram bot (cc-con
   cage update [agent...]          same as up: fresh VMs with the latest agent CLI + pinned cc-connect
   cage down [agent...]            stop VMs
   cage destroy <agent> --keep-login|--yes
+  cage autostart on|off           run 'cage up' at login (macOS LaunchAgent / Linux systemd user unit)
 
 Agents: $KINDS
 EOF
@@ -262,6 +426,8 @@ main() {
   shift || true
   case "$c" in
     init) cmd_init ;;
+    setup) cmd_setup "$@" ;;
+    autostart) cmd_autostart "$@" ;;
     doctor) cmd_doctor ;;
     up) cmd_up "$@" ;;
     login) cmd_login "$@" ;;
