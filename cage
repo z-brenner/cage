@@ -23,6 +23,7 @@ load_env() {
   CAGE_AGENTS="${CAGE_AGENTS:-claude codex cursor antigravity}"
   CAGE_CPUS="${CAGE_CPUS:-2}"
   CAGE_MEMORY="${CAGE_MEMORY:-4G}"
+  CAGE_ROOT_DISK="${CAGE_ROOT_DISK:-16G}"
   CAGE_MODE="${CAGE_MODE:-yolo}"
   CAGE_IMAGE="${CAGE_IMAGE:-ubuntu:24.04}"
   CAGE_CC_CONNECT_VERSION="${CAGE_CC_CONNECT_VERSION:-v1.5.0}"
@@ -37,6 +38,7 @@ check_agent() {
 # Sets AGENTS to the named agents, or to CAGE_AGENTS. Runs in the main shell so `die` really exits.
 resolve_agents() {
   if [ $# -gt 0 ]; then AGENTS=("$@"); else read -r -a AGENTS <<<"$CAGE_AGENTS"; fi
+  [ "${#AGENTS[@]}" -gt 0 ] || die "no agents given and CAGE_AGENTS is empty"
   for a in "${AGENTS[@]}"; do check_agent "$a"; done
 }
 
@@ -129,9 +131,9 @@ wait_provisioned() {
 }
 
 agent_exec() { # agent_exec <agent> <tty:yes|no> <command>
-  local tty=()
-  [ "$2" = yes ] && tty=(-t)
-  "$MSB" exec "${tty[@]}" -u agent -e HOME=/home/agent -w /home/agent "$(vm "$1")" -- \
+  local tty=--no-tty
+  [ "$2" = yes ] && tty=-t
+  "$MSB" exec "$tty" -u agent -e HOME=/home/agent -w /home/agent "$(vm "$1")" -- \
     bash -lc "set -a; [ -r /etc/cage/env ] && . /etc/cage/env; set +a; $3"
 }
 
@@ -172,14 +174,14 @@ cmd_up() {
       say "restarting $(vm "$a") with fresh config"
       "$MSB" restart "$(vm "$a")"
     else
-      say "creating $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY, image $CAGE_IMAGE)"
+      say "creating $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM, $CAGE_ROOT_DISK disk, image $CAGE_IMAGE)"
       # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
       # shellcheck disable=SC2086
       "$MSB" run -d --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
-        -c "$CAGE_CPUS" -m "$CAGE_MEMORY" \
+        -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
         --mount-named "$(vm "$a")-home:/home/agent" \
-        -v "$CAGE_ROOT/guest:/cage:ro" \
-        -v "$CAGE_HOME/agents/$a:/cage-config:ro" \
+        --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
+        --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
         -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
         ${CAGE_MSB_EXTRA_ARGS:-} \
         "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"

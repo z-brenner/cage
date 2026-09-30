@@ -121,12 +121,19 @@ Compared with the first, hand-built version (branch `claude/cage-agent-vms`):
 ## Development
 
 ```bash
-test/host.sh                    # ./cage against a stub msb: config rendering, validation, msb arguments, guards
-CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # also checks that real cc-connect loads every generated config
-test/guest-smoke.sh claude      # Docker stand-in for the VM: same image, mounts and entry script; checks provisioning,
-                                # users, cc-connect, persistence (repeat for codex, cursor, antigravity)
 shellcheck cage guest/*.sh test/*.sh
+test/host.sh                    # ./cage against a stub msb: config rendering, validation, msb arguments, status, guards
+CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # plus: real cc-connect loads every generated config
+test/guest-smoke.sh claude      # Docker stand-in for the VM: same image, mounts and entry script
+test/microvm-e2e.sh claude      # REAL microVM via msb (KVM or Apple Silicon): provisioning, cc-connect user,
+                                # login probe, egress policy, read-only mounts, persistence, destroy
 ```
+
+CI (`.github/workflows/ci.yml`) runs:
+- shellcheck
+- the host tests under bash 5, and under bash 3.2 (what macOS ships)
+- guest smoke tests for all four agents
+- the real-microVM end-to-end test for all four agents, on KVM-enabled GitHub runners
 
 Files:
 - `cage`: the host CLI.
@@ -134,9 +141,8 @@ Files:
 - `guest/entry.sh`: each VM's main process. It creates the `agent` user, provisions on first boot with retries, and supervises cc-connect.
 - `guest/provision.sh`: installs one agent CLI plus cc-connect, system-wide and idempotently.
 
-**Verified so far** (2026-09-30):
-- The host tests pass.
-- cc-connect v1.5.0 loads all four generated configs.
-- The guest smoke test passes for all four agents: first boot, the CLI runs as the unprivileged user, cc-connect runs as that user with a 0600 config, and a restart keeps the home volume and skips reprovisioning.
+**Not covered by automated tests:**
+- Real subscription logins. They need your accounts, and tests should never hold them.
+- The live Telegram API. It needs your bot tokens.
 
-**Not verified here** (the sandbox has no KVM or macOS, and no accounts): microsandbox itself (`msb run`/`exec` behavior on real hardware), real subscription logins, and the live Telegram API.
+Those are the two steps you do once, by hand: `cage login <agent>`, then message the bot.

@@ -64,8 +64,8 @@ grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" && fail "claude should
 ok "renders one cc-connect config per agent with the right type, mode and cmd"
 
 line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
-for want in "-d" "--mount-named | cage-claude-home:/home/agent" "-v | $ROOT/guest:/cage:ro" "-v | $CAGE_HOME/agents/claude:/cage-config:ro" \
-            "-c | 2" "-m | 4G" "--label | app=cage" "ubuntu:24.04 | -- | /bin/bash | /cage/entry.sh | claude"; do
+for want in "-d" "--mount-named | cage-claude-home:/home/agent" "--mount-dir | $ROOT/guest:/cage:ro" "--mount-dir | $CAGE_HOME/agents/claude:/cage-config:ro" \
+            "-c | 2" "-m | 4G" "--root-disk | 16G" "--label | app=cage" "ubuntu:24.04 | -- | /bin/bash | /cage/entry.sh | claude"; do
   [[ "$line" == *"$want"* ]] || fail "msb run for claude lacks '$want': $line"
 done
 [ "$(grep -c '^run | ' "$MSB_LOG")" = 4 ] || fail "expected 4 msb run calls"
@@ -94,6 +94,15 @@ grep -q 'volume' "$MSB_LOG" && fail "--keep-login removed the volume"
 : > "$MSB_LOG"; cage destroy claude --yes 2>/dev/null
 grep -qx 'volume | rm | cage-claude-home' "$MSB_LOG" || fail "destroy --yes kept the volume"
 ok "destroy needs an explicit flag; --keep-login keeps the login volume"
+
+# status: VM list + per-agent login probe through `msb exec --no-tty -u agent` (exec exits 0 = logged in)
+echo cage-codex > "$MSB_EXISTING"
+: > "$MSB_LOG"
+out="$(cage status 2>/dev/null)"
+grep -q '^codex  *logged in$' <<<"$out" || fail "status for codex: $out"
+grep -q '^claude  *no VM' <<<"$out" || fail "status for claude: $out"
+grep -q '^exec | --no-tty | -u | agent | -e | HOME=/home/agent | -w | /home/agent | cage-codex | -- | bash | -lc | .*codex login status' "$MSB_LOG" || fail "status probe: $(cat "$MSB_LOG")"
+ok "status lists VMs and probes each agent's login inside its VM"
 
 if cage up nonsense 2>/dev/null; then fail "unknown agent accepted"; fi
 ok "unknown agents are rejected"
