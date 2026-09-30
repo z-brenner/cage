@@ -34,7 +34,8 @@ docker run -d --name "$NAME" \
 
 wait_for() { # wait_for <pattern> <seconds>
   local i=0
-  until docker logs "$NAME" 2>&1 | grep -q "$1"; do
+  # Capture first: `docker logs | grep -q` under pipefail fails when grep's early exit SIGPIPEs docker logs.
+  until grep -q "$1" <<<"$(docker logs "$NAME" 2>&1)"; do
     [ "$(docker inspect -f '{{.State.Running}}' "$NAME")" = true ] || fail "container exited"
     i=$((i + 5)); [ $i -gt "$2" ] && fail "timed out waiting for: $1"
     sleep 5
@@ -52,8 +53,9 @@ sleep 3
 [ "$(docker exec "$NAME" stat -c '%U %a' /home/agent/.cc-connect/config.toml)" = "agent 600" ] || fail "config perms"
 ok "cc-connect runs as agent with a 0600 config"
 
-docker logs "$NAME" 2>&1 | grep -q 'config loaded' || fail "cc-connect did not load its config"
-if docker logs "$NAME" 2>&1 | grep -q 'failed to create agent'; then fail "cc-connect could not create the $A agent"; fi
+logs="$(docker logs "$NAME" 2>&1)"
+grep -q 'config loaded' <<<"$logs" || fail "cc-connect did not load its config"
+if grep -q 'failed to create agent' <<<"$logs"; then fail "cc-connect could not create the $A agent"; fi
 ok "cc-connect loaded the config and created the $A agent"
 
 # persistence: the home volume survives a restart and provisioning is skipped the second time

@@ -59,8 +59,19 @@ install_claude() {
 
 install_codex() {
   node_22
-  log "OpenAI Codex CLI (npm)"
-  npm install -g --no-fund --no-audit @openai/codex@latest
+  local arch v
+  case "$(uname -m)" in x86_64) arch=x64 ;; *) arch=arm64 ;; esac
+  # Right after a Codex release, @latest can point at a version whose -linux-<arch> build isn't published yet;
+  # npm then silently skips that optional dependency and `codex` crashes. Install the newest version whose
+  # platform build exists instead.
+  v="$(npm view @openai/codex versions --json 2>/dev/null | node -e '
+    const vs = JSON.parse(require("fs").readFileSync(0, "utf8")), set = new Set(vs), arch = process.argv[1];
+    const cmp = (a, b) => { const x = a.split(".").map(Number), y = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; };
+    const ok = vs.filter((v) => /^\d+\.\d+\.\d+$/.test(v) && set.has(v + "-linux-" + arch)).sort(cmp);
+    process.stdout.write(ok[ok.length - 1] || "");' "$arch" || true)"
+  log "OpenAI Codex CLI ${v:-latest} (npm)"
+  npm install -g --no-fund --no-audit "@openai/codex@${v:-latest}"
 }
 
 install_cursor() {
@@ -110,6 +121,8 @@ install_cc_connect
 guest_env
 case "$KIND" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$KIND" ;; esac
 command -v "$BIN" >/dev/null || { echo "provision: $BIN is not on PATH after install" >&2; exit 1; }
+# A wrapper on PATH isn't enough (npm can install a launcher without its platform binary): it must run.
+"$BIN" --version >/dev/null 2>&1 || { echo "provision: $BIN is installed but does not run; will retry" >&2; exit 1; }
 mkdir -p /opt/cage
 date -u +%Y-%m-%dT%H:%M:%SZ > "$MARK"
 log "done: $BIN $("$BIN" --version 2>/dev/null | head -1 || true); $(cc-connect --version 2>/dev/null | head -1)"

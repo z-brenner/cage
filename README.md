@@ -36,12 +36,13 @@ Requirements: an Apple-Silicon Mac or a Linux box with KVM, [microsandbox](https
 curl -fsSL https://install.microsandbox.dev | sh      # macOS: brew install superradcompany/tap/microsandbox
 git clone https://github.com/z-brenner/cage && cd cage
 
-./cage init                  # writes ~/.cage/cage.env (0600)
-$EDITOR ~/.cage/cage.env     # your Telegram user id + one @BotFather token per agent
-./cage doctor
-./cage up                    # one microVM per agent; each installs its CLI + cc-connect in the background (a few minutes)
+./cage setup                 # asks for one @BotFather token per agent (checked with Telegram), then learns your
+                             # Telegram user id from one message you send the first bot. Writes ~/.cage/cage.env (0600)
+./cage doctor                # host, config, and every bot token checked live
+./cage up                    # one microVM per agent; each installs its CLI + cc-connect in the background (~1 min)
 ./cage login claude          # then: codex, cursor, antigravity
 ./cage status
+./cage autostart on          # optional: run `cage up` at login so the bots survive reboots
 ```
 
 Then message the bots. Each chat has its own session. cc-connect's commands:
@@ -70,7 +71,7 @@ Then message the bots. Each chat has its own session. cc-connect's commands:
 
 Logins live on each VM's named volume (`cage-<agent>-home`). They survive `cage up`/`cage update` (which re-create the VM) and `cage destroy --keep-login`.
 
-**After a reboot, run `cage up`.** microsandbox has no daemon, so VMs don't auto-start. `cage up` re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept.
+**After a reboot:** microsandbox has no daemon, so VMs don't auto-start. Run `cage up`, which re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept. Or run `cage autostart on` once so it happens at every login (a macOS LaunchAgent or a Linux systemd user unit).
 
 ## Security model
 
@@ -125,6 +126,7 @@ Compared with the first, hand-built version (branch `claude/cage-agent-vms`):
 ```bash
 shellcheck cage guest/*.sh test/*.sh
 test/host.sh                    # ./cage against a stub msb: config rendering, validation, msb arguments, status, guards
+test/setup.sh                   # cage setup / doctor / autostart against a mock Telegram API and stubbed launchctl/systemctl
 CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # plus: real cc-connect loads every generated config
 test/guest-smoke.sh claude      # Docker stand-in for the VM: same image, mounts and entry script
 test/microvm-e2e.sh claude      # REAL microVM via msb (KVM or Apple Silicon): provisioning, cc-connect user,
@@ -133,7 +135,7 @@ test/microvm-e2e.sh claude      # REAL microVM via msb (KVM or Apple Silicon): p
 
 CI (`.github/workflows/ci.yml`) runs:
 - shellcheck
-- the host tests under bash 5, and under bash 3.2 (what macOS ships)
+- the host and setup tests under bash 5, and under bash 3.2 (what macOS ships)
 - guest smoke tests for all four agents
 - the real-microVM end-to-end test for all four agents, on KVM-enabled GitHub runners
 
