@@ -73,6 +73,8 @@ Logins live on each VM's named volume (`cage-<agent>-home`). They survive `cage 
 
 **After a reboot:** microsandbox has no daemon, so VMs don't auto-start. Run `cage up`, which re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept. Or run `cage autostart on` once so it happens at every login (a macOS LaunchAgent or a Linux systemd user unit).
 
+**If the microsandbox installer fails with "Could not determine latest release version" (HTTP 403):** it looks up the latest release through GitHub's anonymous API, which is rate-limited per IP (shared office or VPN IPs hit it). Use Homebrew on macOS, wait an hour, or pin a version with `MSB_VERSION=v0.7.5 test/install-msb-pinned.sh`.
+
 ## Security model
 
 - **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your Mac, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
