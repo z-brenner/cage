@@ -170,24 +170,22 @@ cmd_up() {
   resolve_agents "$@"
   for a in "${AGENTS[@]}"; do
     render_config "$a"
-    if exists "$a"; then
-      say "restarting $(vm "$a") with fresh config"
-      "$MSB" restart "$(vm "$a")"
-    else
-      say "creating $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM, $CAGE_ROOT_DISK disk, image $CAGE_IMAGE)"
-      # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
-      # shellcheck disable=SC2086
-      "$MSB" run -d --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
-        -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
-        --mount-named "$(vm "$a")-home:/home/agent" \
-        --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
-        --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
-        -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
-        ${CAGE_MSB_EXTRA_ARGS:-} \
-        "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"
-    fi
+    # Always (re)create: microsandbox runs the `--` command only on `msb run`; a plain start/restart boots
+    # the VM without it. Re-creating reprovisions the system disk (~1 min) and keeps the named home volume,
+    # so logins, sessions and work survive. This is also what `cage update` does, and it applies config changes.
+    say "starting $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM, $CAGE_ROOT_DISK disk, image $CAGE_IMAGE)"
+    # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
+    # shellcheck disable=SC2086
+    "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
+      -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
+      --mount-named "$(vm "$a")-home:/home/agent" \
+      --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
+      --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
+      -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
+      ${CAGE_MSB_EXTRA_ARGS:-} \
+      "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"
   done
-  say "VMs are installing in the background. Next: cage login <agent>  (cage logs <agent> shows progress)"
+  say "VMs are installing in the background (about a minute). Next: cage login <agent>  (cage logs <agent> shows progress)"
 }
 
 cmd_login() {
@@ -219,15 +217,8 @@ cmd_status() {
 cmd_logs() { [ -n "${1:-}" ] || die "usage: cage logs <agent>"; check_agent "$1"; exec "$MSB" logs -f "$(vm "$1")"; }
 cmd_shell() { [ -n "${1:-}" ] || die "usage: cage shell <agent>"; check_agent "$1"; agent_exec "$1" yes "cd ~/work 2>/dev/null; exec bash -l"; }
 
-cmd_update() {
-  load_env
-  resolve_agents "$@"
-  for a in "${AGENTS[@]}"; do
-    say "updating $a CLI and cc-connect inside $(vm "$a")"
-    "$MSB" exec --no-stdin -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" "$(vm "$a")" -- bash /cage/provision.sh "$a" --update
-    "$MSB" restart "$(vm "$a")"
-  done
-}
+# A fresh VM installs the latest agent CLI and the pinned cc-connect; the home volume (login, work) is kept.
+cmd_update() { cmd_up "$@"; }
 
 cmd_down() {
   load_env
@@ -253,12 +244,12 @@ each in its own microVM (microsandbox), each reachable as a Telegram bot (cc-con
 
   cage init                       write $CAGE_ENV from the example
   cage doctor                     check host prerequisites and config
-  cage up [agent...]              create/start VMs (re-run after editing config)
+  cage up [agent...]              (re)create VMs; logins and work are kept. Run after editing config or rebooting
   cage login <agent>              sign in inside that agent's VM
   cage status                     VMs and login state
   cage logs <agent>               follow the VM's output (provisioning, cc-connect)
   cage shell <agent>              shell inside the VM as the agent user
-  cage update [agent...]          reinstall the latest agent CLI + pinned cc-connect
+  cage update [agent...]          same as up: fresh VMs with the latest agent CLI + pinned cc-connect
   cage down [agent...]            stop VMs
   cage destroy <agent> --keep-login|--yes
 

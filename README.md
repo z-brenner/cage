@@ -68,7 +68,9 @@ Then message the bots. Each chat has its own session. cc-connect's commands:
 | cursor | `cursor-agent login` | Open the URL on any device; it completes on its own. |
 | antigravity | `agy` | Sign in on first launch with your Google AI Pro/Ultra account, then quit. |
 
-Logins live on each VM's named volume (`cage-<agent>-home`). They survive restarts, `cage update` and `cage destroy --keep-login`.
+Logins live on each VM's named volume (`cage-<agent>-home`). They survive `cage up`/`cage update` (which re-create the VM) and `cage destroy --keep-login`.
+
+**After a reboot, run `cage up`.** microsandbox has no daemon, so VMs don't auto-start. `cage up` re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept.
 
 ## Security model
 

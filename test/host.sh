@@ -71,13 +71,15 @@ done
 [ "$(grep -c '^run | ' "$MSB_LOG")" = 4 ] || fail "expected 4 msb run calls"
 ok "msb run: detached, persistent home volume, read-only mounts, labels, entry script"
 
-# existing VM → restart instead of re-create
-echo cage-claude > "$MSB_EXISTING"
+# re-running up re-creates with --replace (msb start/restart would boot without the entry command)
 : > "$MSB_LOG"
 cage up claude 2>/dev/null
-grep -qx 'restart | cage-claude' "$MSB_LOG" || fail "existing VM not restarted: $(cat "$MSB_LOG")"
-grep -q '^run' "$MSB_LOG" && fail "existing VM re-created"
-ok "re-running up restarts an existing VM (picks up new config)"
+grep -q '^run | -d | --replace | --name | cage-claude |' "$MSB_LOG" || fail "up should re-create with --replace: $(cat "$MSB_LOG")"
+grep -q '^restart' "$MSB_LOG" && fail "up must not use msb restart"
+: > "$MSB_LOG"
+cage update claude 2>/dev/null
+grep -q '^run | -d | --replace | --name | cage-claude |' "$MSB_LOG" || fail "update should re-create"
+ok "up and update re-create the VM with --replace (home volume kept)"
 
 # ask mode
 sed -i 's/^CAGE_MODE=yolo/CAGE_MODE=ask/' "$CAGE_HOME/cage.env"

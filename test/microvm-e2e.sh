@@ -70,14 +70,14 @@ ok "egress: public internet allowed; metadata and private ranges blocked"
 if gx sh -c 'echo x > /cage/pwned' 2>/dev/null; then fail "/cage is writable"; fi
 ok "host mounts are read-only"
 
-# persistence across stop/start via cage
+# persistence: down + up (what you do after a reboot) re-creates the VM and keeps the home volume
 ax sh -c 'echo keep > /home/agent/work/marker'
 cage down "$A"
 cage up "$A"
-retry 300 gx test -e /home/agent/work/marker || fail "home volume lost after restart"
-[ "$(gx cat /home/agent/work/marker)" = keep ] || fail "marker content"
-retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not back after restart"
-ok "stop/start keeps the home volume and brings cc-connect back"
+retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after up"
+[ "$(gx cat /home/agent/work/marker)" = keep ] || fail "home volume lost across down/up"
+retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not back after down/up"
+ok "down + up keeps the home volume (logins, work) and brings cc-connect back"
 
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi
