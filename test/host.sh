@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Host-side tests for ./cage against a stub `msb` that records its arguments.
+# Optional: CAGE_TEST_CC_CONNECT=/path/to/cc-connect validates the generated configs with the real binary.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+pass=0
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok() { pass=$((pass + 1)); echo "ok - $*"; }
+
+# stub msb: logs one call per line (args separated by ' | '); `inspect` succeeds only for names in $T/existing
+mkdir -p "$T/bin"
+cat > "$T/bin/msb" <<'EOF'
+#!/usr/bin/env bash
+cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
+if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
+exit 0
+EOF
+chmod +x "$T/bin/msb"
+export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing"
+: > "$MSB_EXISTING"
+cage() { "$ROOT/cage" "$@"; }
+
+# init
+cage init 2>/dev/null
+[ -f "$CAGE_HOME/cage.env" ] || fail "init wrote no config"
+[ "$(stat -c %a "$CAGE_HOME/cage.env")" = 600 ] || fail "config not 0600"
+ok "init writes a 0600 config"
+
+# refuses empty tokens / allowlist
+if cage up claude 2>"$T/err"; then fail "up succeeded without tokens"; fi
+grep -q 'CAGE_TELEGRAM_TOKEN_claude' "$T/err" || fail "missing-token error unclear: $(cat "$T/err")"
+ok "up refuses a missing bot token"
+
+cat >> "$CAGE_HOME/cage.env" <<'EOF'
+CAGE_TELEGRAM_ALLOW="111,222"
+CAGE_TELEGRAM_TOKEN_claude="123:AAA-claude_token"
+CAGE_TELEGRAM_TOKEN_codex="124:BBB"
+CAGE_TELEGRAM_TOKEN_cursor="125:CCC"
+CAGE_TELEGRAM_TOKEN_antigravity="126:DDD"
+EOF
+
+# token injection attempt is rejected (would otherwise break out of the TOML string)
+printf 'CAGE_TELEGRAM_TOKEN_codex="1:x\\"\\ninjected = true"\n' >> "$CAGE_HOME/cage.env"
+if cage up codex 2>/dev/null; then fail "accepted a token with quotes/newlines"; fi
+sed -i '$d' "$CAGE_HOME/cage.env"
+ok "rejects tokens that are not bot tokens"
+
+cage up 2>/dev/null
+for a in claude codex cursor antigravity; do
+  f="$CAGE_HOME/agents/$a/cc-connect.toml"
+  [ -f "$f" ] || fail "no config for $a"
+  [ "$(stat -c %a "$f")" = 600 ] || fail "$a config not 0600"
+  grep -q "^allow_from = \"111,222\"$" "$f" || fail "$a allowlist"
+  grep -q "^admin_from = \"111,222\"$" "$f" || fail "$a admin_from"
+done
+grep -q '^type = "claudecode"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude type"
+grep -q '^mode = "bypassPermissions"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude mode"
+grep -q '^mode = "force"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor mode"
+grep -q '^cmd = "cursor-agent"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor cmd"
+grep -q '^cmd = "agy"$' "$CAGE_HOME/agents/antigravity/cc-connect.toml" || fail "agy cmd"
+grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" && fail "claude should use the default cmd"
+ok "renders one cc-connect config per agent with the right type, mode and cmd"
+
+line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
+for want in "-d" "--mount-named | cage-claude-home:/home/agent" "-v | $ROOT/guest:/cage:ro" "-v | $CAGE_HOME/agents/claude:/cage-config:ro" \
+            "-c | 2" "-m | 4G" "--label | app=cage" "ubuntu:24.04 | -- | /bin/bash | /cage/entry.sh | claude"; do
+  [[ "$line" == *"$want"* ]] || fail "msb run for claude lacks '$want': $line"
+done
+[ "$(grep -c '^run | ' "$MSB_LOG")" = 4 ] || fail "expected 4 msb run calls"
+ok "msb run: detached, persistent home volume, read-only mounts, labels, entry script"
+
+# existing VM → restart instead of re-create
+echo cage-claude > "$MSB_EXISTING"
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+grep -qx 'restart | cage-claude' "$MSB_LOG" || fail "existing VM not restarted: $(cat "$MSB_LOG")"
+grep -q '^run' "$MSB_LOG" && fail "existing VM re-created"
+ok "re-running up restarts an existing VM (picks up new config)"
+
+# ask mode
+sed -i 's/^CAGE_MODE=yolo/CAGE_MODE=ask/' "$CAGE_HOME/cage.env"
+cage up claude cursor 2>/dev/null
+grep -q '^mode = "default"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "ask mode claude"
+grep -q '^mode = "default"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "ask mode cursor"
+ok "CAGE_MODE=ask makes agents ask in chat before each tool call"
+
+# destroy guards
+if cage destroy claude 2>/dev/null; then fail "destroy without flag succeeded"; fi
+: > "$MSB_LOG"; cage destroy claude --keep-login 2>/dev/null
+grep -qx 'rm | --force | cage-claude' "$MSB_LOG" || fail "destroy --keep-login"
+grep -q 'volume' "$MSB_LOG" && fail "--keep-login removed the volume"
+: > "$MSB_LOG"; cage destroy claude --yes 2>/dev/null
+grep -qx 'volume | rm | cage-claude-home' "$MSB_LOG" || fail "destroy --yes kept the volume"
+ok "destroy needs an explicit flag; --keep-login keeps the login volume"
+
+if cage up nonsense 2>/dev/null; then fail "unknown agent accepted"; fi
+ok "unknown agents are rejected"
+
+if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
+  for a in claude codex cursor antigravity; do
+    out="$(HOME="$T/cc-$a" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$CAGE_HOME/agents/$a/cc-connect.toml" 2>&1 || true)"
+    # Loading must succeed. Creating the agent may still fail here (no /home/agent/work on this host).
+    grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load $a config: $out"
+    if grep -qiE 'unknown (agent|platform)|unsupported (agent|platform)|failed to parse' <<<"$out"; then fail "cc-connect rejected $a config: $out"; fi
+  done
+  ok "real cc-connect accepts all generated configs"
+fi
+
+echo "all $pass host tests passed"
