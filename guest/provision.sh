@@ -96,16 +96,22 @@ node_22() {
 }
 
 # Runs a vendor installer that installs into $HOME, with HOME pointed at a shared, root-owned dir.
-vendor_install() {
+vendor_install() { # vendor_install <url>: a vendor's own install script, run with its HOME in the tools folder
+  local f
   mkdir -p "$TOOLS"
-  HOME="$TOOLS" bash -c "$1"
+  f="$(mktemp)"
+  # A CDN edge can serve its cached gzip copy whatever was asked for (seen in CI: bash got binary), so: --compressed
+  # for a labelled one, gunzip by hand for an unlabelled one. Retries and a time limit, so a stall can't hang the VM.
+  curl -fsSL --compressed --retry 3 --connect-timeout 20 --max-time 300 -o "$f" "$1"
+  if [ "$(head -c 2 "$f" | od -An -tx1 | tr -d ' \n')" = 1f8b ]; then gunzip -c < "$f" > "$f.sh"; mv "$f.sh" "$f"; fi
+  HOME="$TOOLS" bash "$f" < /dev/null
 }
 
 install_claude() {
   if cached && [ -x "$TOOLS/.local/bin/claude" ]; then ln -sf "$(readlink -f "$TOOLS/.local/bin/claude")" /usr/local/bin/claude; return 0; fi
   if cached && [ -x "$CACHE/npm/bin/claude" ]; then node_22; link_npm_bins; return 0; fi
   log "Claude Code (native installer)"
-  if vendor_install 'curl -fsSL https://claude.ai/install.sh | bash' && [ -x "$TOOLS/.local/bin/claude" ]; then
+  if vendor_install https://claude.ai/install.sh && [ -x "$TOOLS/.local/bin/claude" ]; then
     ln -sf "$(readlink -f "$TOOLS/.local/bin/claude")" /usr/local/bin/claude
   else
     log "native installer failed; falling back to npm"
@@ -137,7 +143,7 @@ install_codex() {
 install_cursor() {
   if ! { cached && [ -x "$TOOLS/.local/bin/cursor-agent" ]; }; then
     log "Cursor CLI (vendor installer)"
-    vendor_install 'curl -fsS https://cursor.com/install | bash'
+    vendor_install https://cursor.com/install
   fi
   ln -sf "$TOOLS/.local/bin/cursor-agent" /usr/local/bin/cursor-agent
 }
@@ -146,7 +152,7 @@ install_cursor() {
 install_antigravity() {
   if ! { cached && [ -x "$TOOLS/.local/bin/agy" ]; }; then
     log "Antigravity CLI (vendor installer)"
-    vendor_install 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+    vendor_install https://antigravity.google/cli/install.sh
   fi
   ln -sf "$TOOLS/.local/bin/agy" /usr/local/bin/agy
 }
