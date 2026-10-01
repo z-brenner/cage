@@ -17,6 +17,7 @@ cat > "$T/bin/msb" <<'EOF'
 #!/usr/bin/env bash
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
+if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
 if [ "$cmd" = exec ]; then case "$*" in *cage:ready*) echo cage:ready ;; esac; fi   # every agent is signed in
 exit 0
@@ -137,6 +138,34 @@ if LC_ALL=C grep -q $'\033' "$note" "$T/mem.out"; then fail "escape codes got th
 grep -qx 'exec | --no-tty | cage-claude | -- | bash | /cage/memory.sh | claude' "$MSB_LOG" || fail "running agent not refreshed: $(cat "$MSB_LOG")"
 grep -q 'cage-codex | -- | bash | /cage/memory.sh' "$MSB_LOG" && fail "refreshed an agent that isn't running"
 ok "cage memory keeps what you approve, forgets the rest, strips escape codes, refreshes running agents"
+
+# secrets: the value stays on this computer and reaches msb only through its environment; only VMs that
+# have secrets get TLS interception, with their own service and Telegram exempted; VMs learn names, not values
+printf 'ghp_s3cret\n' | cage secret add GITHUB_TOKEN api.github.com claude 2>/dev/null || fail "secret add failed"
+[ "$(stat -c %a "$CAGE_HOME/secrets/GITHUB_TOKEN")" = 600 ] || fail "secret file not 0600"
+out="$(cage secret list 2>&1)"
+grep -q 'GITHUB_TOKEN.*api.github.com.*(claude)' <<<"$out" || fail "secret list: $out"
+grep -q ghp_s3cret <<<"$out" && fail "secret list shows the value"
+: > "$MSB_LOG"; : > "$T/env.log"
+MSB_ENV_LOG="$T/env.log" cage up claude codex 2>/dev/null
+cl="$(grep -- '--name | cage-claude |' "$MSB_LOG")" cx="$(grep -- '--name | cage-codex |' "$MSB_LOG")"
+for want in "--secret | GITHUB_TOKEN@api.github.com" "--tls-bypass | api.telegram.org" "--tls-bypass | *.anthropic.com"; do
+  [[ "$cl" == *"$want"* ]] || fail "claude's msb run lacks '$want': $cl"
+done
+[[ "$cx" == *--secret* || "$cx" == *--tls-bypass* ]] && fail "codex got secrets or interception it doesn't need: $cx"
+grep -q ghp_s3cret "$MSB_LOG" && fail "the secret value is on msb's command line"
+grep -qx 'GITHUB_TOKEN=ghp_s3cret' "$T/env.log" || fail "msb didn't get the value in its environment: $(cat "$T/env.log")"
+grep -qx 'GITHUB_TOKEN' "$CAGE_HOME/agents/claude/secrets.names" || fail "VM not told the secret's name"
+grep -q 'api.github.com' "$CAGE_HOME/agents/claude/secrets.md" || fail "VM not told where the secret works"
+grep -rq ghp_s3cret "$CAGE_HOME/agents" && fail "the value reached a directory that's mounted into VMs"
+[ ! -s "$CAGE_HOME/agents/codex/secrets.names" ] || fail "codex was told about claude's secret"
+for bad in "github api.github.com" "PATH api.github.com" "MY_KEY *" "MY_KEY api.anthropic.com" "MY_KEY not_a_host"; do
+  # shellcheck disable=SC2086
+  if printf 'x\n' | cage secret add $bad claude 2>/dev/null; then fail "accepted: secret add $bad"; fi
+done
+cage secret rm GITHUB_TOKEN 2>/dev/null || fail "secret rm failed"
+[ ! -e "$CAGE_HOME/secrets/GITHUB_TOKEN" ] || fail "secret not removed"
+ok "secrets: kept on the host, passed to msb by environment, interception only where needed, VMs learn names only"
 
 # on a real terminal: colour, the pixel mascot on the home screen; NO_COLOR turns colour off
 if script --version 2>&1 | grep -q util-linux; then

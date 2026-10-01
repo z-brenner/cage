@@ -38,13 +38,21 @@ chmod 0440 /etc/sudoers.d/agent
 [ -r "$CONFIG_SRC" ] || { log "missing $CONFIG_SRC (run \`cage up\` on the host)"; sleep infinity; }
 install -d -m 700 -o "$U" -g "$U" "$H/.cc-connect" "$H/work"
 install -m 600 -o "$U" -g "$U" "$CONFIG_SRC" "$H/.cc-connect/config.toml"
+# cc-connect starts with a clean environment, so carry over what microsandbox set up for this VM: the
+# placeholders standing in for the user's secrets, and the CA that its TLS interception needs trusted.
+for v in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_CA_BUNDLE GIT_SSL_CAINFO \
+         $(cat /cage-config/secrets.names 2>/dev/null); do
+  [[ "$v" =~ ^[A-Z][A-Z0-9_]*$ ]] && [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
+done > /etc/cage/runtime.env
+chmod 644 /etc/cage/runtime.env
 bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
 
 log "starting cc-connect as $U"
 while true; do
   runuser -u "$U" -- env -i HOME="$H" USER="$U" LOGNAME="$U" SHELL=/bin/bash LANG=C.UTF-8 \
     PATH="/usr/local/bin:/usr/bin:/bin" TERM=xterm-256color \
-    bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; set +a; cd "$HOME/work"; exec cc-connect --config "$HOME/.cc-connect/config.toml"'
+    bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
+      cd "$HOME/work"; exec cc-connect --config "$HOME/.cc-connect/config.toml"'
   log "cc-connect exited with $?; restarting in 5s"
   sleep 5
 done

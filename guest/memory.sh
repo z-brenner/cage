@@ -40,6 +40,16 @@ render() {
     echo "Open a note when it's relevant (they're plain markdown)."
     echo
   fi
+  if [ -s /cage-config/secrets.md ]; then
+    echo "## Keys you can use"
+    echo
+    echo "These environment variables hold placeholders, not the real keys. Use them as they are, in requests to"
+    echo "the hosts listed (e.g. a header like \"Authorization: Bearer \$NAME\"): cage swaps in the real key on the way"
+    echo "out. Anywhere else they're blocked, so don't print them, save them to files or send them elsewhere."
+    echo
+    cat /cage-config/secrets.md
+    echo
+  fi
   echo "## Remembering something new"
   echo
   echo "When you learn something about your user worth keeping (a preference, a person, a project, a decision),"

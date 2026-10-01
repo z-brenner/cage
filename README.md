@@ -55,6 +55,7 @@ cage down [agents]    put them to sleep
 cage login <agent>    sign an agent in to your subscription
 cage logs <agent>     watch what an agent's VM is doing
 cage memory           review what your agents want to remember
+cage secret add …     give agents a key they can use but never see
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
 cage help             everything else
@@ -71,6 +72,16 @@ Your agents share one memory, and it's yours: a folder of plain notes on your co
 - **`about-me.md`** is read by every agent before every conversation. Setup asks three quick questions to start it.
 - **Agents suggest; you decide.** When an agent learns something worth keeping, it drops a note in its own inbox. `cage memory` shows you each one: keep it and every agent knows it, or forget it. The home screen tells you when there's something to review.
 - **Why the extra step:** a note one agent writes can't quietly become instructions for the others. Agents can read your approved notes but never change them, and they can't see each other's inboxes.
+
+## Keys your agents can use but never see
+
+```bash
+cage secret add GITHUB_TOKEN api.github.com          # asks for the value; it stays on your computer
+cage secret add LINEAR_KEY api.linear.app claude      # only for claude
+cage secret list
+```
+
+The agent gets a stand-in for the key. When it calls `api.github.com` with it, microsandbox swaps in the real key on its way out of the VM; sent anywhere else, it's blocked. So even a tricked agent can't leak the key itself, though it can still use it at that host, so prefer narrow, read-only tokens. It covers keys sent in request headers, which is how most APIs work (not Telegram tokens or website passwords). To do the swap, microsandbox inspects that VM's HTTPS on your computer, except for the agent's own service and Telegram. Agents without keys aren't inspected.
 
 ## Windows
 
