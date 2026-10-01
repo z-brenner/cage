@@ -17,7 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -S warning cage guest/*.sh test/*.sh
+        run: shellcheck -S warning cage install.sh guest/*.sh test/*.sh
+      - name: install.ps1 parses and stays ASCII (Windows PowerShell 5.1 reads files in the system code page)
+        run: |
+          if grep -nP '[^\x00-\x7F]' install.ps1; then echo "non-ASCII in install.ps1"; exit 1; fi
+          pwsh -NoProfile -Command '$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e); if ($e) { $e | ForEach-Object { $_.ToString() }; exit 1 }'
+      - name: Linux installer
+        run: test/installer.sh
       - name: host + setup tests (bash 5) + real cc-connect config validation
         run: |
           curl -fsSL https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz | tar -xz -C "$RUNNER_TEMP"
@@ -27,6 +33,29 @@ jobs:
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2
           sh -c 'apk add -q python3 curl >/dev/null && bash test/host.sh && bash test/setup.sh'
+
+  windows-installer:
+    name: windows installer (check only)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows PowerShell 5.1, as a file
+        shell: powershell
+        run: |
+          $env:CAGE_CHECK_ONLY = '1'
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch 'check only: would set up WSL 2|virtualization is turned off|needs Windows 11') { throw 'unexpected installer output' }
+      - name: PowerShell 7, the way `irm | iex` runs it (must not close the session)
+        shell: pwsh
+        run: |
+          $env:CAGE_CHECK_ONLY = '1'
+          Invoke-Expression (Get-Content -Raw .\install.ps1)
+          'still here' | Out-File still-here.txt
+      - name: the session survived
+        shell: pwsh
+        run: if (-not (Test-Path still-here.txt)) { throw 'install.ps1 ended the PowerShell session' }
 
   guest-smoke:
     name: guest smoke (${{ matrix.agent }})

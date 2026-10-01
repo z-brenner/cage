@@ -152,7 +152,7 @@ brand() { printf '%s[%s%s•%s%s|%s%s•%s%s]%s' "$C_AMBER" "$C_0" "$C_B" "$C_0"
 
 # --- config ----------------------------------------------------------------------------------------------------
 load_env() {
-  [ -f "$CAGE_ENV" ] || die "no config at $CAGE_ENV yet; run ./cage to set things up"
+  [ -f "$CAGE_ENV" ] || die "no config at $CAGE_ENV yet; run cage to set things up"
   # shellcheck disable=SC1090
   . "$CAGE_ENV"
   CAGE_AGENTS="${CAGE_AGENTS:-claude codex cursor antigravity}"
@@ -256,6 +256,87 @@ bot_dress() { # bot_dress <agent> <token>
   return 0
 }
 
+# --- managed bots (Telegram Bot API 9.6) ---------------------------------------------------------------------
+# One bot of the user's own, with BotFather's "Bot Management Mode" on, creates the agents' bots: each is one tap
+# on a t.me/newbot link, and its token comes back through the API, so nothing is copied by hand. The manager's
+# token can fetch the agents' tokens, so it stays on the host (cage.env) and never goes into a VM.
+agent_short() { case "$1" in claude) echo Claude ;; codex) echo Codex ;; cursor) echo Cursor ;; antigravity) echo Antigravity ;; esac; }
+json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p" | head -1; }   # first value of a simple field
+
+manager_ready() { local r; r="$(tg_api "$1" getMe 2>/dev/null)" || return 1; [[ "$r" == *'"can_manage_bots":true'* ]]; }
+
+key_pressed() { # key_pressed <seconds>: on a terminal, true if Enter was pressed meanwhile; otherwise just waits
+  local k
+  if [ -t 0 ]; then read -r -t "$1" k && return 0; return 1; fi
+  sleep "$1"; return 1
+}
+
+setup_manager() { # sets MANAGER_TOKEN and MANAGER_BOT; returns 1 if the user prefers pasting tokens
+  local t="${CAGE_TELEGRAM_MANAGER_TOKEN:-}" user="" i
+  if valid_token "$t" && user="$(bot_username "$t")"; then
+    ok "your cage bot: @$user"
+  else
+    say "First, one bot of your own that makes the others. In Telegram, open $(link https://t.me/BotFather @BotFather),"
+    say "send /newbot and name it anything (e.g. \"My cage\"). BotFather replies with a token."
+    while true; do
+      prompt "$(brand) token for your cage bot (stays hidden): " t secret
+      if ! valid_token "$t"; then warn "that's not a bot token (they look like 123456:ABC…)"; continue; fi
+      if user="$(bot_username "$t")"; then break; fi
+      warn "Telegram rejected that token (or is unreachable); try again"
+    done
+    set_env CAGE_TELEGRAM_MANAGER_TOKEN "$t"
+    ok "your cage bot: @$user"
+  fi
+  if ! manager_ready "$t"; then
+    say "Now let @$user make bots for you: in BotFather tap ${C_B}Open${C_0} (its mini app), pick @$user,"
+    say "open ${C_B}Bot Settings${C_0} and turn on ${C_B}Bot Management Mode${C_0}."
+    [ -t 0 ] && hint "can't find it? press Enter to paste a token for each bot instead"
+    for i in $(seq 1 200); do
+      [ "$UI" = 1 ] && printf '\r%s%s waiting for Bot Management Mode…' "$IND" "$(face claude "busy$(( i % 2 + 1 ))")" >&2
+      if manager_ready "$t"; then break; fi
+      if key_pressed 3; then [ "$UI" = 1 ] && printf '\r\033[2K' >&2; return 1; fi
+    done
+    [ "$UI" = 1 ] && printf '\r\033[2K' >&2
+    manager_ready "$t" || die "Bot Management Mode still isn't on for @$user; turn it on in BotFather, then run cage again"
+  fi
+  ok "@$user can make your agents' bots"
+  MANAGER_TOKEN="$t" MANAGER_BOT="$user" MANAGER_OFFSET=0
+}
+
+make_managed_bot() { # make_managed_bot <agent>: one tap creates the agent's bot. Sets NEW_TOKEN, OWNER_ID, OWNER_NAME
+  local a="$1" base suggest name url updates upd botid i
+  base="${MANAGER_BOT%[bB][oO][tT]}"; base="${base%_}"
+  suggest="${base:0:$((27 - ${#a}))}_${a}_bot"
+  name="$(agent_short "$a")"
+  url="https://t.me/newbot/$MANAGER_BOT/$suggest?name=$name"
+  say "$(face "$a" login) tap to create your $a bot, then confirm in Telegram: $(link "$url")"
+  [ "$UI" = 1 ] || say "  $url"
+  NEW_TOKEN=""
+  for i in $(seq 1 200); do
+    [ "$UI" = 1 ] && printf '\r%s%s waiting for you to create it…' "$IND" "$(face "$a" "busy$(( i % 2 + 1 ))")" >&2
+    updates="$(tg_api "$MANAGER_TOKEN" getUpdates "offset=$MANAGER_OFFSET&timeout=2&allowed_updates=%5B%22managed_bot%22%5D" 2>/dev/null || true)"
+    upd="$(printf '%s' "$updates" | grep -o '"update_id":[0-9]*' | head -1 | grep -o '[0-9]*$' || true)"
+    if [ -n "$upd" ]; then
+      MANAGER_OFFSET=$((upd + 1))
+      if [[ "$updates" == *'"managed_bot":'* ]]; then
+        OWNER_ID="$(printf '%s' "$updates" | sed -n 's/.*"managed_bot":{"user":{"id":\([0-9]*\).*/\1/p' | head -1)"
+        OWNER_NAME="$(printf '%s' "$updates" | sed -n 's/.*"managed_bot":{"user":{[^}]*"first_name":"\([^"]*\)".*/\1/p' | head -1)"
+        botid="$(printf '%s' "$updates" | sed -n 's/.*"bot":{"id":\([0-9]*\).*/\1/p' | head -1)"
+        if [ -n "$botid" ]; then
+          NEW_TOKEN="$(tg_api "$MANAGER_TOKEN" getManagedBotToken "user_id=$botid" 2>/dev/null | json_field result || true)"
+          valid_token "$NEW_TOKEN" && break
+        fi
+      fi
+    fi
+    if key_pressed 1; then break; fi
+  done
+  [ "$UI" = 1 ] && printf '\r\033[2K' >&2
+  valid_token "$NEW_TOKEN" || return 1
+  # Telegram-side lock: only the owner can open this bot, in addition to cage's own allowlist.
+  tg_api "$MANAGER_TOKEN" setManagedBotAccessSettings "user_id=$botid&is_access_restricted=true" >/dev/null 2>&1 || true
+  return 0
+}
+
 # Upserts KEY="VALUE" in the env file. Callers validate VALUE, so it never needs escaping.
 set_env() {
   local tmp="$CAGE_ENV.tmp.$$"
@@ -289,7 +370,7 @@ yes_no() { # yes_no <question> <default y|n>: true for yes
 render_config() {
   local a="$1" token dir cmd cmdline=""
   token="$(token_for "$a")"
-  [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "CAGE_TELEGRAM_TOKEN_$a is missing or not a bot token (./cage setup $a)"
+  [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "CAGE_TELEGRAM_TOKEN_$a is missing or not a bot token (cage setup $a)"
   [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "CAGE_TELEGRAM_ALLOW must be your numeric Telegram user id(s), comma-separated"
   [[ "$CAGE_TELEGRAM_GROUP_REPLY_ALL" =~ ^(true|false)$ ]] || die "CAGE_TELEGRAM_GROUP_REPLY_ALL must be true or false"
   dir="$CAGE_HOME/agents/$a"
@@ -376,7 +457,7 @@ wait_ready() { # wait_ready <agent>...
   local agents=("$@") a st t=0 n=$# drawn=0 all frame line start=$SECONDS
   if [ "$UI" = 1 ]; then
     printf '\033[?25l' >&2
-    trap 'printf "\033[?25h" >&2; printf "\n" >&2; say "they keep going in the background · ./cage shows how they are doing"; exit 130' INT
+    trap 'printf "\033[?25h" >&2; printf "\n" >&2; say "they keep going in the background · cage shows how they are doing"; exit 130' INT
   else
     say "waiting for ${agents[*]} to finish installing (a few minutes the first time)"
   fi
@@ -397,7 +478,7 @@ wait_ready() { # wait_ready <agent>...
     t=$((t + 1))
     if [ $((SECONDS - start)) -gt 900 ]; then
       [ "$UI" = 1 ] && printf '\033[?25h' >&2
-      die "still installing after 15 minutes; see ./cage logs <agent>"
+      die "still installing after 15 minutes; see cage logs <agent>"
     fi
     if [ "$UI" = 1 ]; then sleep 1; else sleep 5; fi
   done
@@ -479,7 +560,7 @@ check_host() {
     echo "  ${C_OK}✓${C_0} microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //' || true)"
   else
     echo "  ${C_ERR}✗${C_0} microsandbox isn't installed"
-    echo "    ${C_DIM}→ ./cage offers to install it, or: curl -fsSL https://install.microsandbox.dev | sh${C_0}"
+    echo "    ${C_DIM}→ cage offers to install it, or: curl -fsSL https://install.microsandbox.dev | sh${C_0}"
     good=1
   fi
   case "$(uname -s)/$(uname -m)" in
@@ -523,22 +604,22 @@ cmd_doctor() {
       echo "  ${C_OK}✓${C_0} only Telegram user(s) $CAGE_TELEGRAM_ALLOW can use the bots"
     else
       echo "  ${C_ERR}✗${C_0} no Telegram allowlist yet"
-      echo "    ${C_DIM}→ ./cage setup${C_0}"; good=0
+      echo "    ${C_DIM}→ cage setup${C_0}"; good=0
     fi
     for a in $CAGE_AGENTS; do
       t="$(token_for "$a")"
       if ! valid_token "$t"; then
         echo "  ${C_ERR}✗${C_0} CAGE_TELEGRAM_TOKEN_$a missing"
-        echo "    ${C_DIM}→ ./cage setup $a, or drop $a from CAGE_AGENTS${C_0}"; good=0
+        echo "    ${C_DIM}→ cage setup $a, or drop $a from CAGE_AGENTS${C_0}"; good=0
       elif u="$(bot_username "$t")"; then echo "  ${C_OK}✓${C_0} $a bot: @$u"
       else
         echo "  ${C_ERR}✗${C_0} Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"
-        echo "    ${C_DIM}→ check the token in @BotFather, then ./cage setup $a${C_0}"; good=0
+        echo "    ${C_DIM}→ check the token in @BotFather, then cage setup $a${C_0}"; good=0
       fi
     done
   else
     echo "  ${C_ERR}✗${C_0} no config at $CAGE_ENV yet"
-    echo "    ${C_DIM}→ ./cage${C_0}"; good=0
+    echo "    ${C_DIM}→ cage${C_0}"; good=0
   fi
   [ $good = 1 ] || exit 1
 }
@@ -549,12 +630,32 @@ cmd_setup() {
   cmd_init
   load_env
   resolve_agents "$@"
-  local a token user first="" first_bot=""
+  local a token user first="" first_bot="" need=() method="${CAGE_BOTS:-}" managed=0
   [ "${ONBOARDING:-0}" = 1 ] && step "3 of 5" "A Telegram bot for each agent"
+  for a in "${AGENTS[@]}"; do
+    token="$(token_for "$a")"
+    valid_token "$token" && bot_username "$token" >/dev/null && continue
+    need+=("$a")
+  done
+  # Several new bots on a terminal: let one manager bot make them (one tap each). Otherwise paste tokens.
+  if [ -z "$method" ]; then
+    if [ ${#need[@]} -ge 2 ] && [ -t 0 ]; then method="managed"; else method="paste"; fi
+  fi
+  if [ "$method" = managed ] && [ ${#need[@]} -gt 0 ]; then setup_manager && managed=1; fi
   for a in "${AGENTS[@]}"; do
     token="$(token_for "$a")"
     if valid_token "$token" && user="$(bot_username "$token")"; then
       ok "$a: keeping bot @$user"
+    elif [ $managed = 1 ] && make_managed_bot "$a" && user="$(bot_username "$NEW_TOKEN")"; then
+      token="$NEW_TOKEN"
+      set_env "CAGE_TELEGRAM_TOKEN_$a" "$token"
+      ok "$a → @$user, locked to ${OWNER_NAME:-you}"
+      bot_dress "$a" "$token"
+      if [ -n "${OWNER_ID:-}" ] && ! [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        CAGE_TELEGRAM_ALLOW="$OWNER_ID"
+        set_env CAGE_TELEGRAM_ALLOW "$OWNER_ID"
+        ALLOW_FROM_OWNER=1
+      fi
     else
       if [ -z "${SHOWN_BOTFATHER:-}" ]; then
         say "In Telegram, open $(link https://t.me/BotFather @BotFather) and send /newbot. Name it anything you like"
@@ -588,7 +689,9 @@ cmd_setup() {
   fi
 
   [ "${ONBOARDING:-0}" = 1 ] && step "4 of 5" "Who's allowed in"
-  if [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+  if [ -n "${ALLOW_FROM_OWNER:-}" ]; then
+    ok "only ${OWNER_NAME:-you} (Telegram id $CAGE_TELEGRAM_ALLOW) can talk to your agents"
+  elif [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     ok "allowlist already set: $CAGE_TELEGRAM_ALLOW"
   else
     say "Send any message to $(link "https://t.me/$first_bot" "@$first_bot") from your own Telegram."
@@ -600,17 +703,17 @@ cmd_setup() {
       [ -n "$id" ] && break
     done
     [ "$UI" = 1 ] && printf '\r\033[2K' >&2
-    [ -n "$id" ] || die "no message arrived. Set CAGE_TELEGRAM_ALLOW in $CAGE_ENV to your numeric id (ask @userinfobot), then run ./cage again"
+    [ -n "$id" ] || die "no message arrived. Set CAGE_TELEGRAM_ALLOW in $CAGE_ENV to your numeric id (ask @userinfobot), then run cage again"
     name="$(printf '%s' "$updates" | sed -n 's/.*"from":{"id":'"$id"',"is_bot":false,"first_name":"\([^"]*\)".*/\1/p' | head -1 || true)"
     yes_no "Got it from ${name:-someone} (id $id). Only this account will be able to use your bots. That's you?" y \
-      || die "not saved; run ./cage setup again"
+      || die "not saved; run cage setup again"
     set_env CAGE_TELEGRAM_ALLOW "$id"
     # Acknowledge that message so the bot doesn't answer it once cc-connect starts.
     last="$(printf '%s' "$updates" | grep -o '"update_id":[0-9]*' | tail -1 | grep -o '[0-9]*$' || true)"
     if [ -n "$last" ]; then tg_api "$first" getUpdates "offset=$((last + 1))&timeout=0" >/dev/null 2>&1 || true; fi
     ok "only ${name:-Telegram user $id} can talk to your agents"
   fi
-  [ "${ONBOARDING:-0}" = 1 ] || hint "next: ./cage up"
+  [ "${ONBOARDING:-0}" = 1 ] || hint "next: cage up"
 }
 
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -692,7 +795,7 @@ UNIT
 cmd_up() {
   load_env
   resolve_agents "$@"
-  find_msb || die "microsandbox isn't installed; run ./cage to set it up"
+  find_msb || die "microsandbox isn't installed; run cage to set it up"
   local quiet=()
   [ "$UI" = 1 ] && quiet=(-q)
   for a in "${AGENTS[@]}"; do
@@ -718,7 +821,7 @@ cmd_up() {
     wait_ready "${AGENTS[@]}"
     [ "${ONBOARDING:-0}" = 1 ] || next_steps
   else
-    say "they're installing in the background (about a minute) · ./cage status"
+    say "they're installing in the background (about a minute) · cage status"
   fi
 }
 
@@ -727,10 +830,10 @@ cmd_login() {
   local a="${1:-}" bot
   [ -n "$a" ] || die "usage: cage login <agent>"
   check_agent "$a"
-  exists "$a" || die "$a has no cage yet; run ./cage up $a"
+  exists "$a" || die "$a has no cage yet; run cage up $a"
   refresh_running
   case "$(probe "$a")" in
-    asleep) die "$a is asleep; wake it up first: ./cage up $a" ;;
+    asleep) die "$a is asleep; wake it up first: cage up $a" ;;
     installing) wait_ready "$a" ;;
   esac
   printf '\n  %s  %ssign %s in to %s%s\n' "$(face "$a" login)" "$C_B" "$a" "$(agent_plan "$a")" "$C_0" >&2
@@ -742,7 +845,7 @@ cmd_login() {
     bot="$(bot_for "$a")"
     ok "$a is signed in${bot:+ · say hi to $(link "https://t.me/$bot" "@$bot")}"
   else
-    die "$a still isn't signed in; run ./cage login $a to try again"
+    die "$a still isn't signed in; run cage login $a to try again"
   fi
 }
 
@@ -757,17 +860,17 @@ status_rows() { # one row per agent; records each state in STATES ("agent:state 
     bot="$(bot_for "$a")"
     case "$st" in
       ready) label="${C_OK}ready${C_0}        "; detail="${bot:+$(link "https://t.me/$bot" "t.me/$bot")}" ;;
-      login) label="${C_AMBER}needs a login${C_0}"; detail="→ ./cage login $a" ;;
-      installing) label="installing   "; detail="→ ./cage logs $a" ;;
-      asleep) label="${C_DIM}asleep${C_0}       "; detail="→ ./cage up $a" ;;
-      *) label="${C_DIM}no cage yet${C_0}  "; detail="→ ./cage up $a" ;;
+      login) label="${C_AMBER}needs a login${C_0}"; detail="→ cage login $a" ;;
+      installing) label="installing   "; detail="→ cage logs $a" ;;
+      asleep) label="${C_DIM}asleep${C_0}       "; detail="→ cage up $a" ;;
+      *) label="${C_DIM}no cage yet${C_0}  "; detail="→ cage up $a" ;;
     esac
     case "$st" in ready) ;; *) detail="${C_DIM}${detail}${C_0}" ;; esac
     printf '  %s  %-12s %s  %s\n' "$(face "$a" "$st")" "$a" "$label" "$detail"
   done
   if is_wsl; then
     if keepalive_running; then printf '  %s%s  WSL keepalive running%s\n' "$C_DIM" "     " "$C_0"
-    else printf '  %s%s  WSL keepalive not running → ./cage up%s\n' "$C_DIM" "     " "$C_0"; fi
+    else printf '  %s%s  WSL keepalive not running → cage up%s\n' "$C_DIM" "     " "$C_0"; fi
   fi
 }
 
@@ -775,8 +878,8 @@ next_steps() { # one friendly line about what to do next, based on STATES
   local s
   [ -n "$STATES" ] || status_rows >/dev/null
   case "$STATES" in
-    *:none*|*:asleep*) hint "wake them up: ./cage up" ;;
-    *:login*) for s in $STATES; do case "$s" in *:login) hint "next: ./cage login ${s%%:*}"; break ;; esac; done ;;
+    *:none*|*:asleep*) hint "wake them up: cage up" ;;
+    *:login*) for s in $STATES; do case "$s" in *:login) hint "next: cage login ${s%%:*}"; break ;; esac; done ;;
     *:installing*) hint "still installing; they'll be ready in a minute" ;;
     *) printf '\n  %s♥%s all caged and happy. Say hi on Telegram.\n' "$C_PINK" "$C_0" >&2 ;;
   esac
@@ -831,7 +934,7 @@ install_msb() {
     warn "the installer couldn't look up the latest release (GitHub rate limit?); installing v0.7.5 instead"
     MSB_VERSION=v0.7.5 "$CAGE_ROOT/test/install-msb-pinned.sh" >/dev/null 2>&1 || die "couldn't install microsandbox; see https://docs.microsandbox.dev"
   fi
-  find_msb || die "microsandbox installed, but msb isn't where expected; open a new terminal and run ./cage again"
+  find_msb || die "microsandbox installed, but msb isn't where expected; open a new terminal and run cage again"
   ok "microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //')"
 }
 
@@ -856,10 +959,10 @@ cmd_onboard() {
   if [ "$(uname -s)" = Linux ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
     if ! fix_kvm; then
       check_host >&2 || true
-      die "fix the line above, then run ./cage again"
+      die "fix the line above, then run cage again"
     fi
   fi
-  if ! host_out="$(check_host)"; then printf '%s\n' "$host_out" >&2; die "fix the lines above, then run ./cage again"; fi
+  if ! host_out="$(check_host)"; then printf '%s\n' "$host_out" >&2; die "fix the lines above, then run cage again"; fi
   printf '%s\n' "$host_out" >&2
 
   step "2 of 5" "Your subscriptions"
@@ -867,7 +970,7 @@ cmd_onboard() {
   for a in $KINDS; do
     if yes_no "$(face "$a" ready) $(printf '%-12s' "$a") $(agent_plan "$a")?" n; then picked+=("$a"); fi
   done
-  [ ${#picked[@]} -gt 0 ] || die "pick at least one; run ./cage again when you're ready"
+  [ ${#picked[@]} -gt 0 ] || die "pick at least one; run cage again when you're ready"
 
   cmd_setup "${picked[@]}"
 
@@ -876,7 +979,7 @@ cmd_onboard() {
   for a in "${picked[@]}"; do
     refresh_running
     [ "$(probe "$a")" = ready ] && continue
-    ( cmd_login "$a" ) || warn "no problem, sign $a in later: ./cage login $a"
+    ( cmd_login "$a" ) || warn "no problem, sign $a in later: cage login $a"
   done
 
   printf '\n' >&2
@@ -886,7 +989,7 @@ cmd_onboard() {
   status_rows >&2
   printf '\n' >&2
   if yes_no "Wake them up automatically when you log in?" y; then cmd_autostart on; fi
-  say "${C_DIM}Run ./cage anytime to see how they're doing. Now say hi on Telegram.${C_0}"
+  say "${C_DIM}Run cage anytime to see how they're doing. Now say hi on Telegram.${C_0}"
   printf '\n' >&2
 }
 
@@ -905,7 +1008,7 @@ cmd_home() {
 usage() {
   row() { printf '  %-24s %s\n' "$1" "$2"; }
   printf '\n  %s %scage%s  %syour AI agents, each in its own little cage%s\n\n' "$(brand)" "$C_B" "$C_0" "$C_DIM" "$C_0"
-  row "./cage" "set everything up, or see how your agents are doing"
+  row "cage" "set everything up, or see how your agents are doing"
   printf '\n  %severy day%s\n' "$C_DIM" "$C_0"
   row "  status" "how everyone's doing"
   row "  up [agents]" "wake agents up (a fresh VM, same login and files)"
