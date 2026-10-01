@@ -104,6 +104,9 @@ Answers from `/all` and stand-ins are read-only and don't use your connected app
 ## Chat in the app
 
 Every agent has a chat in cage's app, on its page: no bot or phone needed.
+
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chat-dark.png"><img src="assets/chat.png" width="760" alt="Chatting with Claude Code in cage's app: you send an NDA, it flags three issues and sends back a redline, then asks before emailing it, with Allow and Deny buttons"></picture></p>
+
 - **Files go both ways.** Attach files with the paperclip, drop them on the chat, or paste a picture. Files the agent makes for you show up in the chat, and the **Files** tab lists them, along with the agent's own work folder: download anything from it, or upload files for it to use.
 - **Answers stream in** as the agent writes them, and **starters** on an empty chat show what to ask.
 - **Asking first:** with **Ask before acting in your apps** on (`cage approve claude on`), Claude Code asks before it sends an email, books a meeting or changes anything in an app you connected, with Allow and Deny buttons; work on its own computer goes ahead. Codex, Cursor and Antigravity can only ask before every action.

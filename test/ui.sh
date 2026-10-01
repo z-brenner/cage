@@ -22,7 +22,7 @@ case "$cmd" in
   exec) case "$*" in
     *cage:ready*) echo cage:ready ;;
     *strict-mcp-config*) echo 'Paris, says **the stub**' ;;
-    *skip-git-repo-check*) echo 'Lyon, says the other stub' ;;
+    *skip-git-repo-check*) echo 'Lyon, says *the other* stub (snake_case_ok)' ;;
     *"auth login"*) printf 'Browser didn'"'"'t open? Use the url below to sign in (c to copy)\n\n\033[1mhttps://claude.ai/oauth/authorize?code=true&client_id=9d1c&state=xyz\033[0m\n\nPaste code here if prompted > '
       read -r c; [ "$c" = "CODE-123" ] && echo "Login successful." ;;
   esac ;;

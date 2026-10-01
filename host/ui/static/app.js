@@ -61,15 +61,16 @@ function icon (name, cls) { // a Lucide icon (vendor/icons.js)
   }
   return svg
 }
-const LINK_RE = /(\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|`[^`\n]+`|\*\*[^*\n]+\*\*|https?:\/\/[^\s<>"')\]]+)/g
-function inline (text, plain) { // links (and, in answers, `code`, **bold**, [text](url)) made real
+const LINK_RE = /(\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|`[^`\n]+`|\*\*[^*\n]+\*\*|(?<![\w*])\*(?![\s*])[^*\n]+?(?<![\s*])\*(?![\w*])|(?<!\w)_(?![\s_])[^_\n]+?(?<![\s_])_(?!\w)|https?:\/\/[^\s<>"')\]]+)/g
+function inline (text, plain) { // links (and, in answers, `code`, **bold**, *italic*, [text](url)) made real
   const out = []
   let last = 0
   for (const m of text.matchAll(plain ? /(https?:\/\/[^\s<>"')\]]+)/g : LINK_RE)) {
     const t = m[0]
     if (m.index > last) out.push(text.slice(last, m.index))
     if (t[0] === '`') out.push(h('code', {}, t.slice(1, -1)))
-    else if (t[0] === '*') out.push(h('strong', {}, t.slice(2, -2)))
+    else if (t.startsWith('**')) out.push(h('strong', {}, t.slice(2, -2)))
+    else if (t[0] === '*' || t[0] === '_') out.push(h('em', {}, t.slice(1, -1)))   // *italic* or _italic_
     else if (t[0] === '[') {
       const [, label, url] = /^\[([^\]]+)\]\((.+)\)$/.exec(t)
       out.push(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, label))
