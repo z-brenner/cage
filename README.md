@@ -4,9 +4,9 @@
 
 <p align="center"><b>Your AI agents, each in its own little cage.</b><br>
 Claude Code, Codex, Cursor and Antigravity on your own subscriptions.<br>
-Each one lives in a private microVM and talks to you as a Telegram bot.</p>
+Each one lives in a private microVM and talks to you on Telegram, Slack, Discord or WhatsApp.</p>
 
-<p align="center"><img src="assets/screenshot.png" width="720" alt="The cage home screen: the mascot, then one row per agent showing its state as a little face"></p>
+<p align="center"><img src="assets/app.png" width="720" alt="cage in the browser: one card per agent with its state, chat apps and buttons to wake it, sign it in or see its logs"></p>
 
 ## Get started
 
@@ -32,8 +32,6 @@ That's the whole setup. cage then opens in your browser and walks you through ev
 
 After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
 
-<p align="center"><img src="assets/app.png" width="720" alt="cage in the browser: one card per agent with its state, chat apps and buttons to wake it, sign it in or see its logs"></p>
-
 The app does everything:
 - signs agents in;
 - adds chats, apps, website sign-ins and keys;
@@ -43,6 +41,8 @@ The app does everything:
 Each action runs cage itself and shows its questions as a conversation. Vendor sign-ins open in a terminal view right in the page. The app only listens on your own computer and needs the private link it opened with.
 
 Prefer a terminal? Type `cage` instead; every command below works there too (`cage ui` opens the app).
+
+<p align="center"><img src="assets/screenshot.png" width="600" alt="cage in a terminal: the mascot, then one row per agent showing its state as a little face"></p>
 
 <p align="center"><img src="assets/avatars.png" width="440" alt="The four bot avatars: claude in peach, codex in mint, cursor in sky blue, antigravity in lilac"></p>
 
