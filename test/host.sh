@@ -19,7 +19,16 @@ cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; do
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
-if [ "$cmd" = exec ]; then case "$*" in *cage:ready*) echo cage:ready ;; esac; fi   # every agent is signed in
+if [ "$cmd" = exec ]; then
+  vmname=""; for x in "$@"; do case "$x" in cage-*) vmname="$x"; break ;; esac; done
+  case "$*" in
+    *cage:ready*) echo cage:ready ;;   # every agent is signed in
+    *"cc-connect send"*)               # a message into a chat: record it (the reply file is in that agent's /cage-config)
+      for x in "$@"; do case "$x" in /cage-config/replies/*) f="$CAGE_HOME/agents/${vmname#cage-}/${x#/cage-config/}" ;; esac; done
+      { printf '%s %s <- ' "$vmname" "${!#}"; cat "$f"; printf '\n---\n'; } >> "$MSB_SENT" ;;
+    *--disallowedTools*|*"codex exec"*|*"cursor-agent --print"*|*"agy -p"*) printf 'answer from %s to: %s' "$vmname" "${!#}" ;;
+  esac
+fi
 if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; esac; exit 0; fi
 if [ "$cmd" = volume ]; then   # named volumes are folders under $MSB_VOLUMES
   case "$1" in
@@ -319,8 +328,83 @@ unset MSB_SYSLOG
 cage secret rm NET_KEY 2>/dev/null
 cage network open </dev/null 2>/dev/null
 cage up claude 2>/dev/null
-if grep -q '^  allow:' "$CAGE_HOME/msb/claude.yaml"; then fail "open network still has an allow list"; fi
+if grep -q '^  allow:' "$CAGE_HOME/msb/claude.yaml" 2>/dev/null; then fail "open network still has an allow list"; fi
 ok "security events: harvested once, flagged on the home screen until seen, grouped in cage security"
+
+# --- /all, stand-ins when an agent is out of quota, voice notes
+cage ask-all on </dev/null 2>/dev/null
+cage fallback claude codex </dev/null 2>/dev/null
+if cage fallback claude claude </dev/null 2>/dev/null; then fail "an agent stood in for itself"; fi
+cage voice on </dev/null 2>/dev/null
+: > "$MSB_LOG"
+cage up claude codex 2>/dev/null
+t="$CAGE_HOME/agents/claude/cc-connect.toml"
+[ "$(grep -c '^command = "/bin/bash /cage/hook.sh ask fallback"$' "$t")" = 3 ] || fail "claude's hooks: $(grep -A4 hooks "$t")"
+grep -q '^name = "all"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "no /all command"
+grep -q '^base_url = "http://127.0.0.1:8178/v1"$' "$t" && grep -q '^provider = "openai"$' "$t" || fail "voice: no local speech-to-text"
+grep -q '^VOICE_MODE=local$' "$CAGE_HOME/agents/claude/voice.env" || fail "voice.env"
+grep -q '^command = "/bin/bash /cage/hook.sh ask"$' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex has no stand-in, only /all"
+grep '^run | .*--name | cage-claude |' "$MSB_LOG" | grep -q -- "--mount-dir | $CAGE_HOME/outbox/claude:/cage-outbox" || fail "no outbox mount"
+if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
+  out="$(HOME="$T/cc-relay" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$t" 2>&1 || true)"
+  grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"
+fi
+ok "/all, stand-ins and voice notes: hooks, the /all command, local speech-to-text, the outbox mount"
+
+# guest/hook.sh as cc-connect runs it: everything in environment variables
+O="$CAGE_HOME/outbox/claude"
+hook() { env -i HOME="$T/vmhome" PATH="$PATH" CAGE_OUTBOX="$O" CC_HOOK_SESSION_KEY="telegram:111:111" "$@" bash "$ROOT/guest/hook.sh" ask fallback; }
+hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="hi there"
+hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="Hello! How can I help?"
+hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="/all what's the capital of France? \$(touch $T/pwned)"
+[ "$(ls "$O" | wc -l)" = 1 ] || fail "/all didn't leave one request: $(ls -la "$O")"
+[ "$(cat "$O"/*/kind)" = ask ] && [ "$(cat "$O"/*/text)" = "what's the capital of France? \$(touch $T/pwned)" ] || fail "ask request: $(cat "$O"/*/text)"
+hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="$(printf 'A long answer about rate limits. %.0s' $(seq 30)) limit reached"
+[ "$(ls "$O" | wc -l)" = 1 ] || fail "a long answer mentioning limits counted as a limit notice"
+hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="5-hour limit reached ∙ resets 3pm"
+[ "$(ls "$O" | wc -l)" = 2 ] || fail "a limit notice didn't leave a stand-in request"
+grep -lx fallback "$O"/*/kind >/dev/null || fail "no fallback request"
+f="$(dirname "$(grep -lx fallback "$O"/*/kind)")/text"
+grep -q '^User: hi there$' "$f" && grep -q '^Agent: Hello! How can I help?$' "$f" && grep -q "^User: what's the capital" "$f" || fail "stand-in context: $(cat "$f")"
+ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't"
+
+# cage relays them: other awake agents answer into the asking chat; nothing in a request is ever run
+printf 'cage-claude\ncage-codex\n' > "$T/running"
+export MSB_RUNNING="$T/running" MSB_SENT="$T/sent"
+: > "$MSB_SENT"
+cage _outbox 2>/dev/null
+grep -q "^cage-claude telegram:111:111 <- ↪ Codex:" "$MSB_SENT" || fail "no /all answer delivered: $(cat "$MSB_SENT")"
+grep -qF "answer from cage-codex to: what's the capital of France? \$(touch $T/pwned)" "$MSB_SENT" || fail "question changed on the way: $(cat "$MSB_SENT")"
+[ -z "$(ls -A "$O")" ] || fail "requests left in the outbox"
+rm -f "$CAGE_HOME/outbox/.last-claude"
+hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="You've hit your limit · resets 3pm"
+cage _outbox 2>/dev/null
+grep -q "Claude Code is out of quota for now, so Codex answered:" "$MSB_SENT" || fail "no stand-in answer: $(cat "$MSB_SENT")"
+grep -q "Reply to the user's last message" "$MSB_SENT" && grep -q "^User: hi there" "$MSB_SENT" || fail "stand-in prompt lacks the conversation"
+[ ! -e "$T/pwned" ] || fail "something in a request was run"
+ok "the relay: /all answers and stand-in answers land in the asking chat; request text is never run"
+
+# a hostile outbox: links, a FIFO, a bad session key; none of it is read or sent
+: > "$MSB_SENT"; rm -f "$CAGE_HOME/outbox/.last-claude" "$CAGE_HOME/outbox/.seen"
+mkdir "$O/1-1-1" && echo ask > "$O/1-1-1/kind" && echo telegram:1:1 > "$O/1-1-1/session" && ln -s /etc/hostname "$O/1-1-1/text"
+mkdir "$O/2-2-2" && echo ask > "$O/2-2-2/kind" && echo 'telegram:1:1; rm -rf ~' > "$O/2-2-2/session" && echo hi > "$O/2-2-2/text"
+mkdir "$O/3-3-3" && echo ask > "$O/3-3-3/kind" && echo telegram:1:1 > "$O/3-3-3/session" && mkfifo "$O/3-3-3/text"
+mkdir -p "$T/elsewhere/4-4-4" && echo ask > "$T/elsewhere/4-4-4/kind" && echo telegram:1:1 > "$T/elsewhere/4-4-4/session" && echo secret-file > "$T/elsewhere/4-4-4/text"
+ln -s "$T/elsewhere/4-4-4" "$O/4-4-4"
+timeout 30 "$ROOT/cage" _outbox 2>/dev/null || fail "the outbox hung or failed"
+[ ! -s "$MSB_SENT" ] || fail "a hostile request got through: $(cat "$MSB_SENT")"
+[ -z "$(ls -A "$O")" ] && [ -f "$T/elsewhere/4-4-4/text" ] || fail "hostile entries left behind, or a link followed"
+ok "a hostile outbox (links, a FIFO, a bad session key) is cleared without reading through it or sending anything"
+
+out="$(cage ask "is it raining?" claude codex 2>/dev/null)"
+grep -q "answer from cage-claude to: is it raining?" <<<"$out" && grep -q "answer from cage-codex to: is it raining?" <<<"$out" || fail "cage ask: $out"
+ok "cage ask: every awake agent answers on this computer"
+
+cage ask-all off </dev/null 2>/dev/null; cage fallback claude off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+if grep -q 'hooks\|^\[speech\]' "$t" || grep -q 'cage-outbox' "$MSB_LOG" || [ -e "$CAGE_HOME/agents/claude/voice.env" ]; then fail "still on after turning it off"; fi
+unset MSB_RUNNING MSB_SENT
 
 # --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
 V="$T/volumes/cage-claude-home"

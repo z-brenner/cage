@@ -453,6 +453,29 @@ token = \"$(cvar WHATSAPP_TOKEN "$a")\"
   # (connector_plan runs first), approve them.
   if [ "$a" = cursor ] && [ -s "$dir/connectors.list" ]; then cmd="$cmd --approve-mcps"; fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
+  # /all and stand-ins: cc-connect's hooks only notify, so guest/hook.sh leaves requests for cage (see outbox_process)
+  local features extras=""
+  features="$(agent_features "$a")"
+  if [ -n "$features" ]; then
+    for v in message.received message.sent error; do
+      extras="$extras
+[[hooks]]
+event = \"$v\"
+type = \"command\"
+command = \"/bin/bash /cage/hook.sh $features\"
+timeout = 10
+"
+    done
+  fi
+  if [[ " $features " == *" ask "* ]]; then
+    extras="$extras
+[[commands]]
+name = \"all\"
+description = \"Ask all your agents (each answers here)\"
+prompt = \"{{args}}\"
+"
+  fi
+  extras="$extras$(voice_config "$a")"
   (
     umask 077
     cat > "$dir/cc-connect.toml" <<EOF2
@@ -461,7 +484,8 @@ data_dir = "/home/agent/.cc-connect/data"
 
 [log]
 level = "info"
-$bridge
+$bridge$extras
+
 [[projects]]
 name = "$a"
 admin_from = "$admins"
@@ -1007,7 +1031,9 @@ oauth_refresh_all() { # oauth_refresh_all <seconds>: renews the sign-ins that ex
 oauth_any() { compgen -G "$OAUTH/*.json" >/dev/null 2>&1; }
 refresher_pattern() { echo "$CAGE_ROOT/cage _refresh"; }
 refresher_start() { # the background helper: renews sign-ins, collects security events (strict network logs a lot)
-  oauth_any || [ "${CAGE_NETWORK:-open}" = strict ] || return 0
+  local a relay=""
+  for a in ${CAGE_AGENTS:-}; do [ -z "$(agent_features "$a")" ] || relay=1; done
+  oauth_any || [ "${CAGE_NETWORK:-open}" = strict ] || [ -n "$relay" ] || return 0
   pgrep -f -- "$(refresher_pattern)" >/dev/null 2>&1 && return 0
   if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
   else nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
@@ -1857,6 +1883,11 @@ cmd_up() {
     render_config "$a"
     secret_plan "$a"
     events_harvest "$a"   # its runtime log goes with the old VM
+    local outbox=()
+    if [ -n "$(agent_features "$a")" ]; then
+      mkdir -p "$OUTBOX/$a" && chmod 700 "$OUTBOX" && chmod 777 "$OUTBOX/$a"   # written by the VM's agent user
+      outbox=(--mount-dir "$OUTBOX/$a:/cage-outbox")
+    fi
     local netlog=()
     if [ "${CAGE_NETWORK:-open}" = strict ]; then netlog=(--log-level debug); fi   # blocked hosts are logged at debug
     [ "$UI" = 1 ] && printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2
@@ -1873,7 +1904,7 @@ cmd_up() {
       --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
       --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
       --mount-dir "$BRAIN/memory:/memory:ro" \
-      --mount-dir "$BRAIN/inbox/$a:/memory-inbox" \
+      --mount-dir "$BRAIN/inbox/$a:/memory-inbox" ${outbox[@]+"${outbox[@]}"} \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
       ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
@@ -2010,6 +2041,246 @@ cmd_destroy() {
   esac
 }
 
+# --- asking several agents, standing in for one that's out of quota, voice notes ---------------------------------
+# The VMs can't reach each other, so cage relays on your computer. In an agent's chat, `/all <question>` (or
+# `@all …`) is answered by that agent as usual, and its hook (guest/hook.sh) leaves a request in its outbox: cage
+# asks your other agents and posts their answers into the same chat. When an agent replies with a usage-limit
+# notice, its hook leaves the last few turns instead, and the agent you picked (`cage fallback claude codex`)
+# answers in its place. Both are off until you turn them on: they let one agent's VM put a question to another.
+# Asked agents answer read-only and without your connected apps.
+OUTBOX="$CAGE_HOME/outbox"
+ASK_TIMEOUT="${CAGE_ASK_TIMEOUT:-300}"
+
+agent_features() { # agent_features <agent>: what its hook does ("ask", "fallback")
+  local f=""
+  [ "${CAGE_ASK_ALL:-off}" = on ] && f="ask"
+  [ -n "$(cvar FALLBACK "$1")" ] && f="$f${f:+ }fallback"
+  printf '%s' "$f"
+}
+
+ask_script() { # the agent's CLI answering one question ($1): read-only, no apps, plain text out
+  case "$1" in
+    claude) echo 'exec claude -p --strict-mcp-config --disallowedTools "Bash Edit MultiEdit Write NotebookEdit Read Glob Grep LS Task Agent" -- "$1"' ;;
+    codex) echo 'exec codex exec --skip-git-repo-check --sandbox read-only --color never -- "$1" 2>/dev/null' ;;
+    cursor) echo 'exec cursor-agent --print --output-format text --mode ask -- "$1"' ;;
+    antigravity) echo 'exec agy -p "$1"' ;;
+  esac
+}
+
+ask_agent() { # ask_agent <agent> <question>: its answer on stdout (empty if it couldn't)
+  timeout "$ASK_TIMEOUT" "$MSB" exec --no-tty -u agent -e HOME=/home/agent -w /home/agent/work "$(vm "$1")" -- \
+    bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
+      PATH="/usr/local/bin:/usr/bin:/bin"; '"$(ask_script "$1")" _ "$2" 2>/dev/null | head -c 12000
+}
+
+deliver() { # deliver <agent> <session key> <text>: a message into that chat, from the agent's own bot
+  local a="$1" id f
+  id="$(date +%s)-$$-$RANDOM"
+  f="$CAGE_HOME/agents/$a/replies/$id.txt"   # in the VM's read-only /cage-config, which only cage writes
+  mkdir -p "$(dirname "$f")"
+  printf '%s' "$3" > "$f"
+  "$MSB" exec --no-tty "$(vm "$a")" -- bash -c \
+    'exec /usr/local/bin/cc-connect send --data-dir /home/agent/.cc-connect/data -p "$2" -s "$3" --stdin < "$1"' \
+    _ "/cage-config/replies/$id.txt" "$a" "$2" >/dev/null 2>&1 || true
+  rm -f "$f"
+}
+
+agent_awake() { [[ "$RUNNING" == *" $(vm "$1") "* ]]; }
+
+ask_dispatch() { # ask_dispatch <from> <session key> <question>: the other awake agents answer in <from>'s chat
+  local from="$1" key="$2" q="$3" a
+  refresh_running
+  for a in $CAGE_AGENTS; do
+    [ "$a" != "$from" ] && agent_awake "$a" || continue
+    ( ans="$(ask_agent "$a" "$q")"
+      [ -n "$ans" ] || ans="(no answer: it may be signed out, busy, or out of quota)"
+      deliver "$from" "$key" "↪ $(agent_name "$a"):"$'\n\n'"$ans" ) &
+  done
+  wait
+}
+
+fallback_dispatch() { # fallback_dispatch <from> <to> <session key> <recent turns>
+  local from="$1" to="$2" ans q
+  refresh_running
+  agent_awake "$to" || { deliver "$from" "$3" "↪ $(agent_name "$from") is out of quota, and $(agent_name "$to") is asleep (cage up $to)."; return 0; }
+  q="$(agent_name "$from"), the user's other AI agent, is out of quota right now, so you are answering in its place. \
+The recent conversation, oldest first (\"Agent\" is $(agent_name "$from")):
+
+$4
+
+Reply to the user's last message."
+  ans="$(ask_agent "$to" "$q")"
+  [ -n "$ans" ] || ans="(no answer: it may be signed out, busy, or out of quota too)"
+  deliver "$from" "$3" "↪ $(agent_name "$from") is out of quota for now, so $(agent_name "$to") answered:"$'\n\n'"$ans"
+}
+
+outbox_read() { # outbox_read <file> <max bytes>: a regular file that is really at that path (never via a link)
+  # In a child with a time limit (a FIFO would block), read-only (never creates anything), and checked after
+  # opening: the open file must resolve to exactly this path, so a swapped-in link can't point it elsewhere.
+  timeout 2 bash -c 'exec 9<"$1" || exit 1
+    [ "$(readlink /dev/fd/9)" = "$1" ] && [ -f /dev/fd/9 ] || exit 1
+    head -c "$2" <&9' _ "$1" "$2" 2>/dev/null
+}
+
+outbox_process() { # handle what the agents' hooks left; everything in an outbox is untrusted (the VM wrote it)
+  local a base d id kind key text to now h last
+  now="$(date +%s)"
+  for a in $CAGE_AGENTS; do
+    [ -n "$(agent_features "$a")" ] || continue
+    base="$(cd "$OUTBOX/$a" 2>/dev/null && pwd -P)" || continue
+    for d in "$base"/*; do
+      id="$(basename "$d")"
+      [[ "$id" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]] || continue
+      if [ -L "$d" ] || [ ! -d "$d" ]; then rm -f "$d"; continue; fi
+      kind="$(outbox_read "$base/$id/kind" 16 || true)"
+      key="$(outbox_read "$base/$id/session" 256 || true)"
+      text="$(outbox_read "$base/$id/text" 16000 || true)"
+      rm -rf "${base:?}/$id"
+      [[ "$key" =~ ^[A-Za-z0-9:_@.+=-]{1,256}$ ]] && [ -n "$text" ] || continue
+      # at most one request per agent every 5 seconds, and the same question once (several bots in one group)
+      last="$(cat "$OUTBOX/.last-$a" 2>/dev/null || echo 0)"
+      [ $((now - ${last:-0})) -ge 5 ] || continue
+      h="$(printf '%s' "$kind$text" | cksum | cut -d' ' -f1)"
+      if grep -q " $h$" "$OUTBOX/.seen" 2>/dev/null && [ $((now - $(grep " $h$" "$OUTBOX/.seen" | tail -n 1 | cut -d' ' -f1))) -lt 120 ]; then continue; fi
+      echo "$now $h" >> "$OUTBOX/.seen"
+      echo "$now" > "$OUTBOX/.last-$a"
+      case "$kind" in
+        ask) [ "${CAGE_ASK_ALL:-off}" = on ] && ( ask_dispatch "$a" "$key" "$text" ) & ;;
+        fallback) to="$(cvar FALLBACK "$a")"
+          if [ -n "$to" ] && [ "$to" != "$a" ]; then ( fallback_dispatch "$a" "$to" "$key" "$text" ) & fi ;;
+      esac
+    done
+  done
+  if [ -f "$OUTBOX/.seen" ] && [ "$(wc -l < "$OUTBOX/.seen")" -gt 200 ]; then tail -n 100 "$OUTBOX/.seen" > "$OUTBOX/.seen.tmp" && mv "$OUTBOX/.seen.tmp" "$OUTBOX/.seen"; fi
+}
+
+cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
+  load_env
+  find_msb || die "microsandbox isn't installed: run cage"
+  local q="${1:-}" a n=0 tmp
+  [ -n "$q" ] || die "usage: cage ask \"<question>\" [agents]"
+  shift
+  local who=("$@")
+  [ $# -gt 0 ] || read -r -a who <<<"$CAGE_AGENTS"
+  refresh_running
+  tmp="$(mktemp -d)"
+  for a in "${who[@]}"; do
+    check_agent "$a"
+    agent_awake "$a" || { warn "$a is asleep (cage up $a)"; continue; }
+    n=$((n + 1))
+    ( ask_agent "$a" "$q" > "$tmp/$a" ) &
+  done
+  [ "$n" -gt 0 ] || { rm -rf "$tmp"; die "no agent is awake: cage up"; }
+  say "asking $n agent$([ "$n" = 1 ] || echo s)… (up to $((ASK_TIMEOUT / 60)) min)"
+  wait
+  for a in "${who[@]}"; do
+    [ -f "$tmp/$a" ] || continue
+    printf '\n  %s %s%s%s\n' "$(face "$a" ready)" "$C_B" "$(agent_name "$a")" "$C_0"
+    if [ -s "$tmp/$a" ]; then sed 's/^/    /' "$tmp/$a"; else printf '    %s(no answer: signed out, busy, or out of quota?)%s\n' "$C_DIM" "$C_0"; fi
+  done
+  printf '\n'
+  rm -rf "$tmp"
+}
+
+cmd_ask_all() { # cage ask-all [on|off]
+  load_env
+  case "${1:-}" in
+    on|off) set_env CAGE_ASK_ALL "$1"; CAGE_ASK_ALL="$1" ;;
+    "") say "/all in chat: ${C_B}${CAGE_ASK_ALL:-off}${C_0}"; hint "cage ask-all on|off · from here: cage ask \"<question>\""; return 0 ;;
+    *) die "usage: cage ask-all on|off" ;;
+  esac
+  if [ "$1" = on ]; then
+    ok "in any agent's chat, /all <question> (or @all …) gets your other agents' answers there too"
+    hint "they answer read-only and without your connected apps; this lets one agent's VM put questions to the others"
+  else
+    ok "/all is off"
+  fi
+  features_apply
+}
+
+cmd_fallback() { # cage fallback [<agent> <to>|<agent> off]
+  load_env
+  local a="${1:-}" to="${2:-}"
+  if [ -z "$a" ]; then
+    for a in $CAGE_AGENTS; do
+      to="$(cvar FALLBACK "$a")"
+      say "$a out of quota → ${to:-${C_DIM}nobody (cage fallback $a <agent>)${C_0}}"
+    done
+    return 0
+  fi
+  check_agent "$a"
+  [ -n "$to" ] || die "usage: cage fallback $a <agent>|off"
+  if [ "$to" = off ]; then
+    set_env "CAGE_FALLBACK_$a" ""; printf -v "CAGE_FALLBACK_$a" '%s' ""
+    ok "$a has no stand-in"
+  else
+    check_agent "$to"
+    [ "$to" != "$a" ] || die "an agent can't stand in for itself"
+    set_env "CAGE_FALLBACK_$a" "$to"; printf -v "CAGE_FALLBACK_$a" '%s' "$to"
+    ok "when $a is out of quota, $(agent_name "$to") answers your message in $a's chat"
+    hint "it sees the last few messages, answers read-only and without your connected apps"
+  fi
+  features_apply
+}
+
+cmd_voice() { # cage voice [on [local|groq]|off]
+  load_env
+  local mode="${2:-local}" key=""
+  case "${1:-}" in
+    "") say "voice notes: ${C_B}${CAGE_VOICE:-off}${C_0}${CAGE_VOICE_MODEL:+ (Whisper $CAGE_VOICE_MODEL)}"
+        hint "cage voice on (private, on each agent's VM) · cage voice on groq (faster, Groq's servers) · cage voice off"; return 0 ;;
+    off) set_env CAGE_VOICE off; CAGE_VOICE=off; ok "voice notes are off" ;;
+    on)
+      case "$mode" in
+        local) ;;
+        groq)
+          if [ ! -f "$SECRETS/VOICE_GROQ_KEY" ]; then
+            say "A Groq API key (free tier available): $(link https://console.groq.com/keys)"
+            prompt "Groq API key: " key secret
+            [[ "$key" =~ ^gsk_[A-Za-z0-9]{20,}$ ]] || die "that doesn't look like a Groq key (gsk_…)"
+            secret_save VOICE_GROQ_KEY api.groq.com all "$key" voice
+          fi ;;
+        *) die "usage: cage voice on [local|groq]" ;;
+      esac
+      set_env CAGE_VOICE "$mode"; CAGE_VOICE="$mode"
+      if [ "$mode" = local ]; then
+        ok "voice notes on: each agent's VM turns them into text itself (Whisper ${CAGE_VOICE_MODEL:-base}; nothing leaves it)"
+        hint "the first time, each VM downloads about 300 MB; better accuracy, slower: CAGE_VOICE_MODEL=small in $CAGE_ENV"
+      else
+        ok "voice notes on: Groq turns them into text (your key stays on this computer)"
+      fi ;;
+    *) die "usage: cage voice [on [local|groq]|off]" ;;
+  esac
+  features_apply
+}
+
+features_apply() { # chat features live in each agent's cc-connect config: re-create running agents to apply
+  local a running=()
+  find_msb || return 0
+  refresher_start
+  refresh_running
+  for a in $CAGE_AGENTS; do if agent_awake "$a"; then running+=("$a"); fi; done
+  [ ${#running[@]} -gt 0 ] || return 0
+  if [ -t 0 ] && yes_no "Restart ${running[*]} so this applies now? Their logins and files are kept." y; then
+    cmd_up "${running[@]}"
+  else
+    hint "applies the next time they wake: cage up"
+  fi
+}
+
+voice_config() { # voice_config <agent>: its [speech] block, and the settings for guest/voice.sh
+  local a="$1" dir="$CAGE_HOME/agents/$1" model="${CAGE_VOICE_MODEL:-base}" lang="${CAGE_VOICE_LANGUAGE:-}"
+  case "${CAGE_VOICE:-off}" in local|groq) ;; *) rm -f "$dir/voice.env"; return 0 ;; esac
+  [[ "$model" =~ ^[a-z0-9.-]+$ && "$lang" =~ ^[a-z]{0,3}$ ]] || die "CAGE_VOICE_MODEL / CAGE_VOICE_LANGUAGE look wrong in $CAGE_ENV"
+  ( umask 077; printf 'VOICE_MODE=%s\nVOICE_MODEL=%s\nVOICE_LANGUAGE=%s\nVOICE_PORT=8178\n' "$CAGE_VOICE" "$model" "$lang" > "$dir/voice.env" )
+  printf '\n[speech]\nenabled = true\nlanguage = "%s"\n' "$lang"
+  if [ "$CAGE_VOICE" = local ]; then
+    printf 'provider = "openai"\n\n[speech.openai]\napi_key = "local"\nbase_url = "http://127.0.0.1:8178/v1"\nmodel = "whisper-%s"\n' "$model"
+  else
+    printf 'provider = "groq"\n\n[speech.groq]\napi_key = "$MSB_VOICE_GROQ_KEY"\nmodel = "whisper-large-v3-turbo"\n'
+  fi
+}
+
 # --- network rules and security events --------------------------------------------------------------------------
 # Open (the default): the public internet; your computer, your LAN and cloud metadata are blocked (microsandbox's
 # default policy). Strict (CAGE_NETWORK=strict): only the hosts each agent needs (its own service, its chat apps,
@@ -2025,6 +2296,10 @@ net_allow_for() { # net_allow_for <agent>: the hosts it may reach in strict mode
       claude) echo "downloads.claude.ai" ;;
       cursor) echo "downloads.cursor.com" ;;
       antigravity) echo "antigravity-cli-auto-updater-974169037036.us-central1.run.app" ;;
+    esac
+    case "${CAGE_VOICE:-off}" in   # voice notes: Python packages and the Whisper model, once; or Groq
+      local) echo "pypi.org files.pythonhosted.org huggingface.co *.huggingface.co *.hf.co" ;;
+      groq) echo "pypi.org files.pythonhosted.org api.groq.com" ;;
     esac
     if grep -q '|local:browser|' "$CAGE_HOME/agents/$a/connectors.list" 2>/dev/null; then
       echo "cdn.playwright.dev playwright.download.prss.microsoft.com"     # Chromium, once
@@ -2269,6 +2544,7 @@ cmd_backup() {
   tar -c --xattrs --xattrs-include='user.*' --warning=no-file-changed --warning=no-file-removed \
       --exclude=./refresh.log --exclude=./autostart.log --exclude=./msb \
       --exclude='cage-*-home/.cache/ms-playwright' --exclude='cage-*-home/.npm' --exclude='cage-*-home/.cache/pip' \
+      --exclude='cage-*-home/.cache/cage-voice' \
       --transform='s,^\.\(/\|$\),config/,S' --transform='s,^cage-,volumes/cage-,S' \
       -C "$tmp" manifest.json -C "$CAGE_HOME" . ${vols[@]+"${vols[@]}"} |
       gzip -6 |
@@ -2486,6 +2762,10 @@ usage() {
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
   row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too"
+  row "  ask \"…\" [agents]" "every awake agent answers, here"
+  row "  ask-all on|off" "/all <question> in chat: all of them answer"
+  row "  fallback <a> <b>" "when a is out of quota, b answers instead"
+  row "  voice on|off" "voice notes, turned into text on each VM"
   row "  connect [add|rm]" "apps your agents can use: Gmail, GitHub, …"
   row "  password add|list|rm" "website sign-ins they use but never see"
   row "  secret add|list|rm" "keys agents can use but never see"
@@ -2531,13 +2811,20 @@ main() {
     security|events) cmd_security "$@" ;;
     network) cmd_network "$@" ;;
     allow) cmd_allow "$@" ;;
+    ask) cmd_ask "$@" ;;
+    ask-all) cmd_ask_all "$@" ;;
+    fallback) cmd_fallback "$@" ;;
+    voice) cmd_voice "$@" ;;
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
     _open) UI=1 open_url "${1:-}" ;;
+    _outbox) load_env; find_msb || true; outbox_process; wait ;;   # once (the background helper does this every 3 s)
     _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT
-      i=0; while :; do events_harvest || true; [ $((i % 5)) != 0 ] || oauth_refresh_all 900; i=$((i + 1)); sleep 60 & wait "$!"; done ;;
+      # every 3 s: /all and stand-in requests; every minute: security events; every 5 minutes: app sign-ins
+      i=0; while :; do outbox_process || true; [ $((i % 20)) != 0 ] || events_harvest || true
+        [ $((i % 100)) != 0 ] || oauth_refresh_all 900; i=$((i + 1)); sleep 3 & wait "$!"; done ;;
     version|--version|-V) echo "cage $(cage_version)" ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;

@@ -21,12 +21,18 @@ export function textOf(m) {
     c.ephemeralMessage?.message?.extendedTextMessage?.text || ''
 }
 
+// A voice note or audio file, or null.
+export function audioOf(m) {
+  const c = m?.message || {}
+  return c.audioMessage || c.ephemeralMessage?.message?.audioMessage || null
+}
+
 // Who may reach the agent. Returns {chat, user} for a message to relay, or null.
 //   me: {pn, lid} jids of the linked account; sent: ids of messages the adapter itself sent
 export function accept(m, { mode, allow, me, sent, since, mark }) {
   const k = m?.key || {}
   const chat = k.remoteJid || ''
-  if (!chat || isGroupish(chat) || !textOf(m)) return null
+  if (!chat || isGroupish(chat) || !(textOf(m) || audioOf(m))) return null
   if (sent.has(k.id)) return null                                         // our own reply coming back
   const raw = m.messageTimestamp
   const ts = typeof raw === 'object' && raw ? Number(raw.toNumber?.() ?? raw.low ?? 0) : Number(raw || 0)
@@ -51,7 +57,7 @@ export const toWhatsApp = (s) => String(s || '')
   .replace(/^#{1,6} +(.+)$/gm, '*$1*')
 
 async function main() {
-  const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, jidNormalizedUser } =
+  const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, jidNormalizedUser, downloadMediaMessage } =
     await import('@whiskeysockets/baileys')
   const { default: WebSocket } = await import('ws')
   const { default: pino } = await import('pino')
@@ -149,13 +155,23 @@ async function main() {
         retry = Math.min(retry * 2, 120000)
       }
     })
-    sock.ev.on('messages.upsert', ({ messages }) => {
+    sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const m of messages) {
         const ok = accept(m, { mode: MODE, allow: ALLOW, me, sent, since, mark: MARK })
         if (!ok) continue
         sock.readMessages([m.key]).catch(() => {})
-        toBridge({ type: 'message', msg_id: m.key.id, session_key: `whatsapp:${digits(ok.chat)}:${ok.user}`,
-          user_id: ok.user, user_name: m.pushName || ok.user, content: textOf(m), reply_ctx: ok.chat })
+        const msg = { type: 'message', msg_id: m.key.id, session_key: `whatsapp:${digits(ok.chat)}:${ok.user}`,
+          user_id: ok.user, user_name: m.pushName || ok.user, content: textOf(m), reply_ctx: ok.chat }
+        const a = audioOf(m)
+        if (a) {   // a voice note: cc-connect turns it into text (cage voice on)
+          try {
+            const buf = await downloadMediaMessage(m, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage })
+            const mime = String(a.mimetype || 'audio/ogg').split(';')[0]
+            msg.audio = { mime_type: mime, data: Buffer.from(buf).toString('base64'),
+              format: (mime.split('/')[1] || 'ogg').replace('mpeg', 'mp3'), duration: Number(a.seconds || 0) }
+          } catch (e) { log('couldn\'t download a voice note:', e?.message || e); continue }
+        }
+        toBridge(msg)
       }
     })
   }

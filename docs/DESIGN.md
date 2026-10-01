@@ -19,6 +19,8 @@ What cage adds:
 - lifecycle commands (`up`, `login`, `status`, `logs`, `shell`, `update`, `down`, `destroy`)
 - releases: a reproducible tarball per tag with `SHA256SUMS` (checked by `install.sh` and `cage update`) and a signed build-provenance attestation, so installers never install an unreviewed `main`
 - an optional deny-by-default network per agent (`cage network strict`: msb `network.allow` built from the agent's service, chat apps, installers, connectors, key hosts and `cage allow`; `strict: false` because the chat apps and vendor hosts bypass TLS interception and must match by SNI), and security events collected from msb's runtime log (secret violations, and DNS/egress denials, which msb logs at debug level, so strict VMs run with `--log-level debug`) before each re-create and every minute
+- a relay for `/all` and quota stand-ins: cc-connect hooks are notify-only and VMs can't reach each other, so `guest/hook.sh` (a `[[hooks]]` command, data in `CC_HOOK_*` env vars) leaves requests in a per-VM outbox mount, and the host helper asks the other agents' CLIs (`msb exec`, read-only flags) and posts answers with `cc-connect send --stdin`
+- voice notes: cc-connect's `[speech]` with its OpenAI provider pointed at `guest/stt.py` (faster-whisper) on the VM's loopback, and the static ffmpeg from `imageio-ffmpeg`, both cached on the home volume; or Groq with the key as a microsandbox secret
 - encrypted backups (`cage backup` / `cage restore`): `~/.cage` plus each agent's home volume, with the in-VM owners and modes microsandbox keeps in `user.*` xattrs
 
 ```

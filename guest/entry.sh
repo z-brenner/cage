@@ -58,6 +58,10 @@ bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing w
 
 # WhatsApp, if it's on for this agent: an adapter that talks to cc-connect's bridge (guest/whatsapp.sh)
 if [ -r /cage-config/whatsapp.env ]; then bash /cage/whatsapp.sh "$KIND" & fi
+# Voice notes, if they're on (`cage voice on`): ffmpeg, and speech-to-text on this VM (guest/voice.sh)
+if [ -r /cage-config/voice.env ]; then bash /cage/voice.sh "$KIND" & fi
+# /all and stand-ins write requests for cage into /cage-outbox (guest/hook.sh)
+if [ -d /cage-outbox ]; then chown "$U:$U" /cage-outbox 2>/dev/null || true; fi
 
 log "starting cc-connect as $U"
 while true; do

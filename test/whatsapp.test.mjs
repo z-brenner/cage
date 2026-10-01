@@ -1,7 +1,7 @@
 // Unit tests for the WhatsApp adapter's rules (who may reach the agent), without WhatsApp: node --test test/
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { accept, textOf, digits, toWhatsApp } from '../guest/whatsapp.mjs'
+import { accept, textOf, audioOf, digits, toWhatsApp } from '../guest/whatsapp.mjs'
 
 const me = { pn: '15550001111@s.whatsapp.net', lid: '987654321@lid' }
 const base = { mode: 'spare', allow: ['15552223333'], me, sent: new Set(), since: 1000, mark: '[•|•] Claude:' }
@@ -47,4 +47,12 @@ test('helpers', () => {
   assert.equal(textOf({ message: { extendedTextMessage: { text: 'x' } } }), 'x')
   assert.equal(textOf({ message: { imageMessage: { caption: 'look' } } }), 'look')
   assert.equal(toWhatsApp('**bold** and ~~gone~~\n## Title'), '*bold* and ~gone~\n*Title*')
+})
+
+test('voice notes get through from the same people text does, and nobody else', () => {
+  const voice = (key) => ({ key: { id: 'V1', ...key }, message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus', seconds: 4, ptt: true } }, messageTimestamp: 2000 })
+  assert.equal(audioOf(voice({ remoteJid: 'x' })).seconds, 4)
+  assert.deepEqual(accept(voice({ remoteJid: '15552223333@s.whatsapp.net' }), base), { chat: '15552223333@s.whatsapp.net', user: '15552223333' })
+  assert.equal(accept(voice({ remoteJid: '15559999999@s.whatsapp.net' }), base), null)
+  assert.equal(audioOf(msg({ remoteJid: 'x' })), null)
 })
