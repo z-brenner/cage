@@ -6,7 +6,7 @@
 Claude Code, Codex, Cursor and Antigravity on your own subscriptions.<br>
 Each one lives in a private microVM and talks to you on Telegram, Slack, Discord or WhatsApp.</p>
 
-<p align="center"><img src="assets/app.png" width="720" alt="cage in the browser: one card per agent with its state, chat apps and buttons to wake it, sign it in or see its logs"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/app-dark.png"><img src="assets/app.png" width="760" alt="cage in the browser: a sidebar with each agent and its status, what needs you, and two agents' answers to the same question side by side"></picture></p>
 
 ## Get started
 
@@ -32,13 +32,13 @@ That's the whole setup. cage then opens in your browser and walks you through ev
 
 After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
 
-The app does everything:
-- signs agents in;
-- adds chats, apps, website sign-ins and keys;
-- reviews memory, security events and backups;
-- holds every setting.
+The app does everything, in plain words:
+- **Home** shows what needs you (a sign-in, a chat to connect, something cage blocked) and how each agent is doing.
+- **Ask your agents** sends one question to every awake agent and shows their answers side by side, so you can see where they agree.
+- **Each agent's page** has its chats, its privacy mask, who answers when it hits its usage limit, and its activity log.
+- **Apps, Sign-ins & keys, Memory, Security and Settings** cover the rest. Press Ctrl+K (⌘K on a Mac) to jump to any of them.
 
-Each action runs cage itself and shows its questions as a conversation. Vendor sign-ins open in a terminal view right in the page. The app only listens on your own computer and needs the private link it opened with.
+Each action runs cage itself and shows its questions in a side panel, as a conversation. Vendor sign-ins open in a terminal view inside that panel. The app only listens on your own computer and needs the private link it opened with. It works on a phone-sized window too, and follows your system's light or dark mode.
 
 Prefer a terminal? Type `cage` instead; every command below works there too (`cage ui` opens the app).
 

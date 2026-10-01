@@ -1,5 +1,6 @@
 // Drives cage's web app in a real (headless) browser against a stub msb: the page, its token, a question with a
-// hidden answer, a yes/no question, a terminal view, and that nothing works without the token.
+// hidden answer, a yes/no question, a terminal view, asking your agents, the phone layout, and that nothing works
+// without the token.
 //   node test/ui.test.mjs <base url> <token> <cage home>
 // (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
 import fs from 'node:fs'
@@ -26,11 +27,20 @@ ok('without the token, the page shows how to open it, and nothing else')
 
 // with it: the agents
 await page.goto(base + '/#' + token)
-await page.locator('.agent', { hasText: 'Claude Code' }).getByText('ready').waitFor({ timeout: 20000 })
+await page.locator('.agent', { hasText: 'Claude Code' }).getByText('Ready').waitFor({ timeout: 20000 })
 if (page.url().includes(token)) fail('the token stayed in the address bar')
 const card = page.locator('.agent', { hasText: 'Claude Code' })
 if (!(await card.getByRole('link', { name: '@my_claude_bot' }).count())) fail('no link to the bot')
-ok('agents: Claude ready with its bot link; the token is moved out of the address bar')
+if (!(await page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.dot.ok').count())) fail('no ready dot in the sidebar')
+ok('agents: Claude ready with its bot link, in the list and the sidebar; the token is moved out of the address bar')
+
+// ask your agents: the awake ones answer side by side
+await page.getByLabel('Question for your agents').fill('capital of France?')
+if (await page.locator('.composer input[value=codex]').isEnabled()) fail('an asleep agent can be asked')
+await page.getByLabel('Question for your agents').press('Enter')
+await page.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris').waitFor({ timeout: 15000 })
+if (!(await page.locator('.answer-card strong', { hasText: 'the stub' }).count())) fail('the answer is not formatted')
+ok('ask your agents: the awake ones answer side by side, formatted')
 
 // a question with a hidden answer: add a key
 await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
@@ -52,7 +62,7 @@ ok('a hidden question: the key goes in through the job, is saved, listed, and ne
 
 // a yes/no question: /all in chat offers to restart the running agent
 await page.getByRole('link', { name: 'Settings' }).click()
-await page.locator('.setting', { hasText: '/all in chat' }).getByRole('checkbox').check()
+await page.locator('.setting', { hasText: 'Ask everyone from chat' }).getByRole('checkbox').check()
 await dialog.getByRole('button', { name: 'No' }).waitFor({ timeout: 15000 })
 await dialog.getByRole('button', { name: 'No' }).click()
 await dialog.getByText('Done.').waitFor({ timeout: 15000 })
@@ -71,12 +81,34 @@ await dialog.getByRole('button', { name: 'Close' }).click()
 ok('the privacy mask preview shows tokens')
 
 // a terminal view: an agent's logs
-await page.getByRole('link', { name: 'Agents' }).click()
-await card.getByRole('button', { name: 'Logs' }).click()
+await page.locator('#nav-agents').getByRole('link', { name: 'Claude Code' }).click()
+await page.getByRole('heading', { name: 'Claude Code' }).waitFor({ timeout: 10000 })
+await page.getByRole('button', { name: 'Activity log' }).click()
 await dialog.locator('.job-term .xterm').waitFor({ timeout: 15000 })
 await page.waitForFunction(() => document.querySelector('.job-term')?.innerText.includes('cc-connect: line 3'), null, { timeout: 15000 })
 await dialog.getByRole('button', { name: 'Close' }).click()
 ok("raw output (an agent's logs) shows in a terminal view")
+
+// Ctrl+K: jump to anything
+await page.keyboard.press('Control+k')
+await page.locator('dialog#palette input').fill('secur')
+await page.keyboard.press('Enter')
+await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 })
+if (await page.locator('dialog#palette[open]').count()) fail('the palette stayed open')
+ok('Ctrl+K jumps to a page by name')
+
+// on a phone: the sidebar is a menu
+await page.setViewportSize({ width: 390, height: 844 })
+await page.waitForTimeout(300)
+if ((await page.locator('#sidebar').boundingBox()).x >= 0) fail('the sidebar covers the page on a phone')
+await page.getByRole('button', { name: 'Menu' }).click()
+await page.waitForTimeout(400)
+if ((await page.locator('#sidebar').boundingBox()).x < 0) fail('the menu does not open')
+await page.locator('#nav').getByRole('link', { name: 'Settings' }).click()
+await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 10000 })
+await page.waitForTimeout(400)
+if ((await page.locator('#sidebar').boundingBox()).x >= 0) fail('the menu stays open after picking a page')
+ok('on a phone, the sidebar is a menu that closes when you pick a page')
 
 if (errors.length) fail('page errors: ' + errors.join(' | '))
 await browser.close()

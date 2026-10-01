@@ -405,6 +405,11 @@ ok "a hostile outbox (links, a FIFO, a bad session key) is cleared without readi
 out="$(cage ask "is it raining?" claude codex 2>/dev/null)"
 grep -q "answer from cage-claude to: is it raining?" <<<"$out" && grep -q "answer from cage-codex to: is it raining?" <<<"$out" || fail "cage ask: $out"
 ok "cage ask: every awake agent answers on this computer"
+ev="$(CAGE_PROTO=1 "$ROOT/cage" ask 'is it "raining"?' claude codex 2>&1 >/dev/null </dev/null | tr '\036' '\n')"
+grep -qF '{"t":"asking","text":"is it \"raining\"?","agents":["claude","codex"]}' <<<"$ev" || fail "cage ask for the web app, the question: $ev"
+grep -qF '{"t":"answer","text":"answer from cage-claude to: is it \"raining\"?","agent":"claude"}' <<<"$ev" \
+  && grep -qF '"agent":"codex"}' <<<"$ev" || fail "cage ask for the web app, the answers: $ev"
+ok "cage ask, for the web app: the question, then each agent's answer as its own event"
 
 cage ask-all off </dev/null 2>/dev/null; cage fallback claude off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
 : > "$MSB_LOG"

@@ -926,7 +926,7 @@ CATALOG=(
   "notion|Notion: pages, databases and comments|https://mcp.notion.com/mcp|mcp.notion.com|oauth|"
   "atlassian|Jira and Confluence|https://mcp.atlassian.com/v1/mcp|mcp.atlassian.com|oauth|"
   "sentry|Sentry: errors and issues|https://mcp.sentry.dev/mcp|mcp.sentry.dev|oauth|"
-  "browser|A web browser of its own (Chromium), for websites and the sign-ins you save with cage password|local:browser|||"
+  "browser|A web browser of its own (Chromium), for websites and the sign-ins you save in cage|local:browser|||"
 )
 catalog_names() { local e out=""; for e in "${CATALOG[@]}"; do out="$out${out:+|}${e%%|*}"; done; echo "$out"; }
 catalog_get() { # catalog_get <name>: sets CT_TITLE CT_URL CT_HOSTS CT_KEYURL CT_STEPS; false if cage doesn't know it
@@ -2222,13 +2222,33 @@ cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
   [ $# -gt 0 ] || read -r -a who <<<"$CAGE_AGENTS"
   refresh_running
   tmp="$(mktemp -d)"
+  local asked=()
   for a in "${who[@]}"; do
     check_agent "$a"
-    agent_awake "$a" || { warn "$a is asleep (cage up $a)"; continue; }
+    agent_awake "$a" || { warn "$(agent_name "$a") is asleep, so it wasn't asked"; continue; }
     n=$((n + 1))
-    ( ask_agent "$a" "$q" > "$tmp/$a" ) &
+    asked+=("$a")
+    ( ask_agent "$a" "$q" > "$tmp/$a"; : > "$tmp/$a.done" ) &
   done
   [ "$n" -gt 0 ] || { rm -rf "$tmp"; die "no agent is awake: cage up"; }
+  if [ -n "$PROTO" ]; then   # the web app shows the answers side by side, each as soon as it's in
+    local list="" left rest
+    for a in "${asked[@]}"; do list="$list${list:+,}\"$a\""; done
+    event asking "$q" ",\"agents\":[$list]"
+    left=("${asked[@]}")
+    while [ "${#left[@]}" -gt 0 ]; do
+      rest=()
+      for a in "${left[@]}"; do
+        if [ -e "$tmp/$a.done" ]; then event answer "$(cat "$tmp/$a")" ",\"agent\":\"$a\""; else rest+=("$a"); fi
+      done
+      [ "${#rest[@]}" -eq 0 ] && break
+      left=("${rest[@]}")
+      sleep 0.5
+    done
+    wait
+    rm -rf "$tmp"
+    return 0
+  fi
   say "asking $n agent$([ "$n" = 1 ] || echo s)… (up to $((ASK_TIMEOUT / 60)) min)"
   wait
   for a in "${who[@]}"; do
