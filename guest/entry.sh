@@ -50,6 +50,8 @@ for v in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_
   if [[ "${!v}" =~ ^\$(MSB_[A-Z0-9_]+)$ ]]; then printf '%s=%q\n' "${BASH_REMATCH[1]}" "${!v}"; fi
 done > /etc/cage/runtime.env
 chmod 644 /etc/cage/runtime.env
+# The privacy mask's own terms (cage mask add), readable by the agent user that runs guest/mask.py
+if [ -r /cage-config/mask.terms ]; then install -m 644 /cage-config/mask.terms /etc/cage/mask.terms; else rm -f /etc/cage/mask.terms; fi
 bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
 if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then
   bash /cage/browser.sh || log "could not set up the browser (continuing without it)"
@@ -58,6 +60,10 @@ bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing w
 
 # WhatsApp, if it's on for this agent: an adapter that talks to cc-connect's bridge (guest/whatsapp.sh)
 if [ -r /cage-config/whatsapp.env ]; then bash /cage/whatsapp.sh "$KIND" & fi
+# Voice notes, if they're on (`cage voice on`): ffmpeg, and speech-to-text on this VM (guest/voice.sh)
+if [ -r /cage-config/voice.env ]; then bash /cage/voice.sh "$KIND" & fi
+# /all and stand-ins write requests for cage into /cage-outbox (guest/hook.sh)
+if [ -d /cage-outbox ]; then chown "$U:$U" /cage-outbox 2>/dev/null || true; fi
 
 log "starting cc-connect as $U"
 while true; do

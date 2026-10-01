@@ -70,6 +70,15 @@ render() {
     head -c 4000 /cage-config/connectors.md
     echo
   fi
+  if [ -e /cage-config/mask.on ]; then
+    echo "## Masked values"
+    echo
+    echo "Your user turned on a privacy mask: emails, phone and card numbers, IBANs, keys and some names in their"
+    echo "messages reach you as tokens like [EMAIL_1] or [TERM_2], and your replies show them the real values. Use the"
+    echo "tokens as they are when you talk about those things. You can't use the real values in tools; if a task needs"
+    echo "one, say so and ask your user to give it to you another way (or to turn the mask off)."
+    echo
+  fi
   echo "## Remembering something new"
   echo
   echo "When you learn something about your user worth keeping (a preference, a person, a project, a decision),"

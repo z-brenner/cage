@@ -61,6 +61,10 @@ cage chat add slack   talk to an agent in Slack too (or discord, whatsapp)
 cage secret add …     give agents a key they can use but never see
 cage backup           everything in one encrypted file (cage restore puts it back)
 cage security         what was blocked: keys sent to the wrong place, hosts (strict network)
+cage ask "…"          every awake agent answers (cage ask-all on: /all in chat too)
+cage fallback a b     when agent a is out of quota, b answers in its chat
+cage voice on         voice notes, turned into text on each agent's own VM
+cage mask on          emails, numbers and keys reach the AI vendor as tokens
 cage network strict   each agent reaches only what it needs (cage allow <host> for more)
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
@@ -69,7 +73,18 @@ cage help             everything else
 
 In Telegram, each chat is a session: `/new` starts fresh, `/stop` interrupts, `/list` and `/switch` move between sessions, `/model` and `/mode` change how the agent works, `/usage` shows your quota.
 
-**Ask several agents at once:** add your bots to one Telegram group, turn **Group Privacy** off for each (BotFather → Bot Settings), then @mention the bots you want in one message. Set `CAGE_TELEGRAM_GROUP_REPLY_ALL=true` to have all of them answer everything there.
+**Ask all your agents:** turn it on once with `cage ask-all on`. Then, in any agent's chat (Telegram, Slack, Discord or WhatsApp), start a message with `/all` or `@all` (in Slack, `@all`: Slack keeps `/` for its own commands). That agent answers as usual, and your other awake agents' answers arrive in the same chat. From the terminal, `cage ask "…"` asks all of them at once.
+
+You can also add the bots to one Telegram group, turn **Group Privacy** off for each (BotFather → Bot Settings), and @mention the bots you want. Set `CAGE_TELEGRAM_GROUP_REPLY_ALL=true` to have all of them answer everything there.
+
+**When one runs out of quota:** with `cage fallback claude codex`, a usage-limit reply from Claude is followed by Codex's answer to your message, in the same chat. Codex sees the last few messages. It works for any pair, and `cage fallback claude off` turns it off.
+
+Answers from `/all` and stand-ins are read-only and don't use your connected apps. Both features are off until you turn them on, because they let one agent's VM put questions to another (see the security model).
+
+**Voice notes:** run `cage voice on` and send voice messages on Telegram, Slack, Discord or WhatsApp.
+- Each agent's VM turns them into text itself with Whisper, so nothing you say leaves your computer. The first time, it downloads about 300 MB.
+- `CAGE_VOICE_MODEL=small` in `~/.cage/cage.env` is more accurate but slower. `CAGE_VOICE_LANGUAGE=en` skips language detection.
+- `cage voice on groq` uses Groq's Whisper API instead: faster, with your key, which the VMs never see.
 
 ## Slack, Discord and WhatsApp
 
@@ -87,6 +102,25 @@ cage chat                       # who's where
 - **Only you can talk to it** unless you say otherwise: cage finds your Slack account from your email, and your Discord account from the app's owner.
 - **Letting coworkers use it** is possible (`everyone`, or a list of emails in Slack), but think twice. Each agent runs on *your* personal subscription. Those plans are for one person, so sharing one with a team likely breaks their terms (see below). Everyone you let in can also reach what you connected it to: your email, files and keys. For a team bot, use the vendor's team plan or API key instead.
 - **WhatsApp:** your agent links as a device of a WhatsApp number, through [Baileys](https://github.com/WhiskeySockets/Baileys) (an open-source, unofficial WhatsApp Web client) plugged into cc-connect's bridge. WhatsApp doesn't allow unofficial clients and has banned numbers for it, so **use a spare number** if you can (a prepaid SIM, or a second number in the WhatsApp Business app), then message it from your own phone. Linking your own number works too: the agent then answers only in your "Message yourself" chat, but its VM holds a key to your whole WhatsApp. It comes on top of Telegram, Slack or Discord. If the link drops: `cage chat link whatsapp <agent>`.
+
+## Privacy mask
+
+```bash
+cage mask on [agents]          # on for all agents, or the ones you name
+cage mask add "Acme Corp"      # your own sensitive terms: clients, projects, people
+cage mask try "mail bob@acme.com about Acme Corp"   # see what the model would get
+cage mask off
+```
+
+With the mask on, sensitive values in your messages become tokens like `[EMAIL_1]` before they reach the AI vendor, and turn back into the real values in the replies you read. Covered:
+- email addresses and phone numbers;
+- card numbers (Luhn-checked), IBANs (checksum-verified) and US social security numbers;
+- API keys and tokens;
+- your own terms.
+
+It runs inside each agent's VM, between the chat bot and the agent's CLI, so it covers Telegram, Slack, Discord and WhatsApp alike. The same value always gets the same token, so the agent can still tell them apart.
+
+The trade-off is that the agent can't use a masked value itself. It knows this, and asks when a task needs one.
 
 ## Memory
 
@@ -192,6 +226,10 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
   Your home screen flags new ones, and `cage security` lists them, with the `cage allow` line for each blocked host.
 - **Only you can talk to the bots:** the Telegram ids in `CAGE_TELEGRAM_ALLOW`, and in Slack or Discord your own account unless you allowed others. Only your own accounts are admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
 - **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox.
+- **`/all` and stand-ins cross VMs, so they're opt-in.**
+  - The VMs can't reach each other. cage relays on your computer instead: an agent's cc-connect hook leaves a request in a folder only that VM can write, and cage asks the others through `msb exec`.
+  - cage treats everything in that folder as untrusted: no links or FIFOs, size limits, strict session keys, rate limits. Request text is only ever passed as an argument, never run.
+  - Asked agents answer read-only and without your connected apps. Still, a compromised agent could use this to put questions to your others.
 - **Known gap: each bot's token (Telegram, Slack, Discord, the WhatsApp link) lives inside that agent's VM.** An agent that gets prompt-injected could read it and impersonate its bot.
   - microsandbox's secret substitution can't cover this, because Telegram puts the token in the URL path.
   - cc-connect's `run_as_user` split could, but it supports only Claude Code today.
