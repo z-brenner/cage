@@ -36,7 +36,7 @@ jobs:
       - name: host + setup tests (bash 3.2, as shipped on macOS)
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2
-          sh -c 'apk add -q python3 curl >/dev/null && bash test/host.sh && bash test/setup.sh'
+          sh -c 'apk add -q python3 curl tar openssl >/dev/null && bash test/host.sh && bash test/setup.sh'
 
   windows-installer:
     name: windows installer (check only)

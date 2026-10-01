@@ -59,6 +59,7 @@ cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
 cage password add …   a website sign-in they can use but never see
 cage chat add slack   talk to an agent in Slack too (or discord, whatsapp)
 cage secret add …     give agents a key they can use but never see
+cage backup           everything in one encrypted file (cage restore puts it back)
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
 cage help             everything else
@@ -135,6 +136,21 @@ Your agents get a web browser (headless Chromium, through Microsoft's [Playwrigh
 - **Passwords with symbols** (`&`, `%`, `+`, spaces…) get a second placeholder holding the password already encoded for classic HTML forms. Agents are told to try that one if the site says the first one is wrong. Quotes and backslashes may not get through sign-ins that send JSON.
 - **Some sign-ins can't work this way:** sites that encrypt or hash the password in the page before sending it, and big providers that block automated browsers (Google, Microsoft, Apple). For Gmail and friends use Zapier ([above](#connect-your-apps)) instead.
 - The browser's profile lives in the agent's home, so it stays signed in across restarts. `cage connect add browser` gives an agent the browser without any passwords.
+
+## Backups
+
+```bash
+cage backup            # everything, in one encrypted file
+cage restore           # list your backups
+cage restore <file>    # put one back: on this computer, or on a new one after installing cage
+```
+
+A backup holds your settings, bots, keys, app sign-ins and memory (`~/.cage`), plus each agent's home volume: its login, sessions and work. Caches it can download again are left out. It's encrypted with a passphrase you pick (AES-256, PBKDF2 with 600,000 rounds, via openssl), so it's fine to keep in cloud storage. Nobody can recover a forgotten passphrase.
+
+- Backups go to `~/cage-backups`. On Windows they go to `Documents\cage backups` instead, so they survive even if the WSL distro is removed. Set `CAGE_BACKUP_DIR` to change this.
+- The newest 10 are kept (`CAGE_BACKUP_KEEP`).
+- Agents can keep running during a backup.
+- `restore` puts your agents to sleep, sets aside what's there now (in `~/.cage.before-restore-…`), then wakes them up with the restored logins and files.
 
 ## Windows
 

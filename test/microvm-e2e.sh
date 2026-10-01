@@ -15,7 +15,7 @@ cleanup() {
   status=$?
   if [ $status -ne 0 ]; then echo "--- last guest output ---"; msb logs "$VM" 2>&1 | tail -60 || true; fi
   "$ROOT/cage" destroy "$A" --yes >/dev/null 2>&1 || true
-  rm -rf "$CAGE_HOME"
+  rm -rf "$CAGE_HOME" "$CAGE_HOME".backups* "$CAGE_HOME".before-restore-*
   exit $status
 }
 trap cleanup EXIT
@@ -155,6 +155,20 @@ out="$(msb exec --no-tty -u agent -e HOME=/home/agent "$VM" -- node /cage/mcp-tr
 grep -qF "\\\"password\\\":\\\"$PW\\\"" <<<"$out" || grep -qF "\"password\":\"$PW\"" <<<"$out" \
   || fail "the browser's sign-in didn't carry the real password: $(tail -c 1500 <<<"$out")"
 ok "website passwords: JSON and form sign-ins get the real password at the allowed site only; the browser signs in with it"
+
+# backup + restore on the real volume: the agent's files come back with their in-VM owner and mode
+ax sh -c 'echo from-backup > /home/agent/work/bk && chmod 640 /home/agent/work/bk'
+before="$(gx stat -c '%U:%G %a' /home/agent/work/bk)"
+export CAGE_BACKUP_DIR="$CAGE_HOME.backups" CAGE_BACKUP_PASSPHRASE="e2e passphrase"
+cage backup 2>"$CAGE_BACKUP_DIR.err" || fail "backup: $(cat "$CAGE_BACKUP_DIR.err")"
+ax sh -c 'echo changed > /home/agent/work/bk; rm -f /home/agent/work/marker'
+cage restore "$(ls "$CAGE_BACKUP_DIR"/*.cagebackup)" --yes 2>"$CAGE_BACKUP_DIR.err" || fail "restore: $(cat "$CAGE_BACKUP_DIR.err")"
+retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after restore"
+[ "$(gx cat /home/agent/work/bk)" = from-backup ] && [ "$(gx cat /home/agent/work/marker)" = keep ] || fail "files not restored"
+[ "$(gx stat -c '%U:%G %a' /home/agent/work/bk)" = "$before" ] || fail "owner/mode changed: $before -> $(gx stat -c '%U:%G %a' /home/agent/work/bk)"
+retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not back after restore"
+rm -rf "$CAGE_BACKUP_DIR" "$CAGE_BACKUP_DIR.err" "$CAGE_HOME".before-restore-*
+ok "backup + restore bring back the agent's files with their owner and mode, and the agent wakes up"
 
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi

@@ -18,6 +18,7 @@ What cage adds:
 - login flows that run inside the VM
 - lifecycle commands (`up`, `login`, `status`, `logs`, `shell`, `update`, `down`, `destroy`)
 - releases: a reproducible tarball per tag with `SHA256SUMS` (checked by `install.sh` and `cage update`) and a signed build-provenance attestation, so installers never install an unreviewed `main`
+- encrypted backups (`cage backup` / `cage restore`): `~/.cage` plus each agent's home volume, with the in-VM owners and modes microsandbox keeps in `user.*` xattrs
 
 ```
  Telegram (you)                                  host: ./cage → msb (microsandbox CLI)

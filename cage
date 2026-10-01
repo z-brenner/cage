@@ -1995,6 +1995,170 @@ cmd_destroy() {
   esac
 }
 
+# --- backups ----------------------------------------------------------------------------------------------------
+# One encrypted file with everything needed to get your agents back, on this computer or a new one: ~/.cage
+# (settings, bots, keys, app sign-ins, memory) and each agent's home volume (its login, sessions and work).
+# AES-256 with a passphrase (openssl, PBKDF2), so the file is safe to keep in cloud storage or on a USB stick.
+BACKUP_ITER=600000
+backup_dir() {
+  if [ -n "${CAGE_BACKUP_DIR:-}" ]; then echo "$CAGE_BACKUP_DIR"; return 0; fi
+  local w
+  if is_wsl && w="$(win_home)"; then echo "$w/Documents/cage backups"; return 0; fi   # outlives the WSL distro
+  echo "$HOME/cage-backups"
+}
+
+win_home() { # the Windows user's own folder, as a Linux path (on WSL)
+  local c p
+  c="$(win_cmd cmd.exe)" && command -v wslpath >/dev/null 2>&1 || return 1
+  p="$(cd /mnt/c 2>/dev/null && "$c" /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" || return 1
+  [ -n "$p" ] && [ "$p" != '%USERPROFILE%' ] || return 1
+  wslpath -u "$p"
+}
+
+volume_path() { # volume_path <name>: where a named volume's files are on this computer
+  local p
+  p="$("$MSB" volume inspect "$1" 2>/dev/null | sed -n 's/^Path: *//p')" || return 1
+  [ -n "$p" ] && [ -d "$p" ] || return 1
+  echo "$p"
+}
+
+backup_passphrase() { # backup_passphrase <new|open> <var>: from CAGE_BACKUP_PASSPHRASE, or asked (hidden)
+  local p="${CAGE_BACKUP_PASSPHRASE:-}" again
+  if [ -z "$p" ]; then
+    [ -t 0 ] || die "no passphrase: set CAGE_BACKUP_PASSPHRASE, or run this in a terminal"
+    if [ "$1" = new ]; then
+      say "Pick a passphrase for this backup. You need it to restore, and nobody can recover it for you."
+      prompt "passphrase (at least 8 characters): " p secret
+      [ "${#p}" -ge 8 ] || die "that's shorter than 8 characters; nothing was saved"
+      prompt "the same passphrase again: " again secret
+      [ "$p" = "$again" ] || die "the two didn't match; nothing was saved"
+    else
+      prompt "the backup's passphrase: " p secret
+    fi
+  fi
+  [ "$1" = open ] || [ "${#p}" -ge 8 ] || die "the passphrase needs at least 8 characters; nothing was saved"
+  printf -v "$2" '%s' "$p"
+}
+
+cmd_backup() {
+  load_env
+  find_msb || true
+  command -v openssl >/dev/null 2>&1 || die "backups need openssl: sudo apt-get install openssl"
+  local out="${1:-}" dir="" pass tmp a v p size rc vols=() names=() st
+  if [ -z "$out" ]; then
+    dir="$(backup_dir)"
+    mkdir -p "$dir" || die "couldn't create $dir; set CAGE_BACKUP_DIR to save backups elsewhere"
+    out="$dir/cage-$(date +%Y-%m-%d-%H%M%S).cagebackup"
+  fi
+  [ ! -e "$out" ] || die "$out already exists"
+  backup_passphrase new pass
+  tmp="$(mktemp -d)"
+  for a in $KINDS; do
+    v="$(vm "$a")-home"
+    p="$(volume_path "$v")" || continue
+    if [ "$(basename "$p")" != "$v" ]; then warn "skipped $a's files: its volume is at an unexpected path ($p)"; continue; fi
+    vols+=(-C "$(dirname "$p")" "$v")
+    names+=("$a")
+  done
+  printf '{"cage": "%s", "created": "%s", "agents": "%s"}\n' "$(cage_version)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "${names[*]:-}" > "$tmp/manifest.json"
+  local what="your settings"
+  if [ ${#names[@]} -gt 0 ]; then what="your settings and the files of: ${names[*]}"; fi
+  say "backing up $what…"
+  # Agents can keep running: files they change meanwhile are saved as tar finds them. Each agent's in-VM file
+  # owners and modes live in extended attributes on the volume (user.*), so those come along.
+  (umask 077; : > "$out.part")
+  set +e
+  tar -c --xattrs --xattrs-include='user.*' --warning=no-file-changed --warning=no-file-removed \
+      --exclude=./refresh.log --exclude=./autostart.log --exclude=./msb \
+      --exclude='cage-*-home/.cache/ms-playwright' --exclude='cage-*-home/.npm' --exclude='cage-*-home/.cache/pip' \
+      --transform='s,^\.\(/\|$\),config/,S' --transform='s,^cage-,volumes/cage-,S' \
+      -C "$tmp" manifest.json -C "$CAGE_HOME" . ${vols[@]+"${vols[@]}"} |
+      gzip -6 |
+      openssl enc -aes-256-cbc -salt -pbkdf2 -iter "$BACKUP_ITER" -pass fd:3 -out "$out.part" 3< <(printf '%s' "$pass")
+  st=("${PIPESTATUS[@]}")
+  rc="${st[0]}"
+  set -e
+  rm -rf "$tmp"
+  # tar: 1 means a file changed while it was read (still saved); 2 is a real failure
+  if [ "$rc" -gt 1 ] || [ "${st[1]:-0}" != 0 ] || [ "${st[2]:-0}" != 0 ]; then
+    rm -f "$out.part"
+    die "the backup failed (tar $rc); nothing was saved"
+  fi
+  mv "$out.part" "$out"
+  chmod 600 "$out"
+  size="$(du -h "$out" | cut -f1)"
+  ok "saved $what: $out ($size)"
+  hint "restore on any computer with cage installed: cage restore \"$out\""
+  if [ -z "${1:-}" ]; then backup_prune "$dir"; fi
+}
+
+backup_prune() { # keeps the newest CAGE_BACKUP_KEEP (10) backups cage named itself in <dir>
+  local max="${CAGE_BACKUP_KEEP:-10}" f n=0
+  [[ "$max" =~ ^[0-9]+$ ]] && [ "$max" -gt 0 ] || return 0
+  while IFS= read -r f; do
+    n=$((n + 1))
+    [ "$n" -le "$max" ] || rm -f "$f"
+  done < <(ls -1t "$1"/cage-*.cagebackup 2>/dev/null)
+}
+
+backup_list() {
+  local dir f
+  dir="$(backup_dir)"
+  if ! ls "$dir"/*.cagebackup >/dev/null 2>&1; then say "no backups in $dir yet: cage backup"; return 0; fi
+  say "backups in $dir:"
+  while IFS= read -r f; do say "  $(basename "$f")  $(du -h "$f" | cut -f1)"; done < <(ls -1t "$dir"/*.cagebackup)
+}
+
+cmd_restore() {
+  local file="${1:-}" yes="${2:-}" pass stage old v d p created agents
+  if [ -z "$file" ] || [ "$file" = list ]; then backup_list; [ -n "$file" ] || hint "cage restore <file>"; return 0; fi
+  [ -f "$file" ] || die "no backup at $file"
+  command -v openssl >/dev/null 2>&1 || die "restoring needs openssl: sudo apt-get install openssl"
+  if ! find_msb; then if [ -t 0 ]; then install_msb; else die "microsandbox isn't installed: run cage first"; fi; fi
+  backup_passphrase open pass
+  stage="$(dirname "$CAGE_HOME")/.cage-restore.$$"
+  rm -rf "$stage" && mkdir -m 700 "$stage"
+  set +e
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter "$BACKUP_ITER" -in "$file" -pass fd:3 3< <(printf '%s' "$pass") 2>/dev/null |
+    gzip -dc 2>/dev/null | tar -x --xattrs --xattrs-include='user.*' --same-permissions -C "$stage" 2>/dev/null
+  local st=("${PIPESTATUS[@]}")
+  set -e
+  if [ "${st[0]}" != 0 ] || [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ] || [ ! -f "$stage/manifest.json" ] || [ ! -d "$stage/config" ]; then
+    rm -rf "$stage"
+    die "couldn't open that backup: the passphrase is wrong, or it isn't a whole cage backup"
+  fi
+  created="$(sed -n 's/.*"created": *"\([^"]*\)".*/\1/p' "$stage/manifest.json")"
+  agents="$(sed -n 's/.*"agents": *"\([^"]*\)".*/\1/p' "$stage/manifest.json")"
+  local what="your settings"
+  if [ -n "$agents" ]; then what="your settings, and the logins and files of: $agents"; fi
+  say "this backup is from ${created:-an unknown date}: $what"
+  if [ "$yes" != --yes ]; then
+    if ! yes_no "Replace what's on this computer with it? (what's here now is kept aside)" n; then
+      rm -rf "$stage"; say "nothing changed"; return 0
+    fi
+  fi
+  for v in $KINDS; do "$MSB" stop "$(vm "$v")" >/dev/null 2>&1 || true; done
+  refresher_stop
+  old="$CAGE_HOME.before-restore-$(date +%Y%m%d-%H%M%S)"
+  mkdir -m 700 "$old" && mkdir "$old/volumes"
+  if [ -e "$CAGE_HOME" ]; then mv "$CAGE_HOME" "$old/config"; fi
+  mv "$stage/config" "$CAGE_HOME"
+  for d in "$stage"/volumes/*; do
+    [ -d "$d" ] || continue
+    v="$(basename "$d")"
+    p="$(volume_path "$v")" || { "$MSB" volume create "$v" >/dev/null 2>&1 || true; p="$(volume_path "$v")"; } ||
+      die "couldn't make a volume for $v; your settings are restored, its files are in $d"
+    mv "$p" "$old/volumes/$v"
+    mv "$d" "$p"
+  done
+  rm -rf "$stage"
+  ok "restored from $(basename "$file")"
+  hint "what was here before is in $old; delete it once everything works"
+  configured || { hint "next: cage"; return 0; }
+  cmd_up
+}
+
 # --- the guided first run ---------------------------------------------------------------------------------------
 reachable() { # reachable <agent>: it has at least one complete way to talk to you
   { valid_token "$(token_for "$1")" && [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; } ||
@@ -2126,6 +2290,8 @@ usage() {
   row "  doctor" "check this computer, the config and the bots"
   row "  autostart on|off" "wake agents when you log in"
   row "  update [agents]" "newest cage and agent CLIs"
+  row "  backup [file]" "everything, in one encrypted file"
+  row "  restore [file]" "put a backup back, here or on a new computer"
   row "  destroy <agent>" "--keep-login keeps its login, --yes deletes all"
   row "  init" "just write the config file, to edit by hand"
   printf '\n  %sagents%s  claude · codex · cursor · antigravity\n' "$C_DIM" "$C_0"
@@ -2154,6 +2320,8 @@ main() {
     password|passwords) cmd_password "$@" ;;
     connect|connectors) cmd_connect "$@" ;;
     chat) cmd_chat "$@" ;;
+    backup) cmd_backup "$@" ;;
+    restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;

@@ -20,10 +20,16 @@ if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
 if [ "$cmd" = exec ]; then case "$*" in *cage:ready*) echo cage:ready ;; esac; fi   # every agent is signed in
+if [ "$cmd" = volume ]; then   # named volumes are folders under $MSB_VOLUMES
+  case "$1" in
+    inspect) [ -d "$MSB_VOLUMES/$2" ] || exit 1; printf 'Name:           %s\nKind:           dir\nPath:           %s\n' "$2" "$MSB_VOLUMES/$2" ;;
+    create) mkdir -p "$MSB_VOLUMES/$2" && echo "$2" ;;
+  esac
+fi
 exit 0
 EOF
 chmod +x "$T/bin/msb"
-export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
+export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" MSB_VOLUMES="$T/volumes" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
 : > "$MSB_EXISTING"
 cage() { "$ROOT/cage" "$@"; }
 
@@ -269,6 +275,50 @@ mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb
 HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
 grep -qx 'stop | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
 ok "finds msb in the installer's location when it isn't on PATH"
+
+# --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
+V="$T/volumes/cage-claude-home"
+mkdir -p "$V/.claude" "$V/work" "$V/.cache/ms-playwright/chromium" "$T/volumes/cage-codex-home/.codex"
+echo "claude-login-SECRET" > "$V/.claude/.credentials.json"
+echo "my work" > "$V/work/notes.md"
+ln -s notes.md "$V/work/link"
+echo "300MB of browser" > "$V/.cache/ms-playwright/chromium/big"
+echo "codex-login" > "$T/volumes/cage-codex-home/.codex/auth.json"
+python3 -c "import os,sys; os.setxattr(sys.argv[1], 'user.containers.override_stat', b'1000:1000:0100600')" "$V/.claude/.credentials.json" 2>/dev/null && xattrs=1 || xattrs=0
+export CAGE_BACKUP_DIR="$T/backups"
+if CAGE_BACKUP_PASSPHRASE=short cage backup 2>"$T/err"; then fail "accepted a 5-character passphrase"; fi
+CAGE_BACKUP_PASSPHRASE="correct horse battery" cage backup 2>"$T/err" || fail "backup: $(cat "$T/err")"
+bk="$(ls "$T/backups"/cage-*.cagebackup)"
+[ "$(stat -c %a "$bk")" = 600 ] || fail "backup isn't 0600"
+grep -q "the files of: claude codex" "$T/err" || fail "backup didn't take both volumes: $(cat "$T/err")"
+if grep -aq 'claude-login-SECRET\|123:AAA-claude_token' "$bk" || gzip -dc < "$bk" >/dev/null 2>&1; then fail "the backup isn't encrypted"; fi
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass pass:"correct horse battery" -in "$bk" | gzip -dc | tar -t > "$T/members"
+grep -qx 'manifest.json' "$T/members" && grep -qx 'config/cage.env' "$T/members" && grep -qx 'volumes/cage-claude-home/work/notes.md' "$T/members" \
+  || fail "unexpected layout: $(head -20 "$T/members")"
+if grep -q 'ms-playwright\|config/msb/' "$T/members"; then fail "backup has caches or generated files"; fi
+ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches)"
+
+# restore: on top of changed settings and a wiped volume; a wrong passphrase changes nothing
+cp "$CAGE_HOME/cage.env" "$T/env.saved"
+echo 'CAGE_CPUS=7' >> "$CAGE_HOME/cage.env"
+rm -rf "$V/.claude" "$V/work"
+if CAGE_BACKUP_PASSPHRASE=wrong-passphrase cage restore "$bk" --yes 2>"$T/err"; then fail "restored with a wrong passphrase"; fi
+grep -q 'passphrase is wrong' "$T/err" || fail "unclear wrong-passphrase error: $(cat "$T/err")"
+grep -q 'CAGE_CPUS=7' "$CAGE_HOME/cage.env" || fail "a refused restore changed the settings"
+: > "$MSB_LOG"
+CAGE_BACKUP_PASSPHRASE="correct horse battery" cage restore "$bk" --yes 2>"$T/err" || fail "restore: $(cat "$T/err")"
+cmp -s "$CAGE_HOME/cage.env" "$T/env.saved" || fail "settings not restored"
+[ "$(cat "$V/.claude/.credentials.json")" = claude-login-SECRET ] && [ "$(cat "$V/work/notes.md")" = "my work" ] || fail "volume not restored"
+[ "$(readlink "$V/work/link")" = notes.md ] || fail "symlink not restored as it was"
+[ "$(stat -c %a "$CAGE_HOME")" = 700 ] || [ "$(stat -c %a "$CAGE_HOME")" = "$(stat -c %a "$(ls -d "$CAGE_HOME".before-restore-*/config)")" ] || fail "CAGE_HOME permissions changed"
+if [ "$xattrs" = 1 ]; then
+  python3 -c "import os,sys; assert os.getxattr(sys.argv[1], 'user.containers.override_stat') == b'1000:1000:0100600'" "$V/.claude/.credentials.json" \
+    || fail "the in-VM owner and mode (xattr) didn't come back"
+fi
+ls -d "$CAGE_HOME".before-restore-*/volumes/cage-claude-home >/dev/null || fail "what was there before wasn't kept"
+grep -q '^stop | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-claude |' "$MSB_LOG" || fail "agents not stopped, then woken: $(cat "$MSB_LOG")"
+rm -rf "$CAGE_HOME".before-restore-*
+ok "restore: settings and volumes back (owners, links), old copy kept, agents woken; wrong passphrase refused"
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
