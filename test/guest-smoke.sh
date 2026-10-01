@@ -25,10 +25,12 @@ CAGE_TELEGRAM_ALLOW="111"
 CAGE_TELEGRAM_TOKEN_$A="123456:FAKE-token-for-smoke-test"
 EOF
 PATH="$T/bin:$PATH" "$ROOT/cage" up "$A" 2>/dev/null
+sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md"
 
 # shellcheck disable=SC2086
 docker run -d --name "$NAME" \
   -v "$ROOT/guest:/cage:ro" -v "$CAGE_HOME/agents/$A:/cage-config:ro" -v "$VOL:/home/agent" \
+  -v "$CAGE_HOME/brain/memory:/memory:ro" -v "$CAGE_HOME/brain/inbox/$A:/memory-inbox" \
   -e CC_CONNECT_VERSION=v1.5.0 ${CAGE_TEST_DOCKER_ARGS:-} \
   ubuntu:24.04 /bin/bash /cage/entry.sh "$A" >/dev/null
 
@@ -52,6 +54,14 @@ sleep 3
 [ "$(docker exec "$NAME" ps -o user= -C cc-connect | head -1 | tr -d ' ')" = agent ] || fail "cc-connect not running as agent"
 [ "$(docker exec "$NAME" stat -c '%U %a' /home/agent/.cc-connect/config.toml)" = "agent 600" ] || fail "config perms"
 ok "cc-connect runs as agent with a 0600 config"
+
+docker exec "$NAME" grep -q 'Smoke Tester' /home/agent/work/AGENTS.md || fail "AGENTS.md lacks about-me.md"
+docker exec "$NAME" grep -qx '@/home/agent/work/AGENTS.md' /home/agent/.claude/CLAUDE.md || fail "CLAUDE.md doesn't import AGENTS.md"
+docker exec "$NAME" test -s /home/agent/.codex/AGENTS.md || fail "no ~/.codex/AGENTS.md"
+docker exec -u agent "$NAME" sh -c 'echo "# Remember" > /memory-inbox/smoke.md' || fail "agent can't write its inbox"
+[ -f "$CAGE_HOME/brain/inbox/$A/smoke.md" ] || fail "inbox note didn't reach the host"
+if docker exec -u agent "$NAME" sh -c 'echo x > /memory/x.md' 2>/dev/null; then fail "/memory is writable"; fi
+ok "memory: about-me.md wired into AGENTS.md (and CLAUDE.md), inbox writable, /memory read-only"
 
 logs="$(docker logs "$NAME" 2>&1)"
 grep -q 'config loaded' <<<"$logs" || fail "cc-connect did not load its config"

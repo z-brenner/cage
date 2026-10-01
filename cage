@@ -10,6 +10,7 @@ set -euo pipefail
 CAGE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CAGE_HOME="${CAGE_HOME:-$HOME/.cage}"
 CAGE_ENV="${CAGE_ENV:-$CAGE_HOME/cage.env}"
+BRAIN="$CAGE_HOME/brain"
 MSB="${CAGE_MSB:-msb}"
 # The microsandbox installer puts msb in ~/.local/bin, which isn't on PATH in non-login sessions
 # (autostart at login, `wsl.exe --exec`). Find it there too.
@@ -410,6 +411,111 @@ EOF
   )
 }
 
+# --- memory ----------------------------------------------------------------------------------------------------
+# ~/.cage/brain is the user's memory: plain markdown to open and edit (it works as an Obsidian vault too).
+#   memory/about-me.md, memory/notes/  approved; read-only in every agent's VM at /memory
+#   inbox/<agent>/                     what that agent proposes; writable only in its own VM at /memory-inbox
+# Agents never write shared memory directly, so one tricked agent can't plant instructions for the others:
+# the user approves each note with `cage memory`.
+brain_init() { # brain_init [agent...]
+  local a
+  mkdir -p "$BRAIN/memory/notes"
+  [ -f "$BRAIN/memory/about-me.md" ] || cat > "$BRAIN/memory/about-me.md" <<'EOF'
+# About me
+
+<!-- Your agents read this at the start of every conversation. Plain words; short is fine. -->
+
+- Name:
+- What I do:
+- How I like answers:
+- Always keep in mind:
+EOF
+  for a in "$@"; do mkdir -p "$BRAIN/inbox/$a"; chmod 777 "$BRAIN/inbox/$a"; done   # the VM's user may have another uid
+}
+
+safe_text() { LC_ALL=C tr -d '\000-\010\013-\037\177'; }   # agent-written text, minus terminal control codes
+
+inbox_count() { find "$BRAIN/inbox" -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' '; }
+
+memory_refresh() { # running agents see newly approved notes right away
+  local a
+  refresh_running
+  for a in $CAGE_AGENTS; do
+    [[ "$RUNNING" == *" $(vm "$a") "* ]] || continue
+    if "$MSB" exec --no-tty "$(vm "$a")" -- bash /cage/memory.sh "$a" >/dev/null 2>&1; then ok "$a is up to date"; fi
+  done
+}
+
+memory_review() {
+  local f a name dst i n=0 kept=0 answer
+  brain_init
+  for f in "$BRAIN"/inbox/*/*.md; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    a="$(basename "$(dirname "$f")")"
+    printf '\n%s%s  %s%s wants to remember:%s\n\n' "$IND" "$(face "$a" ready)" "$C_B" "$a" "$C_0" >&2
+    head -c 4000 "$f" | safe_text | sed "s/^/$IND    /" >&2
+    printf '\n\n' >&2
+    prompt "Keep it? [y]es, [n]o, [s]kip: " answer
+    case "$answer" in
+      [yY]*)
+        name="$(printf '%s' "$(basename "$f" .md)" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-60)"
+        dst="$BRAIN/memory/notes/$name.md" i=2
+        while [ -e "$dst" ]; do dst="$BRAIN/memory/notes/$name-$i.md"; i=$((i + 1)); done
+        { safe_text < "$f"; printf '\n\n_Remembered from %s on %s._\n' "$a" "$(date +%Y-%m-%d)"; } > "$dst"
+        rm -f "$f"; kept=$((kept + 1))
+        ok "kept as notes/$(basename "$dst")" ;;
+      [nN]*) rm -f "$f"; ok "forgotten" ;;
+      *) say "left in the inbox for later" ;;
+    esac
+  done
+  if [ $n = 0 ]; then ok "nothing new to review"; hint "your memory: $BRAIN/memory (cage memory open)"; return 0; fi
+  if [ $kept -gt 0 ]; then memory_refresh; fi
+}
+
+memory_open() {
+  local d="$BRAIN/memory" e
+  brain_init
+  if is_wsl && command -v wslpath >/dev/null 2>&1 && e="$(win_cmd explorer.exe)"; then
+    "$e" "$(wslpath -w "$d")" >/dev/null 2>&1 || true   # explorer.exe exits 1 even when it worked
+  elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$d" >/dev/null 2>&1 &
+  fi
+  ok "your memory: $d"
+  hint "about-me.md is what every agent reads first; notes/ is what you've approved"
+}
+
+about_you() { # the optional first memory, asked during the guided setup
+  local f="$BRAIN/memory/about-me.md" name="" job="" style=""
+  brain_init
+  grep -q '^- Name: *$' "$f" || { ok "your agents already know about you"; return 0; }
+  say "Your agents read this before every conversation. Press Enter to skip any of it."
+  prompt "What should they call you? " name
+  prompt "What do you do, in a few words? " job
+  prompt "How do you like answers (e.g. short and direct)? " style
+  [ -n "$name$job$style" ] || { say "skipped; you can fill it in anytime: cage memory open"; return 0; }
+  cat > "$f" <<EOF
+# About me
+
+<!-- Your agents read this at the start of every conversation. Plain words; short is fine. -->
+
+- Name: $name
+- What I do: $job
+- How I like answers: $style
+- Always keep in mind:
+EOF
+  ok "saved; change it anytime: cage memory open"
+}
+
+cmd_memory() {
+  load_env
+  case "${1:-}" in
+    "") memory_review ;;
+    open) memory_open ;;
+    *) die "usage: cage memory [open]" ;;
+  esac
+}
+
 # --- VMs -------------------------------------------------------------------------------------------------------
 exists() { "$MSB" inspect "$(vm "$1")" >/dev/null 2>&1; }
 
@@ -631,7 +737,7 @@ cmd_setup() {
   load_env
   resolve_agents "$@"
   local a token user first="" first_bot="" need=() method="${CAGE_BOTS:-}" managed=0
-  [ "${ONBOARDING:-0}" = 1 ] && step "3 of 5" "A Telegram bot for each agent"
+  [ "${ONBOARDING:-0}" = 1 ] && step "3 of 6" "A Telegram bot for each agent"
   for a in "${AGENTS[@]}"; do
     token="$(token_for "$a")"
     valid_token "$token" && bot_username "$token" >/dev/null && continue
@@ -688,7 +794,7 @@ cmd_setup() {
     CAGE_AGENTS="${keep[*]}"
   fi
 
-  [ "${ONBOARDING:-0}" = 1 ] && step "4 of 5" "Who's allowed in"
+  [ "${ONBOARDING:-0}" = 1 ] && step "4 of 6" "Who's allowed in"
   if [ -n "${ALLOW_FROM_OWNER:-}" ]; then
     ok "only ${OWNER_NAME:-you} (Telegram id $CAGE_TELEGRAM_ALLOW) can talk to your agents"
   elif [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
@@ -796,6 +902,7 @@ cmd_up() {
   load_env
   resolve_agents "$@"
   find_msb || die "microsandbox isn't installed; run cage to set it up"
+  brain_init "${AGENTS[@]}"
   local quiet=()
   [ "$UI" = 1 ] && quiet=(-q)
   for a in "${AGENTS[@]}"; do
@@ -811,6 +918,8 @@ cmd_up() {
       --mount-named "$(vm "$a")-home:/home/agent" \
       --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
       --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
+      --mount-dir "$BRAIN/memory:/memory:ro" \
+      --mount-dir "$BRAIN/inbox/$a:/memory-inbox" \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
       ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"
@@ -954,7 +1063,7 @@ cmd_onboard() {
   banner
   say "Hi! Let's put your AI agents in their own little cages. About five minutes."
 
-  step "1 of 5" "This computer"
+  step "1 of 6" "This computer"
   if ! find_msb; then install_msb; fi
   if [ "$(uname -s)" = Linux ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
     if ! fix_kvm; then
@@ -965,7 +1074,7 @@ cmd_onboard() {
   if ! host_out="$(check_host)"; then printf '%s\n' "$host_out" >&2; die "fix the lines above, then run cage again"; fi
   printf '%s\n' "$host_out" >&2
 
-  step "2 of 5" "Your subscriptions"
+  step "2 of 6" "Your subscriptions"
   say "Which do you have? Each one becomes its own agent, with its own bot."
   for a in $KINDS; do
     if yes_no "$(face "$a" ready) $(printf '%-12s' "$a") $(agent_plan "$a")?" n; then picked+=("$a"); fi
@@ -974,7 +1083,10 @@ cmd_onboard() {
 
   cmd_setup "${picked[@]}"
 
-  step "5 of 5" "Wake up and sign in"
+  step "5 of 6" "A little about you"
+  about_you
+
+  step "6 of 6" "Wake up and sign in"
   cmd_up "${picked[@]}"
   for a in "${picked[@]}"; do
     refresh_running
@@ -989,6 +1101,7 @@ cmd_onboard() {
   status_rows >&2
   printf '\n' >&2
   if yes_no "Wake them up automatically when you log in?" y; then cmd_autostart on; fi
+  say "${C_DIM}They'll suggest things to remember; you decide what they keep: cage memory${C_0}"
   say "${C_DIM}Run cage anytime to see how they're doing. Now say hi on Telegram.${C_0}"
   printf '\n' >&2
 }
@@ -1002,6 +1115,9 @@ cmd_home() {
   banner
   status_rows
   next_steps
+  local n
+  n="$(inbox_count)"
+  if [ "$n" -gt 0 ]; then hint "your agents want to remember $n new thing$([ "$n" = 1 ] || echo s): cage memory"; fi
   printf '\n' >&2
 }
 
@@ -1016,6 +1132,7 @@ usage() {
   row "  login <agent>" "sign an agent in to your subscription"
   row "  logs <agent>" "watch what an agent's VM is doing"
   row "  shell <agent>" "a shell inside an agent's cage"
+  row "  memory [open]" "review what your agents want to remember"
   printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"
   row "  setup [agents]" "Telegram bots, and who may talk to them"
   row "  doctor" "check this computer, the config and the bots"
@@ -1044,6 +1161,7 @@ main() {
     update) cmd_update "$@" ;;
     down) cmd_down "$@" ;;
     destroy) cmd_destroy "$@" ;;
+    memory) cmd_memory "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;

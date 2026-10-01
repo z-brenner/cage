@@ -2,7 +2,8 @@
 # Main process of a cage microVM, started by `cage up` as:
 #   msb run -d --name cage-<agent> … ubuntu:24.04 -- /bin/bash /cage/entry.sh <kind>
 # Mounts: /cage (this dir, read-only), /cage-config (generated cc-connect.toml, read-only),
-#         /home/agent (named volume: the agent's login, sessions and work survive restarts).
+#         /home/agent (named volume: the agent's login, sessions and work survive restarts),
+#         /memory (the user's approved memory, read-only) and /memory-inbox (this agent's proposed notes).
 #
 # 1. ensure the unprivileged `agent` user owns the persistent home
 # 2. first boot: install the agent CLI + cc-connect (retried until it succeeds)
@@ -37,6 +38,7 @@ chmod 0440 /etc/sudoers.d/agent
 [ -r "$CONFIG_SRC" ] || { log "missing $CONFIG_SRC (run \`cage up\` on the host)"; sleep infinity; }
 install -d -m 700 -o "$U" -g "$U" "$H/.cc-connect" "$H/work"
 install -m 600 -o "$U" -g "$U" "$CONFIG_SRC" "$H/.cc-connect/config.toml"
+bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
 
 log "starting cc-connect as $U"
 while true; do

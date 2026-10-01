@@ -54,6 +54,7 @@ cage up [agents]      wake agents up (a fresh VM; logins and files are kept)
 cage down [agents]    put them to sleep
 cage login <agent>    sign an agent in to your subscription
 cage logs <agent>     watch what an agent's VM is doing
+cage memory           review what your agents want to remember
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
 cage help             everything else
@@ -62,6 +63,14 @@ cage help             everything else
 In Telegram, each chat is a session: `/new` starts fresh, `/stop` interrupts, `/list` and `/switch` move between sessions, `/model` and `/mode` change how the agent works, `/usage` shows your quota.
 
 **Ask several agents at once:** add your bots to one Telegram group, turn **Group Privacy** off for each (BotFather → Bot Settings), then @mention the bots you want in one message. Set `CAGE_TELEGRAM_GROUP_REPLY_ALL=true` to have all of them answer everything there.
+
+## Memory
+
+Your agents share one memory, and it's yours: a folder of plain notes on your computer (`cage memory open`; it works as an Obsidian vault too).
+
+- **`about-me.md`** is read by every agent before every conversation. Setup asks three quick questions to start it.
+- **Agents suggest; you decide.** When an agent learns something worth keeping, it drops a note in its own inbox. `cage memory` shows you each one: keep it and every agent knows it, or forget it. The home screen tells you when there's something to review.
+- **Why the extra step:** a note one agent writes can't quietly become instructions for the others. Agents can read your approved notes but never change them, and they can't see each other's inboxes.
 
 ## Windows
 

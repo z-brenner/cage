@@ -47,6 +47,12 @@ case "$A" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$A" ;; 
 ax "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"
 ok "$BIN runs as agent"
 
+ax sh -c 'echo "# Remember this" > /memory-inbox/e2e.md' || fail "agent can't write its inbox"
+[ -f "$CAGE_HOME/brain/inbox/$A/e2e.md" ] || fail "inbox note didn't reach the host"
+if ax sh -c 'echo x > /memory/x.md' 2>/dev/null; then fail "/memory is writable"; fi
+gx grep -q 'About your user' /home/agent/work/AGENTS.md || fail "AGENTS.md not wired"
+ok "memory: AGENTS.md wired, inbox writable and visible on the host, /memory read-only"
+
 out="$(cage status 2>&1)"
 grep -qF "[o|o]  $(printf '%-12s' "$A") needs a login" <<<"$out" || fail "status should report not logged in: $out"
 ok "cage status probes the login inside the VM (not logged in, as expected)"
