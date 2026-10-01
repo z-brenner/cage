@@ -13,18 +13,146 @@ CAGE_ENV="${CAGE_ENV:-$CAGE_HOME/cage.env}"
 MSB="${CAGE_MSB:-msb}"
 # The microsandbox installer puts msb in ~/.local/bin, which isn't on PATH in non-login sessions
 # (autostart at login, `wsl.exe --exec`). Find it there too.
-if [ -z "${CAGE_MSB:-}" ] && ! command -v msb >/dev/null 2>&1; then
-  for _m in "$HOME/.local/bin/msb" "${MSB_HOME:-$HOME/.microsandbox}/bin/msb"; do
-    if [ -x "$_m" ]; then MSB="$_m"; break; fi
+find_msb() {
+  [ -n "${CAGE_MSB:-}" ] && return 0
+  command -v msb >/dev/null 2>&1 && { MSB=msb; return 0; }
+  local m
+  for m in "$HOME/.local/bin/msb" "${MSB_HOME:-$HOME/.microsandbox}/bin/msb"; do
+    if [ -x "$m" ]; then MSB="$m"; return 0; fi
   done
-fi
+  return 1
+}
+find_msb || true
 KINDS="claude codex cursor antigravity"
 
-die() { echo "cage: $*" >&2; exit 1; }
-say() { echo "cage: $*" >&2; }
+# --- look and feel ---------------------------------------------------------------------------------------------
+# One idea runs through everything: each agent is a little creature in a cage, and its eyes say how it is.
+#   [•|•] awake   [o|o] needs a login   [•|-] blinking: busy   [-|-] asleep   [ | ] no cage yet   [x|x] stuck
+# Colour and animation only on a terminal (and never with NO_COLOR). Piped output stays plain text.
+UI=0
+C_0="" C_B="" C_DIM="" C_AMBER="" C_PINK="" C_OK="" C_ERR=""
+C_claude="" C_codex="" C_cursor="" C_antigravity=""
+ui_init() {
+  [ -t 1 ] && [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ] || return 0
+  UI=1
+  local tc=0
+  case "${COLORTERM:-}" in truecolor|24bit) tc=1 ;; esac
+  [ -n "${WT_SESSION:-}" ] && tc=1   # Windows Terminal
+  rgb() { if [ $tc = 1 ]; then printf '\033[38;2;%s;%s;%sm' "$1" "$2" "$3"; else printf '\033[38;5;%sm' "$4"; fi; }
+  C_0=$'\033[0m' C_B=$'\033[1m' C_DIM=$'\033[2m'
+  C_AMBER="$(rgb 255 184 51 214)" C_PINK="$(rgb 255 119 169 211)"
+  C_OK="$(rgb 61 190 139 36)" C_ERR="$(rgb 242 84 91 203)"
+  # shellcheck disable=SC2034  # read through agent_color
+  C_claude="$(rgb 240 140 105 209)" C_codex="$(rgb 72 207 160 79)"
+  # shellcheck disable=SC2034
+  C_cursor="$(rgb 79 163 247 75)" C_antigravity="$(rgb 155 123 247 141)"
+  UI_TC=$tc
+}
+UI_TC=0
+ui_init
 
+IND="  "   # message indent; steps of the guided setup nest their messages under the step's title
+say()  { printf '%s%s\n' "$IND" "$*" >&2; }
+ok()   { printf '%s%s✓%s %s\n' "$IND" "$C_OK" "$C_0" "$*" >&2; }
+warn() { printf '%s%s!%s %s\n' "$IND" "$C_AMBER" "$C_0" "$*" >&2; }
+bad()  { printf '%s%s✗%s %s\n' "$IND" "$C_ERR" "$C_0" "$*" >&2; }
+hint() { printf '%s  %s→ %s%s\n' "$IND" "$C_DIM" "$*" "$C_0" >&2; }
+die()  { bad "$*"; exit 1; }
+step() { printf '\n  %s●%s %s%s%s  %s%s%s\n' "$C_AMBER" "$C_0" "$C_B" "$2" "$C_0" "$C_DIM" "$1" "$C_0" >&2; IND="    "; }
+
+link() { # link <url> [text]: a clickable link where the terminal supports it
+  if [ "$UI" = 1 ]; then printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$1" "${2:-$1}"; else printf '%s' "${2:-$1}"; fi
+}
+
+agent_color() { local v="C_$1"; printf '%s' "${!v:-}"; }
+agent_name() { case "$1" in claude) echo "Claude Code" ;; codex) echo "Codex" ;; cursor) echo "Cursor" ;; antigravity) echo "Antigravity" ;; esac; }
+agent_plan() { case "$1" in claude) echo "Claude Pro or Max" ;; codex) echo "a ChatGPT plan" ;; cursor) echo "a Cursor account" ;; antigravity) echo "Google AI Pro or Ultra" ;; esac; }
+
+face() { # face <agent> <ready|login|installing|busy1|busy2|asleep|none|stuck>: the agent's cage, eyes showing its state
+  local c l r
+  c="$(agent_color "$1")"
+  case "$2" in
+    ready) l="•" r="•" ;;
+    login) l="o" r="o" ;;
+    busy1|installing) l="•" r="-" ;;
+    busy2) l="-" r="•" ;;
+    asleep) l="-" r="-" ;;
+    stuck) l="x" r="x" c="$C_ERR" ;;
+    *) l=" " r=" " ;;
+  esac
+  case "$2" in asleep|none) c="$C_DIM" ;; esac
+  printf '%s[%s%s%s%s|%s%s%s%s]%s' "$c" "$C_0" "$C_B" "$l" "$C_0$c" "$C_0" "$C_B" "$r" "$C_0$c" "$C_0"
+}
+
+# The mascot as half-block pixel art: 1 character = 1x2 pixels. o frame, d inside, w white, p pupil, k blush,
+# s the pink "misprinted" shadow. Only drawn on colour terminals.
+MASCOT='.........ooo.........
+........o...o........
+........o...os.......
+.........ooo.s.......
+..........oss........
+.......ooooooo.......
+.....oodddodddoo.....
+....ododddodddodo....
+...oddodddodddoddo...
+..ooooooooooooooooo..
+..odddodddodddodddos.
+..oddwwwwdodwwwwddos.
+..oddwwpwdodwwpwddos.
+..oddwppwdodwppwddos.
+..oddwwwwdodwwwwddos.
+..okkdoddwowddodkkos.
+..odddodddwdddodddos.
+.ooooooooooooooooooo.
+.ooooooooooooooooooos
+..sooosssssssssooosss
+....sss.........sss..
+.....................'
+px() { # px <var> <fg|bg> <pixel>: sets <var> to the escape for that pixel's colour
+  local n=38 r g b x
+  [ "$2" = bg ] && n=48
+  case "$3" in
+    o) r=255 g=184 b=51 x=214 ;; d) r=46 g=37 b=80 x=54 ;; w) r=255 g=255 b=255 x=231 ;;
+    p) r=36 g=28 b=59 x=235 ;; *) r=255 g=119 b=169 x=211 ;;
+  esac
+  if [ "$UI_TC" = 1 ]; then printf -v "$1" '\033[%s;2;%s;%s;%sm' "$n" "$r" "$g" "$b"; else printf -v "$1" '\033[%s;5;%sm' "$n" "$x"; fi
+}
+mascot_lines() { # prints the mascot, one terminal line per two pixel rows
+  local rows=() line top bot out i j t b f k
+  while IFS= read -r line; do rows+=("$line"); done <<<"$MASCOT"
+  for ((i = 0; i + 1 < ${#rows[@]}; i += 2)); do
+    top="${rows[i]}" bot="${rows[i+1]}" out=""
+    for ((j = 0; j < ${#top}; j++)); do
+      t="${top:j:1}" b="${bot:j:1}"
+      if [ "$t" = . ] && [ "$b" = . ]; then out+=" "
+      elif [ "$b" = . ]; then px f fg "$t"; out+="$f▀$C_0"
+      elif [ "$t" = . ]; then px f fg "$b"; out+="$f▄$C_0"
+      else px f fg "$t"; px k bg "$b"; out+="$f$k▀$C_0"
+      fi
+    done
+    printf '%s\n' "$out"
+  done
+}
+banner() { # the big hello: mascot with the name beside it
+  if [ "$UI" != 1 ]; then printf '\n  cage · your AI agents, each in its own little cage\n\n' >&2; return 0; fi
+  local i=0 line side
+  printf '\n' >&2
+  while IFS= read -r line; do
+    case $i in
+      4) side="   ${C_B}cage${C_0}" ;;
+      5) side="   ${C_DIM}your AI agents, each in its own little cage${C_0}" ;;
+      *) side="" ;;
+    esac
+    printf '  %s%s\n' "$line" "$side" >&2
+    i=$((i + 1))
+  done < <(mascot_lines)
+  printf '\n' >&2
+}
+brand() { printf '%s[%s%s•%s%s|%s%s•%s%s]%s' "$C_AMBER" "$C_0" "$C_B" "$C_0" "$C_AMBER" "$C_0" "$C_B" "$C_0" "$C_AMBER" "$C_0"; }
+
+# --- config ----------------------------------------------------------------------------------------------------
 load_env() {
-  [ -f "$CAGE_ENV" ] || die "no config at $CAGE_ENV; run \`cage init\` first"
+  [ -f "$CAGE_ENV" ] || die "no config at $CAGE_ENV yet; run ./cage to set things up"
   # shellcheck disable=SC1090
   . "$CAGE_ENV"
   CAGE_AGENTS="${CAGE_AGENTS:-claude codex cursor antigravity}"
@@ -67,6 +195,14 @@ login_cmd() {
     antigravity) echo "agy" ;;
   esac
 }
+login_hint() {
+  case "$1" in
+    claude) echo "Open the link, sign in with Claude Pro or Max, then paste the code back here." ;;
+    codex) echo "First turn on device-code sign-in in ChatGPT → Settings → Security. Then open the link and enter the code." ;;
+    cursor) echo "Open the link on any device and approve. This finishes on its own." ;;
+    antigravity) echo "Antigravity opens full screen. Sign in with Google AI Pro or Ultra, then type /quit." ;;
+  esac
+}
 auth_check_cmd() {
   case "$1" in
     claude) echo "claude auth status >/dev/null 2>&1" ;;
@@ -76,16 +212,20 @@ auth_check_cmd() {
   esac
 }
 
-token_for() {
-  local var="CAGE_TELEGRAM_TOKEN_$1"
-  echo "${!var:-}"
-}
+token_for() { local var="CAGE_TELEGRAM_TOKEN_$1"; echo "${!var:-}"; }
+bot_for() { local var="CAGE_TELEGRAM_BOT_$1"; echo "${!var:-}"; }
 
 valid_token() { [[ "$1" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; }
 
-# Telegram Bot API call. The URL (it contains the token) goes to curl on stdin, never on a command line.
+# Telegram Bot API. The URL contains the token, so it goes to curl on stdin, never on a command line.
 tg_api() { # tg_api <token> <method> [query]
   printf 'url = "%s/bot%s/%s%s"\n' "${CAGE_TELEGRAM_API:-https://api.telegram.org}" "$1" "$2" "${3:+?$3}" |
+    curl -sS -m 70 -K -
+}
+tg_call() { # tg_call <token> <method> <curl config line>...: for form fields and uploads
+  local token="$1" method="$2"
+  shift 2
+  { printf 'url = "%s/bot%s/%s"\n' "${CAGE_TELEGRAM_API:-https://api.telegram.org}" "$token" "$method"; printf '%s\n' "$@"; } |
     curl -sS -m 70 -K -
 }
 
@@ -94,6 +234,26 @@ bot_username() { # prints the bot's username for a working token; fails otherwis
   r="$(tg_api "$1" getMe 2>/dev/null)" || return 1
   [[ "$r" == *'"ok":true'* ]] || return 1   # no `| grep -q`: under pipefail its early exit can SIGPIPE the writer
   printf '%s' "$r" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p'
+}
+
+# Gives a new bot its face (the agent's avatar) and a hello. Best effort: a failure here never stops setup.
+bot_dress() { # bot_dress <agent> <token>
+  local a="$1" t="$2" name r dressed=0
+  name="$(agent_name "$a")"
+  r="$(tg_call "$t" setMyShortDescription get \
+    "data-urlencode = \"short_description=$name, in its own little cage. Private to its owner.\"" 2>/dev/null || true)"
+  [[ "$r" == *'"ok":true'* ]] && dressed=1
+  tg_call "$t" setMyDescription get \
+    "data-urlencode = \"description=[•|•]  Hi! I'm $name, living in my own little cage: a private microVM on my owner's computer.\\n\\nOnly my owner can talk to me. Send a message to start · /new for a fresh session · /stop to interrupt.\"" \
+    >/dev/null 2>&1 || true
+  if [ -f "$CAGE_ROOT/assets/avatars/$a.jpg" ]; then
+    r="$(tg_call "$t" setMyProfilePhoto \
+      'form = "photo={\"type\":\"static\",\"photo\":\"attach://avatar\"}"' \
+      "form = \"avatar=@$CAGE_ROOT/assets/avatars/$a.jpg;type=image/jpeg\"" 2>/dev/null || true)"
+    [[ "$r" == *'"ok":true'* ]] || dressed=0
+  fi
+  [ $dressed = 1 ] && ok "gave it a face and a hello"
+  return 0
 }
 
 # Upserts KEY="VALUE" in the env file. Callers validate VALUE, so it never needs escaping.
@@ -110,19 +270,26 @@ set_env() {
 prompt() { # prompt <message> <varname> [secret]
   local reply=""
   if [ -t 0 ]; then
-    if [ "${3:-}" = secret ]; then read -r -s -p "$1" reply; echo >&2; else read -r -p "$1" reply; fi
+    printf '%s%s?%s %s' "$IND" "$C_AMBER" "$C_0" "$1" >&2
+    if [ "${3:-}" = secret ]; then read -r -s reply; echo >&2; else read -r reply; fi
   else
-    printf '%s\n' "$1" >&2   # still show the question when answers are piped in
+    printf '%s? %s\n' "$IND" "$1" >&2   # still show the question when answers are piped in
     read -r reply || true
   fi
   printf -v "$2" '%s' "$reply"
+}
+yes_no() { # yes_no <question> <default y|n>: true for yes
+  local answer
+  if [ "$2" = y ]; then prompt "$1 [Y/n] " answer; case "$answer" in [nN]*) return 1 ;; *) return 0 ;; esac
+  else prompt "$1 [y/N] " answer; case "$answer" in [yY]*) return 0 ;; *) return 1 ;; esac
+  fi
 }
 
 # Writes $CAGE_HOME/agents/<agent>/cc-connect.toml (0600). Values are validated, so no TOML escaping is needed.
 render_config() {
   local a="$1" token dir cmd cmdline=""
   token="$(token_for "$a")"
-  [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "CAGE_TELEGRAM_TOKEN_$a is missing or not a bot token (get one from @BotFather)"
+  [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "CAGE_TELEGRAM_TOKEN_$a is missing or not a bot token (./cage setup $a)"
   [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "CAGE_TELEGRAM_ALLOW must be your numeric Telegram user id(s), comma-separated"
   [[ "$CAGE_TELEGRAM_GROUP_REPLY_ALL" =~ ^(true|false)$ ]] || die "CAGE_TELEGRAM_GROUP_REPLY_ALL must be true or false"
   dir="$CAGE_HOME/agents/$a"
@@ -162,7 +329,80 @@ EOF
   )
 }
 
+# --- VMs -------------------------------------------------------------------------------------------------------
 exists() { "$MSB" inspect "$(vm "$1")" >/dev/null 2>&1; }
+
+agent_exec() { # agent_exec <agent> <tty:yes|no> <command>
+  local tty=--no-tty
+  [ "$2" = yes ] && tty=-t
+  "$MSB" exec "$tty" -u agent -e HOME=/home/agent -w /home/agent "$(vm "$1")" -- \
+    bash -lc "set -a; [ -r /etc/cage/env ] && . /etc/cage/env; set +a; $3"
+}
+
+RUNNING="?"
+refresh_running() { # RUNNING: " name name " of running cage VMs, or "?" if msb can't say
+  local out
+  if out="$("$MSB" ps -q --label app=cage 2>/dev/null)"; then RUNNING=" $(printf '%s' "$out" | tr '\n' ' ') "; else RUNNING="?"; fi
+}
+
+probe() { # probe <agent>: none | asleep | installing | login | ready   (call refresh_running first)
+  exists "$1" || { echo none; return 0; }
+  [ "$RUNNING" = "?" ] || [[ "$RUNNING" == *" $(vm "$1") "* ]] || { echo asleep; return 0; }
+  local out
+  # Answers with a word on stdout rather than an exit code, so it doesn't depend on how msb relays exit codes.
+  out="$(agent_exec "$1" no "if [ ! -e /opt/cage/provisioned-$1 ]; then echo cage:installing; elif { $(auth_check_cmd "$1"); }; then echo cage:ready; else echo cage:login; fi" 2>/dev/null || true)"
+  case "$out" in *cage:ready*) echo ready ;; *cage:login*) echo login ;; *) echo installing ;; esac
+}
+
+phase() { # phase <agent>: what its VM is busy with, in words
+  local l
+  l="$("$MSB" logs --tail 40 "$(vm "$1")" 2>/dev/null | grep -E 'provision\[|cage-entry\[' | tail -1 || true)"
+  case "$l" in
+    *"provisioning failed"*) echo "network hiccup, retrying" ;;
+    *"starting cc-connect"*|*"already provisioned"*|*"done:"*) echo "almost there" ;;
+    *"cc-connect "*) echo "hooking up Telegram" ;;
+    *"base packages"*) echo "unpacking a fresh Ubuntu" ;;
+    *"Node.js"*) echo "installing Node.js" ;;
+    *"Claude Code"*) echo "installing Claude Code" ;;
+    *"Codex"*) echo "installing Codex" ;;
+    *"Cursor CLI"*) echo "installing Cursor" ;;
+    *"Antigravity CLI"*) echo "installing Antigravity" ;;
+    *) echo "waking up" ;;
+  esac
+}
+
+# Waits until each agent's VM has finished installing. On a terminal the cages blink while they work.
+wait_ready() { # wait_ready <agent>...
+  local agents=("$@") a st t=0 n=$# drawn=0 all frame line start=$SECONDS
+  if [ "$UI" = 1 ]; then
+    printf '\033[?25l' >&2
+    trap 'printf "\033[?25h" >&2; printf "\n" >&2; say "they keep going in the background · ./cage shows how they are doing"; exit 130' INT
+  else
+    say "waiting for ${agents[*]} to finish installing (a few minutes the first time)"
+  fi
+  while :; do
+    refresh_running
+    all=1 frame=$(( t % 2 + 1 ))
+    [ "$UI" = 1 ] && [ $drawn = 1 ] && printf '\033[%sA' "$n" >&2
+    for a in "${agents[@]}"; do
+      st="$(probe "$a")"
+      case "$st" in
+        ready|login) line="$(face "$a" ready)  $(printf '%-12s' "$a") ${C_OK}ready${C_0}" ;;
+        *) all=0; line="$(face "$a" "busy$frame")  $(printf '%-12s' "$a") $(phase "$a")…" ;;
+      esac
+      [ "$UI" = 1 ] && printf '\r\033[2K  %s\n' "$line" >&2
+    done
+    drawn=1
+    [ $all = 1 ] && break
+    t=$((t + 1))
+    if [ $((SECONDS - start)) -gt 900 ]; then
+      [ "$UI" = 1 ] && printf '\033[?25h' >&2
+      die "still installing after 15 minutes; see ./cage logs <agent>"
+    fi
+    if [ "$UI" = 1 ]; then sleep 1; else sleep 5; fi
+  done
+  if [ "$UI" = 1 ]; then printf '\033[?25h' >&2; trap - INT; fi
+}
 
 # --- Windows: cage runs inside WSL 2 -------------------------------------------------------------------------
 # WSL stops a distro ~15 s after its last wsl.exe session ends, and every microVM in it dies with it. So on WSL,
@@ -190,10 +430,10 @@ keepalive_running() { pgrep -f -- "$(keepalive_pattern)" >/dev/null 2>&1; }
 
 wsl_keepalive_start() {
   keepalive_running && return 0
-  ( wsl_check_names ) || { say "warning: no WSL keepalive; WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
+  ( wsl_check_names ) || { warn "no WSL keepalive: WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
   local ps i
   if ! ps="$(win_cmd powershell.exe)"; then
-    say "warning: Windows interop is off, so WSL will stop these VMs ~15 s after you close the last WSL window"
+    warn "Windows interop is off, so WSL will stop these VMs ~15 s after you close the last WSL window"
     return 0
   fi
   # Start-Process gives wsl.exe its own hidden console, so it outlives this terminal.
@@ -202,9 +442,9 @@ wsl_keepalive_start() {
     >/dev/null 2>&1 || true
   for i in 1 2 3 4 5 6 7 8 9 10; do keepalive_running && break; sleep 1; done
   if keepalive_running; then
-    say "WSL: a hidden session keeps $WSL_DISTRO_NAME running after you close this window (\`cage down\` releases it)"
+    ok "a hidden session keeps $WSL_DISTRO_NAME running after you close this window"
   else
-    say "warning: could not start the WSL keepalive; WSL will stop the VMs ~15 s after you close the last WSL window"
+    warn "could not start the WSL keepalive; WSL will stop the VMs ~15 s after you close the last WSL window"
   fi
 }
 
@@ -215,97 +455,123 @@ wsl_autostart() { # wsl_autostart on|off
   reg="$(win_cmd reg.exe)" || die "can't reach reg.exe from WSL (is Windows interop enabled in /etc/wsl.conf?)"
   if [ "$1" = off ]; then
     "$reg" delete "$key" /v cage /f >/dev/null 2>&1 || true
-    say "autostart off"
+    ok "autostart off"
     return 0
   fi
   wsl_check_names
   "$reg" add "$key" /v cage /t REG_SZ /d "wsl.exe -d $WSL_DISTRO_NAME -u $(id -un) --exec $CAGE_ROOT/cage _autostart" /f >/dev/null
-  say "autostart on: at each Windows login, a console window opens for a few seconds while 'cage up' starts your VMs in $WSL_DISTRO_NAME (log: $CAGE_HOME/autostart.log)"
+  ok "autostart on: at each Windows login, a window opens for a few seconds while your agents wake up"
+  hint "log: $CAGE_HOME/autostart.log"
 }
 
-wait_provisioned() {
-  local a="$1" i=0
-  until "$MSB" exec --no-stdin "$(vm "$a")" -- test -e "/opt/cage/provisioned-$a" >/dev/null 2>&1; do
-    [ $i -eq 0 ] && say "waiting for $(vm "$a") to finish installing (first boot takes a few minutes; \`cage logs $a\` shows progress)"
-    i=$((i + 1))
-    [ $i -gt 180 ] && die "$(vm "$a") is still not provisioned after 15 minutes; check \`cage logs $a\`"
-    sleep 5
-  done
-}
-
-agent_exec() { # agent_exec <agent> <tty:yes|no> <command>
-  local tty=--no-tty
-  [ "$2" = yes ] && tty=-t
-  "$MSB" exec "$tty" -u agent -e HOME=/home/agent -w /home/agent "$(vm "$1")" -- \
-    bash -lc "set -a; [ -r /etc/cage/env ] && . /etc/cage/env; set +a; $3"
-}
-
+# --- commands --------------------------------------------------------------------------------------------------
 cmd_init() {
   mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
-  if [ -f "$CAGE_ENV" ]; then say "$CAGE_ENV already exists; leaving it alone"; return 0; fi
+  if [ -f "$CAGE_ENV" ]; then return 0; fi
   (umask 077; cp "$CAGE_ROOT/cage.env.example" "$CAGE_ENV")
-  say "wrote $CAGE_ENV. Next: cage setup (or edit the file by hand)"
+  [ "${ONBOARDING:-0}" = 1 ] || ok "wrote $CAGE_ENV"
 }
 
-cmd_doctor() {
-  local ok=1
-  command -v "$MSB" >/dev/null || { echo "✗ microsandbox CLI not found: curl -fsSL https://install.microsandbox.dev | sh  (macOS: brew install superradcompany/tap/microsandbox)"; ok=0; }
+# Checks this computer. Prints one line per check (and a fix under each problem); fails if anything is missing.
+check_host() {
+  local good=0
+  if find_msb && command -v "$MSB" >/dev/null 2>&1; then
+    echo "  ${C_OK}✓${C_0} microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //' || true)"
+  else
+    echo "  ${C_ERR}✗${C_0} microsandbox isn't installed"
+    echo "    ${C_DIM}→ ./cage offers to install it, or: curl -fsSL https://install.microsandbox.dev | sh${C_0}"
+    good=1
+  fi
   case "$(uname -s)/$(uname -m)" in
-    Darwin/arm64) echo "✓ macOS on Apple Silicon" ;;
-    Darwin/*) echo "✗ microsandbox needs Apple Silicon on macOS"; ok=0 ;;
+    Darwin/arm64) echo "  ${C_OK}✓${C_0} macOS on Apple Silicon (untested)" ;;
+    Darwin/*) echo "  ${C_ERR}✗${C_0} microsandbox needs Apple Silicon on macOS"; good=1 ;;
     Linux/*)
-      if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "✓ /dev/kvm accessible"
+      if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "  ${C_OK}✓${C_0} KVM is ready (/dev/kvm accessible)"
       elif is_wsl && [ ! -e /dev/kvm ]; then
-        echo "✗ no /dev/kvm in WSL: cage needs WSL 2 on Windows 11 with nested virtualization (on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run wsl --shutdown)"; ok=0
-      elif is_wsl; then echo "✗ /dev/kvm not accessible: sudo usermod -aG kvm \$USER, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen"; ok=0
-      else echo "✗ /dev/kvm not accessible (enable virtualization; sudo usermod -aG kvm \$USER)"; ok=0
+        echo "  ${C_ERR}✗${C_0} no /dev/kvm in WSL: cage needs WSL 2 on Windows 11 with nested virtualization"
+        echo "    ${C_DIM}→ it's on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run wsl --shutdown${C_0}"; good=1
+      elif is_wsl; then
+        echo "  ${C_ERR}✗${C_0} /dev/kvm isn't accessible to you"
+        echo "    ${C_DIM}→ sudo usermod -aG kvm \$USER, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen${C_0}"; good=1
+      elif [ -e /dev/kvm ]; then
+        echo "  ${C_ERR}✗${C_0} /dev/kvm isn't accessible to you"
+        echo "    ${C_DIM}→ sudo usermod -aG kvm \$USER, then log out and back in${C_0}"; good=1
+      else
+        echo "  ${C_ERR}✗${C_0} no /dev/kvm: this machine can't run VMs yet"
+        echo "    ${C_DIM}→ turn on virtualization (Intel VT-x / AMD-V) in your BIOS or UEFI settings${C_0}"; good=1
       fi
       if is_wsl; then
-        if win_cmd powershell.exe >/dev/null && win_cmd reg.exe >/dev/null; then echo "✓ WSL distro $WSL_DISTRO_NAME with Windows interop"
-        else echo "✗ Windows interop is off ([interop] in /etc/wsl.conf): cage can't keep WSL running after you close its window"; ok=0
+        if win_cmd powershell.exe >/dev/null && win_cmd reg.exe >/dev/null; then
+          echo "  ${C_OK}✓${C_0} WSL distro $WSL_DISTRO_NAME with Windows interop"
+        else
+          echo "  ${C_ERR}✗${C_0} Windows interop is off, so cage can't keep WSL running after you close its window"
+          echo "    ${C_DIM}→ set enabled=true under [interop] in /etc/wsl.conf, then wsl --shutdown${C_0}"; good=1
         fi
       fi
       ;;
   esac
+  return $good
+}
+
+cmd_doctor() {
+  local good=1 t u
+  check_host || good=0
   if [ -f "$CAGE_ENV" ]; then
     load_env
-    echo "✓ config $CAGE_ENV (agents: $CAGE_AGENTS)"
-    [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]] && echo "✓ Telegram allowlist: $CAGE_TELEGRAM_ALLOW" || { echo "✗ CAGE_TELEGRAM_ALLOW is not set to numeric user id(s)"; ok=0; }
-    local t u
+    echo "  ${C_OK}✓${C_0} config $CAGE_ENV (agents: $CAGE_AGENTS)"
+    if [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+      echo "  ${C_OK}✓${C_0} only Telegram user(s) $CAGE_TELEGRAM_ALLOW can use the bots"
+    else
+      echo "  ${C_ERR}✗${C_0} no Telegram allowlist yet"
+      echo "    ${C_DIM}→ ./cage setup${C_0}"; good=0
+    fi
     for a in $CAGE_AGENTS; do
       t="$(token_for "$a")"
-      if ! valid_token "$t"; then echo "✗ CAGE_TELEGRAM_TOKEN_$a missing (cage setup $a, or drop $a from CAGE_AGENTS)"; ok=0
-      elif u="$(bot_username "$t")"; then echo "✓ $a bot: @$u"
-      else echo "✗ Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"; ok=0
+      if ! valid_token "$t"; then
+        echo "  ${C_ERR}✗${C_0} CAGE_TELEGRAM_TOKEN_$a missing"
+        echo "    ${C_DIM}→ ./cage setup $a, or drop $a from CAGE_AGENTS${C_0}"; good=0
+      elif u="$(bot_username "$t")"; then echo "  ${C_OK}✓${C_0} $a bot: @$u"
+      else
+        echo "  ${C_ERR}✗${C_0} Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"
+        echo "    ${C_DIM}→ check the token in @BotFather, then ./cage setup $a${C_0}"; good=0
       fi
     done
   else
-    echo "✗ no config at $CAGE_ENV (cage init)"; ok=0
+    echo "  ${C_ERR}✗${C_0} no config at $CAGE_ENV yet"
+    echo "    ${C_DIM}→ ./cage${C_0}"; good=0
   fi
-  [ $ok = 1 ] || exit 1
+  [ $good = 1 ] || exit 1
 }
 
+# Telegram bots for the agents, and who may talk to them.
 cmd_setup() {
   command -v curl >/dev/null || die "curl is required"
   cmd_init
   load_env
   resolve_agents "$@"
   local a token user first="" first_bot=""
+  [ "${ONBOARDING:-0}" = 1 ] && step "3 of 5" "A Telegram bot for each agent"
   for a in "${AGENTS[@]}"; do
     token="$(token_for "$a")"
     if valid_token "$token" && user="$(bot_username "$token")"; then
-      say "$a: keeping bot @$user"
+      ok "$a: keeping bot @$user"
     else
-      say "$a needs its own Telegram bot: message @BotFather → /newbot (name it e.g. \"Dot $a\") and copy the token."
+      if [ -z "${SHOWN_BOTFATHER:-}" ]; then
+        say "In Telegram, open $(link https://t.me/BotFather @BotFather) and send /newbot. Name it anything you like"
+        say "(e.g. \"Dot $(printf '%s' "$a" | awk '{print toupper(substr($0, 1, 1)) substr($0, 2)}')\"); the username must end in \"bot\". BotFather replies with a token."
+        SHOWN_BOTFATHER=1
+      fi
       while true; do
-        prompt "Token for the $a bot: " token secret
-        if ! valid_token "$token"; then say "that is not a bot token (they look like 123456:ABC…)"; continue; fi
+        prompt "$(face "$a" login) token for the $a bot (stays hidden): " token secret
+        if ! valid_token "$token"; then warn "that's not a bot token (they look like 123456:ABC…)"; continue; fi
         if user="$(bot_username "$token")"; then break; fi
-        say "Telegram rejected that token (or is unreachable); try again"
+        warn "Telegram rejected that token (or is unreachable); try again"
       done
       set_env "CAGE_TELEGRAM_TOKEN_$a" "$token"
-      say "$a → @$user"
+      ok "$a → @$user"
+      bot_dress "$a" "$token"
     fi
+    set_env "CAGE_TELEGRAM_BOT_$a" "$user"
     if [ -z "$first" ]; then first="$token"; first_bot="$user"; fi
   done
   # `cage setup claude codex` means "these are my agents": keep CAGE_AGENTS to the agents that have a bot, so
@@ -318,30 +584,33 @@ cmd_setup() {
       fi
     done
     set_env CAGE_AGENTS "${keep[*]}"
-    say "agents: ${keep[*]}"
+    CAGE_AGENTS="${keep[*]}"
   fi
 
+  [ "${ONBOARDING:-0}" = 1 ] && step "4 of 5" "Who's allowed in"
   if [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-    say "allowlist already set: $CAGE_TELEGRAM_ALLOW"
+    ok "allowlist already set: $CAGE_TELEGRAM_ALLOW"
   else
-    say "Now open Telegram and send any message to @$first_bot (waiting up to 2 minutes)…"
-    local updates="" id="" name="" last="" answer="" i
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-      updates="$(tg_api "$first" getUpdates "timeout=10" 2>/dev/null || true)"
+    say "Send any message to $(link "https://t.me/$first_bot" "@$first_bot") from your own Telegram."
+    local updates="" id="" name="" last="" i
+    for i in $(seq 1 60); do
+      [ "$UI" = 1 ] && printf '\r%s%s waiting for your message…' "$IND" "$(face "${AGENTS[0]}" "busy$(( i % 2 + 1 ))")" >&2
+      updates="$(tg_api "$first" getUpdates "timeout=2" 2>/dev/null || true)"
       id="$(printf '%s' "$updates" | grep -o '"from":{"id":[0-9]*' | head -1 | grep -o '[0-9]*$' || true)"
       [ -n "$id" ] && break
     done
-    [ -n "$id" ] || die "no message arrived. Set CAGE_TELEGRAM_ALLOW in $CAGE_ENV to your numeric id (ask @userinfobot), then re-run"
+    [ "$UI" = 1 ] && printf '\r\033[2K' >&2
+    [ -n "$id" ] || die "no message arrived. Set CAGE_TELEGRAM_ALLOW in $CAGE_ENV to your numeric id (ask @userinfobot), then run ./cage again"
     name="$(printf '%s' "$updates" | sed -n 's/.*"from":{"id":'"$id"',"is_bot":false,"first_name":"\([^"]*\)".*/\1/p' | head -1 || true)"
-    prompt "Got a message from ${name:-a user} (id $id). Only this account will be able to use your bots. Correct? [Y/n] " answer
-    case "$answer" in [nN]*) die "not saved; re-run cage setup" ;; esac
+    yes_no "Got it from ${name:-someone} (id $id). Only this account will be able to use your bots. That's you?" y \
+      || die "not saved; run ./cage setup again"
     set_env CAGE_TELEGRAM_ALLOW "$id"
     # Acknowledge that message so the bot doesn't answer it once cc-connect starts.
     last="$(printf '%s' "$updates" | grep -o '"update_id":[0-9]*' | tail -1 | grep -o '[0-9]*$' || true)"
     if [ -n "$last" ]; then tg_api "$first" getUpdates "offset=$((last + 1))&timeout=0" >/dev/null 2>&1 || true; fi
-    say "allowlisted Telegram user $id"
+    ok "only ${name:-Telegram user $id} can talk to your agents"
   fi
-  say "setup complete ($CAGE_ENV). Next: cage doctor && cage up"
+  [ "${ONBOARDING:-0}" = 1 ] || hint "next: ./cage up"
 }
 
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -357,7 +626,7 @@ cmd_autostart() {
       if [ "$mode" = off ]; then
         launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
         rm -f "$plist"
-        say "autostart off"
+        ok "autostart off"
         return 0
       fi
       mkdir -p "$(dirname "$plist")" "$CAGE_HOME"
@@ -382,7 +651,8 @@ cmd_autostart() {
 PLIST
       launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$plist"
-      say "autostart on: $plist runs 'cage up' at login (log: $CAGE_HOME/autostart.log)"
+      ok "autostart on: your agents wake up when you log in"
+      hint "log: $CAGE_HOME/autostart.log"
       ;;
     Linux)
       if is_wsl; then wsl_autostart "$mode"; return 0; fi
@@ -391,7 +661,7 @@ PLIST
         systemctl --user disable cage-up.service 2>/dev/null || true
         rm -f "$unit"
         systemctl --user daemon-reload 2>/dev/null || true
-        say "autostart off"
+        ok "autostart off"
         return 0
       fi
       mkdir -p "$(dirname "$unit")"
@@ -412,21 +682,25 @@ WantedBy=default.target
 UNIT
       systemctl --user daemon-reload
       systemctl --user enable cage-up.service
-      say "autostart on: $unit runs 'cage up' at login. To start at boot without logging in: sudo loginctl enable-linger $(id -un)"
+      ok "autostart on: your agents wake up when you log in"
+      hint "to start them at boot without logging in: sudo loginctl enable-linger $(id -un)"
       ;;
-    *) die "autostart supports macOS and Linux" ;;
+    *) die "autostart supports Linux and Windows (WSL)" ;;
   esac
 }
 
 cmd_up() {
   load_env
   resolve_agents "$@"
+  find_msb || die "microsandbox isn't installed; run ./cage to set it up"
+  local quiet=()
+  [ "$UI" = 1 ] && quiet=(-q)
   for a in "${AGENTS[@]}"; do
     render_config "$a"
+    [ "$UI" = 1 ] && printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2
     # Always (re)create: microsandbox runs the `--` command only on `msb run`; a plain start/restart boots
     # the VM without it. Re-creating reprovisions the system disk (~1 min) and keeps the named home volume,
     # so logins, sessions and work survive. This is also what `cage update` does, and it applies config changes.
-    say "starting $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM, $CAGE_ROOT_DISK disk, image $CAGE_IMAGE)"
     # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
     # shellcheck disable=SC2086
     "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
@@ -435,40 +709,84 @@ cmd_up() {
       --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
       --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
-      ${CAGE_MSB_EXTRA_ARGS:-} \
+      ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"
+    if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
   done
   if is_wsl; then wsl_keepalive_start; fi
-  say "VMs are installing in the background (about a minute). Next: cage login <agent>  (cage logs <agent> shows progress)"
+  if [ "$UI" = 1 ] && [ -t 0 ]; then
+    wait_ready "${AGENTS[@]}"
+    [ "${ONBOARDING:-0}" = 1 ] || next_steps
+  else
+    say "they're installing in the background (about a minute) · ./cage status"
+  fi
 }
 
 cmd_login() {
   load_env
-  local a="${1:-}"
+  local a="${1:-}" bot
   [ -n "$a" ] || die "usage: cage login <agent>"
   check_agent "$a"
-  exists "$a" || die "$(vm "$a") does not exist; run \`cage up $a\`"
-  wait_provisioned "$a"
-  case "$a" in
-    claude) say "Open the URL, sign in with your Claude Pro/Max account, paste the code back." ;;
-    codex) say "Device code sign-in. First enable device-code login for Codex in ChatGPT → Settings → Security." ;;
-    cursor) say "Open the URL on any device and approve; the CLI finishes on its own." ;;
-    antigravity) say "Antigravity signs in on first launch: open the URL, use your Google AI Pro/Ultra account, then /quit (or Ctrl-C) once you reach the prompt." ;;
+  exists "$a" || die "$a has no cage yet; run ./cage up $a"
+  refresh_running
+  case "$(probe "$a")" in
+    asleep) die "$a is asleep; wake it up first: ./cage up $a" ;;
+    installing) wait_ready "$a" ;;
   esac
+  printf '\n  %s  %ssign %s in to %s%s\n' "$(face "$a" login)" "$C_B" "$a" "$(agent_plan "$a")" "$C_0" >&2
+  hint "$(login_hint "$a")"
+  printf '\n' >&2
   agent_exec "$a" yes "$(login_cmd "$a")" || true
-  if agent_exec "$a" no "$(auth_check_cmd "$a")"; then say "✓ $a is logged in"; else die "$a still reports not logged in"; fi
+  printf '\n' >&2
+  if agent_exec "$a" no "$(auth_check_cmd "$a")"; then
+    bot="$(bot_for "$a")"
+    ok "$a is signed in${bot:+ · say hi to $(link "https://t.me/$bot" "@$bot")}"
+  else
+    die "$a still isn't signed in; run ./cage login $a to try again"
+  fi
+}
+
+STATES=""
+status_rows() { # one row per agent; records each state in STATES ("agent:state ...")
+  local a st label detail bot
+  refresh_running
+  STATES=""
+  for a in $CAGE_AGENTS; do
+    st="$(probe "$a")"
+    STATES="$STATES $a:$st"
+    bot="$(bot_for "$a")"
+    case "$st" in
+      ready) label="${C_OK}ready${C_0}        "; detail="${bot:+$(link "https://t.me/$bot" "t.me/$bot")}" ;;
+      login) label="${C_AMBER}needs a login${C_0}"; detail="→ ./cage login $a" ;;
+      installing) label="installing   "; detail="→ ./cage logs $a" ;;
+      asleep) label="${C_DIM}asleep${C_0}       "; detail="→ ./cage up $a" ;;
+      *) label="${C_DIM}no cage yet${C_0}  "; detail="→ ./cage up $a" ;;
+    esac
+    case "$st" in ready) ;; *) detail="${C_DIM}${detail}${C_0}" ;; esac
+    printf '  %s  %-12s %s  %s\n' "$(face "$a" "$st")" "$a" "$label" "$detail"
+  done
+  if is_wsl; then
+    if keepalive_running; then printf '  %s%s  WSL keepalive running%s\n' "$C_DIM" "     " "$C_0"
+    else printf '  %s%s  WSL keepalive not running → ./cage up%s\n' "$C_DIM" "     " "$C_0"; fi
+  fi
+}
+
+next_steps() { # one friendly line about what to do next, based on STATES
+  local s
+  [ -n "$STATES" ] || status_rows >/dev/null
+  case "$STATES" in
+    *:none*|*:asleep*) hint "wake them up: ./cage up" ;;
+    *:login*) for s in $STATES; do case "$s" in *:login) hint "next: ./cage login ${s%%:*}"; break ;; esac; done ;;
+    *:installing*) hint "still installing; they'll be ready in a minute" ;;
+    *) printf '\n  %s♥%s all caged and happy. Say hi on Telegram.\n' "$C_PINK" "$C_0" >&2 ;;
+  esac
 }
 
 cmd_status() {
   load_env
-  "$MSB" ps -a --label app=cage || true
-  for a in $CAGE_AGENTS; do
-    if ! exists "$a"; then printf '%-12s %s\n' "$a" "no VM (cage up $a)"; continue; fi
-    if agent_exec "$a" no "$(auth_check_cmd "$a")" 2>/dev/null; then printf '%-12s %s\n' "$a" "logged in"; else printf '%-12s %s\n' "$a" "NOT logged in (cage login $a)"; fi
-  done
-  if is_wsl; then
-    if keepalive_running; then echo "WSL keepalive: running"; else echo "WSL keepalive: not running (cage up starts it)"; fi
-  fi
+  printf '\n' >&2
+  status_rows
+  printf '\n' >&2
 }
 
 cmd_logs() { [ -n "${1:-}" ] || die "usage: cage logs <agent>"; check_agent "$1"; exec "$MSB" logs -f "$(vm "$1")"; }
@@ -480,7 +798,9 @@ cmd_update() { cmd_up "$@"; }
 cmd_down() {
   load_env
   resolve_agents "$@"
-  for a in "${AGENTS[@]}"; do "$MSB" stop "$(vm "$a")" || true; done
+  for a in "${AGENTS[@]}"; do
+    if "$MSB" stop "$(vm "$a")" >/dev/null 2>&1; then printf '  %s  %s is asleep\n' "$(face "$a" asleep)" "$a" >&2; fi
+  done
   if [ $# -eq 0 ] && is_wsl; then wsl_keepalive_stop; fi
 }
 
@@ -489,38 +809,126 @@ cmd_destroy() {
   [ -n "$a" ] || die "usage: cage destroy <agent> [--keep-login|--yes]"
   check_agent "$a"
   case "$flag" in
-    --keep-login) "$MSB" rm --force "$(vm "$a")"; say "removed $(vm "$a"); its home volume (login, work) was kept" ;;
-    --yes) "$MSB" rm --force "$(vm "$a")"; "$MSB" volume rm "$(vm "$a")-home"; say "removed $(vm "$a") and its home volume" ;;
-    *) die "this deletes $(vm "$a"). Add --keep-login to keep its login and files, or --yes to delete everything" ;;
+    --keep-login) "$MSB" rm --force "$(vm "$a")"; ok "removed $a's cage; its login and files are kept" ;;
+    --yes) "$MSB" rm --force "$(vm "$a")"; "$MSB" volume rm "$(vm "$a")-home"; ok "removed $a's cage, login and files" ;;
+    *) die "this deletes $a's cage. Add --keep-login to keep its login and files, or --yes to delete everything" ;;
   esac
 }
 
+# --- the guided first run ---------------------------------------------------------------------------------------
+configured() {
+  [ -f "$CAGE_ENV" ] || return 1
+  ( load_env >/dev/null 2>&1
+    [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]] || exit 1
+    for a in $CAGE_AGENTS; do valid_token "$(token_for "$a")" && exit 0; done
+    exit 1 )
+}
+
+install_msb() {
+  yes_no "microsandbox runs the VMs and isn't installed yet. Install it now (its official installer, no sudo)?" y \
+    || die "cage needs microsandbox: curl -fsSL https://install.microsandbox.dev | sh"
+  if ! curl -fsSL https://install.microsandbox.dev | sh >/dev/null 2>&1; then
+    warn "the installer couldn't look up the latest release (GitHub rate limit?); installing v0.7.5 instead"
+    MSB_VERSION=v0.7.5 "$CAGE_ROOT/test/install-msb-pinned.sh" >/dev/null 2>&1 || die "couldn't install microsandbox; see https://docs.microsandbox.dev"
+  fi
+  find_msb || die "microsandbox installed, but msb isn't where expected; open a new terminal and run ./cage again"
+  ok "microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //')"
+}
+
+fix_kvm() {
+  [ -e /dev/kvm ] || return 1
+  [ -r /dev/kvm ] && [ -w /dev/kvm ] && return 0
+  yes_no "Your user can't use /dev/kvm yet. Fix it now (sudo: adds you to the kvm group)?" y || return 1
+  sudo usermod -aG kvm "$(id -un)" || return 1
+  # The group applies from the next login; an ACL lets this session use KVM right away.
+  if command -v setfacl >/dev/null 2>&1; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm || true; fi
+  [ -r /dev/kvm ] && [ -w /dev/kvm ]
+}
+
+cmd_onboard() {
+  local picked=() a host_out
+  ONBOARDING=1
+  banner
+  say "Hi! Let's put your AI agents in their own little cages. About five minutes."
+
+  step "1 of 5" "This computer"
+  if ! find_msb; then install_msb; fi
+  if [ "$(uname -s)" = Linux ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
+    if ! fix_kvm; then
+      check_host >&2 || true
+      die "fix the line above, then run ./cage again"
+    fi
+  fi
+  if ! host_out="$(check_host)"; then printf '%s\n' "$host_out" >&2; die "fix the lines above, then run ./cage again"; fi
+  printf '%s\n' "$host_out" >&2
+
+  step "2 of 5" "Your subscriptions"
+  say "Which do you have? Each one becomes its own agent, with its own bot."
+  for a in $KINDS; do
+    if yes_no "$(face "$a" ready) $(printf '%-12s' "$a") $(agent_plan "$a")?" n; then picked+=("$a"); fi
+  done
+  [ ${#picked[@]} -gt 0 ] || die "pick at least one; run ./cage again when you're ready"
+
+  cmd_setup "${picked[@]}"
+
+  step "5 of 5" "Wake up and sign in"
+  cmd_up "${picked[@]}"
+  for a in "${picked[@]}"; do
+    refresh_running
+    [ "$(probe "$a")" = ready ] && continue
+    ( cmd_login "$a" ) || warn "no problem, sign $a in later: ./cage login $a"
+  done
+
+  printf '\n' >&2
+  IND="  "
+  ok "All set. Here's everyone:"
+  printf '\n' >&2
+  status_rows >&2
+  printf '\n' >&2
+  if yes_no "Wake them up automatically when you log in?" y; then cmd_autostart on; fi
+  say "${C_DIM}Run ./cage anytime to see how they're doing. Now say hi on Telegram.${C_0}"
+  printf '\n' >&2
+}
+
+cmd_home() {
+  if ! configured; then
+    if [ "$UI" = 1 ] && [ -t 0 ]; then cmd_onboard; else usage; fi
+    return 0
+  fi
+  load_env
+  banner
+  status_rows
+  next_steps
+  printf '\n' >&2
+}
+
 usage() {
-  cat <<EOF
-cage: Claude Code, Codex, Cursor and Antigravity on your own subscriptions,
-each in its own microVM (microsandbox), each reachable as a Telegram bot (cc-connect).
-
-  cage setup                      guided setup: checks each bot token with Telegram, learns your user id
-  cage init                       only write $CAGE_ENV from the example (to edit by hand)
-  cage doctor                     check host prerequisites, config and bot tokens
-  cage up [agent...]              (re)create VMs; logins and work are kept. Run after editing config or rebooting
-  cage login <agent>              sign in inside that agent's VM
-  cage status                     VMs and login state
-  cage logs <agent>               follow the VM's output (provisioning, cc-connect)
-  cage shell <agent>              shell inside the VM as the agent user
-  cage update [agent...]          same as up: fresh VMs with the latest agent CLI + pinned cc-connect
-  cage down [agent...]            stop VMs
-  cage destroy <agent> --keep-login|--yes
-  cage autostart on|off           run 'cage up' at login (Linux systemd user unit; Windows/WSL: per-user Run key)
-
-Agents: $KINDS
-EOF
+  row() { printf '  %-24s %s\n' "$1" "$2"; }
+  printf '\n  %s %scage%s  %syour AI agents, each in its own little cage%s\n\n' "$(brand)" "$C_B" "$C_0" "$C_DIM" "$C_0"
+  row "./cage" "set everything up, or see how your agents are doing"
+  printf '\n  %severy day%s\n' "$C_DIM" "$C_0"
+  row "  status" "how everyone's doing"
+  row "  up [agents]" "wake agents up (a fresh VM, same login and files)"
+  row "  down [agents]" "put agents to sleep"
+  row "  login <agent>" "sign an agent in to your subscription"
+  row "  logs <agent>" "watch what an agent's VM is doing"
+  row "  shell <agent>" "a shell inside an agent's cage"
+  printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"
+  row "  setup [agents]" "Telegram bots, and who may talk to them"
+  row "  doctor" "check this computer, the config and the bots"
+  row "  autostart on|off" "wake agents when you log in"
+  row "  update [agents]" "newest agent CLIs (same as up)"
+  row "  destroy <agent>" "--keep-login keeps its login, --yes deletes all"
+  row "  init" "just write the config file, to edit by hand"
+  printf '\n  %sagents%s  claude · codex · cursor · antigravity\n' "$C_DIM" "$C_0"
+  printf '  %sconfig%s  %s\n\n' "$C_DIM" "$C_0" "$CAGE_ENV"
 }
 
 main() {
-  local c="${1:-help}"
+  local c="${1:-}"
   shift || true
   case "$c" in
+    "") cmd_home ;;
     init) cmd_init ;;
     setup) cmd_setup "$@" ;;
     autostart) cmd_autostart "$@" ;;

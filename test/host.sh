@@ -10,12 +10,15 @@ pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
 
-# stub msb: logs one call per line (args separated by ' | '); `inspect` succeeds only for names in $T/existing
+# stub msb: logs one call per line (args separated by ' | '); `inspect` succeeds only for names in $T/existing,
+# `ps` lists the names in $T/running (default: the existing ones)
 mkdir -p "$T/bin"
 cat > "$T/bin/msb" <<'EOF'
 #!/usr/bin/env bash
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
+if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
+if [ "$cmd" = exec ]; then case "$*" in *cage:ready*) echo cage:ready ;; esac; fi   # every agent is signed in
 exit 0
 EOF
 chmod +x "$T/bin/msb"
@@ -98,17 +101,36 @@ grep -q 'volume' "$MSB_LOG" && fail "--keep-login removed the volume"
 grep -qx 'volume | rm | cage-claude-home' "$MSB_LOG" || fail "destroy --yes kept the volume"
 ok "destroy needs an explicit flag; --keep-login keeps the login volume"
 
-# status: VM list + per-agent login probe through `msb exec --no-tty -u agent` (exec exits 0 = logged in)
-echo cage-codex > "$MSB_EXISTING"
+# status: one row per agent, its face showing the state; the login probe runs inside the VM as `agent`
+printf 'cage-codex\ncage-cursor\n' > "$MSB_EXISTING"
+echo cage-codex > "$T/running"
+echo 'CAGE_TELEGRAM_BOT_codex="dot_codex_bot"' >> "$CAGE_HOME/cage.env"
 : > "$MSB_LOG"
-out="$(cage status 2>/dev/null)"
-grep -q '^codex  *logged in$' <<<"$out" || fail "status for codex: $out"
-grep -q '^claude  *no VM' <<<"$out" || fail "status for claude: $out"
-grep -q '^exec | --no-tty | -u | agent | -e | HOME=/home/agent | -w | /home/agent | cage-codex | -- | bash | -lc | .*codex login status' "$MSB_LOG" || fail "status probe: $(cat "$MSB_LOG")"
-ok "status lists VMs and probes each agent's login inside its VM"
+out="$(MSB_RUNNING="$T/running" cage status 2>/dev/null)"
+grep -qF '[•|•]  codex        ready          t.me/dot_codex_bot' <<<"$out" || fail "status for codex: $out"
+grep -qF '[-|-]  cursor       asleep         → ./cage up cursor' <<<"$out" || fail "status for cursor: $out"
+grep -qF '[ | ]  claude       no cage yet    → ./cage up claude' <<<"$out" || fail "status for claude: $out"
+grep -q '^exec | --no-tty | -u | agent | -e | HOME=/home/agent | -w | /home/agent | cage-codex | -- | bash | -lc | .*provisioned-codex.*codex login status' "$MSB_LOG" || fail "status probe: $(cat "$MSB_LOG")"
+grep -q 'cage-cursor | -- ' "$MSB_LOG" && fail "probed a VM that isn't running"
+ok "status shows each agent's state as a face and probes logins inside running VMs"
+[ -z "$(cage status 2>/dev/null | tr -d '\n' | grep -o $'\033' || true)" ] || fail "colour escapes in piped output"
+ok "piped output has no colour or animation"
 
 if cage up nonsense 2>/dev/null; then fail "unknown agent accepted"; fi
 ok "unknown agents are rejected"
+
+# on a real terminal: colour, the pixel mascot on the home screen; NO_COLOR turns colour off
+if script --version 2>&1 | grep -q util-linux; then
+  tty_run() { TERM=xterm-256color script -qfec "$*" /dev/null </dev/null 2>&1; }
+  out="$(tty_run "$ROOT/cage help")"
+  grep -q $'\033\\[' <<<"$out" || fail "no colour on a terminal: $out"
+  out="$(NO_COLOR=1 tty_run "$ROOT/cage help")"
+  if grep -q $'\033\\[' <<<"$out"; then fail "colour despite NO_COLOR"; fi
+  out="$(COLORTERM=truecolor tty_run "$ROOT/cage")"
+  grep -q '▀' <<<"$out" || fail "home screen without the mascot: $out"
+  grep -q 'codex' <<<"$out" || fail "home screen without the agents: $out"
+  ok "on a terminal: colour and the mascot; NO_COLOR turns colour off"
+fi
 
 # msb installed by the official installer but not on PATH (autostart and `wsl.exe --exec` have no login shell)
 mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb"
@@ -140,7 +162,7 @@ grep -q 'hidden session keeps Ubuntu-24.04 running' "$T/err" || fail "up did not
 : > "$T/ps.log"
 "$W" up claude 2>/dev/null
 [ ! -s "$T/ps.log" ] || fail "up started a second keepalive"
-"$W" status 2>/dev/null | grep -q '^WSL keepalive: running$' || fail "status does not show the keepalive"
+"$W" status 2>/dev/null | grep -q 'WSL keepalive running' || fail "status does not show the keepalive"
 "$W" down claude 2>/dev/null
 alive || fail "down <agent> released the keepalive while other VMs may still run"
 "$W" down 2>/dev/null
@@ -148,7 +170,7 @@ gone || fail "down did not release the keepalive"
 ok "on WSL, up holds one hidden session open; down (all agents) releases it"
 
 "$W" _autostart 2>/dev/null
-grep -q 'starting cage-claude' "$CAGE_HOME/autostart.log" || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
+grep -q 'started cage-claude' "$CAGE_HOME/autostart.log" || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
 alive || fail "_autostart did not start the keepalive"
 "$W" down 2>/dev/null; gone || fail "keepalive left running"
 ok "the Windows-login entry point runs up, logs to autostart.log and starts the keepalive"
