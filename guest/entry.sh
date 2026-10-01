@@ -58,7 +58,8 @@ if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; t
 fi
 bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing without them)"
 
-# WhatsApp, if it's on for this agent: an adapter that talks to cc-connect's bridge (guest/whatsapp.sh)
+# The app's chat (guest/app.sh), and WhatsApp if it's on for this agent: adapters on cc-connect's bridge
+if [ -r /cage-config/app.env ]; then bash /cage/app.sh "$KIND" & fi
 if [ -r /cage-config/whatsapp.env ]; then bash /cage/whatsapp.sh "$KIND" & fi
 # Voice notes, if they're on (`cage voice on`): ffmpeg, and speech-to-text on this VM (guest/voice.sh)
 if [ -r /cage-config/voice.env ]; then bash /cage/voice.sh "$KIND" & fi

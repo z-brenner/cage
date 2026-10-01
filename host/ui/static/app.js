@@ -17,7 +17,6 @@ const STATUS = {
   asleep: { label: 'Asleep', tone: 'idle', help: 'Wake it up to message it. Its files and sign-in are kept.' },
   none: { label: 'Not started', tone: 'idle', help: 'Wake it up to start its private computer.' },
   stuck: { label: 'Stuck', tone: 'bad', help: 'Something went wrong. Restarting usually fixes it; the activity log says what happened.' },
-  nochat: { label: 'No chat yet', tone: 'warn', help: 'Connect a chat app so you can message it.' },
   off: { label: 'Not set up', tone: 'off', help: '' }
 }
 const CHATS = [['telegram', 'Telegram'], ['slack', 'Slack'], ['discord', 'Discord'], ['whatsapp', 'WhatsApp']]
@@ -43,7 +42,7 @@ function h (tag, attrs, ...kids) {
     else if (k === 'value') el.value = v
     else el.setAttribute(k, v === true ? '' : v)
   }
-  for (const kid of kids.flat()) {
+  for (const kid of kids.flat(Infinity)) {
     if (kid === null || kid === undefined || kid === false) continue
     el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)))
   }
@@ -151,6 +150,7 @@ async function refresh () {
   try {
     STATE = await api('/api/state')
     render()
+    if (CHAT) drawChatState(CHAT)
   } catch (e) { if (e.message !== 'locked') console.warn(e) }
 }
 function locked () {
@@ -313,7 +313,6 @@ function nameOf (a) { const x = STATE && STATE.agents.find((y) => y.name === a);
 function agentsOn () { return STATE.agents.filter((a) => a.enabled) }
 function statusOf (a) {
   if (!a.enabled) return 'off'
-  if (!a.reachable) return 'nochat'
   return STATUS[a.state] ? a.state : 'none'
 }
 function btn (label, onclick, cls, ic) { return h('button', { type: 'button', class: 'btn ' + (cls || ''), onclick }, ic ? icon(ic) : null, label) }
@@ -364,7 +363,6 @@ function attention () {
     const s = statusOf(a)
     if (s === 'login') out.push(item('warn', 'log-in', `${a.label} needs you to sign in to ${a.plan}`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')))
     if (s === 'stuck') out.push(item('bad', 'circle-alert', `${a.label} is stuck`, btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), 'sm')))
-    if (s === 'nochat') out.push(item('warn', 'message-circle', `${a.label} has no chat app yet, so you can’t message it`, btn('Connect a chat', () => runJob(['setup', a.name], 'A chat for ' + a.label), 'sm')))
   }
   for (const c of S.connectors.filter((c) => c.broken)) out.push(item('bad', 'blocks', `${pretty(c.name)} needs you to sign in again`, btn('Sign in', () => runJob(['connect', 'add', c.name], 'Sign in to ' + pretty(c.name)), 'sm')))
   if (S.events.unseen > 0) out.push(item('bad', 'shield-alert', `cage blocked ${plural(S.events.unseen, 'thing')} since you last looked`, btn('Review', () => go('security'), 'sm')))
@@ -438,19 +436,17 @@ function drawAnswers () { const el = document.getElementById('answers'); if (el)
 function agentRow (a) {
   const s = statusOf(a)
   const st = STATUS[s]
-  const chats = CHATS.filter(([k]) => a.chats[k]).map(([, n]) => n)
+  const chats = ['here', ...CHATS.filter(([k]) => a.chats[k]).map(([, n]) => n)]
   let action = null
-  if (s === 'off') action = btn('Set up', () => runJob(['setup', a.name], 'Set up ' + a.label), 'sm')
-  else if (s === 'nochat') action = btn('Connect a chat', () => runJob(['setup', a.name], 'A chat for ' + a.label), 'sm')
-  else if (s === 'asleep' || s === 'none') action = btn('Wake up', () => runJob(['up', a.name], 'Waking ' + a.label), 'sm')
+  if (s === 'off') action = btn('Add', () => runJob(['add', a.name], 'Adding ' + a.label), 'sm')
   else if (s === 'login') action = btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')
-  else if (a.bot) action = h('a', { class: 'btn sm ghost', href: 'https://t.me/' + a.bot, target: '_blank', rel: 'noopener noreferrer', title: 'Open its Telegram chat' }, '@' + a.bot)
+  else action = h('a', { class: 'btn sm', href: '#agent/' + a.name }, icon('message-circle'), 'Chat')
   return h('li', { class: 'agent' + (a.enabled ? '' : ' off'), style: { '--c': AGENT[a.name].color } },
     h('a', { class: 'agent-main', href: '#agent/' + a.name },
       avatar(a.name, 36),
       h('span', { class: 'agent-text' }, h('span', { class: 'agent-name' }, a.label),
         h('span', { class: 'agent-sub' }, h('span', { class: 'status ' + st.tone }, dot(st.tone), st.label),
-          a.enabled ? (chats.length ? ' · ' + chats.join(', ') : '') : ' · uses ' + a.plan))),
+          a.enabled ? ' · Chat ' + chats.join(', ').replace(/, ([^,]*)$/, ' and $1') : ' · uses ' + a.plan))),
     action, h('a', { class: 'chev', href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label }, icon('chevron-right')))
 }
 
@@ -471,14 +467,14 @@ function pageHome () {
 function pageWelcome () {
   const stepsList = [
     ['Pick your agents', 'Claude Code, Codex, Cursor or Antigravity, on the plans you already pay for.'],
-    ['Give each one a chat', 'A Telegram bot, Slack, Discord or WhatsApp. Only you can message it.'],
-    ['Sign in once', 'Each agent signs in to your plan inside its own private computer.']
+    ['Sign in once', 'Each agent signs in to your plan inside its own private computer.'],
+    ['Chat with them here', 'Or from your phone: Telegram, Slack, Discord and WhatsApp work too.']
   ]
   return h('div', { class: 'page welcome' },
     h('div', { class: 'welcome-hero' },
       h('img', { src: 'logo.svg', alt: '', width: 88, height: 88 }),
       h('h1', {}, 'AI agents you can text, each in its own cage'),
-      h('p', { class: 'lede' }, 'Every agent runs on its own sealed-off computer on this machine, so it can work freely without touching your files, passwords or network. You talk to it from the chat apps you already use.'),
+      h('p', { class: 'lede' }, 'Every agent runs on its own sealed-off computer on this machine, so it can work freely without touching your files, passwords or network. You chat with it right here, or from your phone.'),
       btn('Set up cage', () => runJob(['onboard'], 'Setting up cage'), 'primary lg'),
       h('p', { class: 'small muted' }, 'Takes about five minutes.')),
     h('ol', { class: 'steps' }, stepsList.map(([t, d], i) => h('li', {}, h('span', { class: 'step-num' }, String(i + 1)), h('b', {}, t), h('span', {}, d)))),
@@ -495,27 +491,337 @@ function restoreBox () { // moving to a new computer: put a backup back before a
     form)
 }
 
-// --- one agent ---------------------------------------------------------------------------------------------------
-function pageAgent (name) {
-  const a = STATE.agents.find((x) => x.name === name)
+// --- one agent: its chat, its files, its settings --------------------------------------------------------------------
+// The chat goes through a folder its VM shares (guest/app.mjs relays it to cc-connect there); the page reads the
+// log as it grows and writes what you send. Everything an agent says is shown as text, never as HTML.
+const STARTERS = [
+  ['Summarize a document', 'Summarize the attached document in five bullet points, then list any deadlines and action items.'],
+  ['Draft a reply', 'Draft a short, friendly reply to this email:\n\n'],
+  ['Research, with sources', 'Look into this and give me a short answer with links to your sources: '],
+  ['Notes into a brief', 'Turn these notes into a one-page brief: a summary, the key points and next steps.\n\n'],
+  ['Proofread', 'Proofread this and suggest clearer wording, keeping my tone:\n\n'],
+  ['Plan it out', 'Make a step-by-step plan with a checklist for: ']
+]
+let CHAT = null   // the open chat (one at a time): its element stays put while the page around it is redrawn
+
+function agentOf (name) { return STATE.agents.find((x) => x.name === name) }
+function fileUrl (a, p, dl) { return `/api/chat/${a}/file?p=${encodeURIComponent(p)}${dl ? '&dl=1' : ''}&token=${encodeURIComponent(TOKEN)}` }
+const isPicture = (name) => /\.(png|jpe?g|gif|webp)$/i.test(name || '')
+
+function chatOpen (a) {
+  if (CHAT && CHAT.agent === a) return CHAT
+  chatClose()
+  const C = { agent: a, offset: 0, previews: new Map(), shared: [], waking: false, attached: [], connected: null, lastWho: '' }
+  C.list = h('div', { class: 'chat-list', role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation with ' + nameOf(a) })
+  C.typing = h('div', { class: 'typing', hidden: true }, h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('span', {}, nameOf(a) + ' is working…'))
+  C.empty = h('div', { class: 'chat-empty' },
+    h('p', { class: 'chat-hello' }, 'What can ', nameOf(a), ' do for you?'),
+    h('div', { class: 'starters' }, STARTERS.map(([t, text]) => h('button', { type: 'button', class: 'starter', onclick: () => { C.ta.value = text; C.ta.focus(); grow(C.ta) } }, t))),
+    h('p', { class: 'small muted' }, 'Attach files with the paperclip, or drop them here. It works on its own computer, so it can’t see yours unless you send something.'))
+  C.ta = h('textarea', { rows: 1, placeholder: 'Message ' + nameOf(a) + '…', 'aria-label': 'Message ' + nameOf(a) })
+  C.chips = h('div', { class: 'attached' })
+  const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => { attach(C, picker.files); picker.value = '' } })
+  C.sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send', title: 'Send (Enter)' }, icon('arrow-up'))
+  C.form = h('form', { class: 'composer chat-composer' }, C.chips, C.ta, h('div', { class: 'composer-bar' },
+    h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker,
+    h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
+  C.form.addEventListener('submit', (e) => { e.preventDefault(); chatSend(C) })
+  C.ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(C) } })
+  C.ta.addEventListener('input', () => grow(C.ta))
+  C.ta.addEventListener('paste', (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); attach(C, fs) } })
+  C.banner = h('div', { class: 'chat-banner', hidden: true })
+  C.el = h('div', { class: 'chat' }, C.empty, C.list, C.typing, h('div', { class: 'chat-dock' }, C.banner, C.form))
+  C.el.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); C.el.classList.add('drop') } })
+  C.el.addEventListener('dragleave', (e) => { if (!C.el.contains(e.relatedTarget)) C.el.classList.remove('drop') })
+  C.el.addEventListener('drop', (e) => { e.preventDefault(); C.el.classList.remove('drop'); attach(C, e.dataTransfer.files) })
+  CHAT = C
+  chatConnect(C, true)
+  return C
+}
+function chatClose () {
+  if (!CHAT) return
+  if (CHAT.es) CHAT.es.close()
+  clearTimeout(CHAT.retry)
+  CHAT = null
+}
+function grow (ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 260) + 'px' }
+function chatConnect (C, first) {
+  const q = first ? 'tail=600000' : 'from=' + C.offset
+  const es = new EventSource(`/api/chat/${C.agent}/log?${q}&token=${encodeURIComponent(TOKEN)}`)
+  C.es = es
+  let loading = first
+  es.onmessage = (m) => {
+    if (CHAT !== C) return es.close()
+    const d = JSON.parse(m.data)
+    if (d.reset) { C.list.replaceChildren(); C.previews.clear(); C.shared = []; C.lastWho = '' }
+    if (d.start) { if (loading) setTimeout(() => { loading = false; C.loaded = true; scrollEnd(true); drawChatState(C) }, 120); return }
+    if (typeof d.o === 'number') C.offset = d.o
+    if (!d.e) return
+    const near = nearEnd()
+    chatAdd(C, d.e, loading)
+    drawChatState(C)
+    if (!loading && (near || d.e.t === 'you')) scrollEnd()
+    if (!loading && document.hidden && ['reply', 'buttons', 'card', 'file'].includes(d.e.t) && (d.e.session || 'you') === 'you') notify(C.agent, d.e)
+  }
+  es.onerror = () => { es.close(); if (CHAT === C) C.retry = setTimeout(() => chatConnect(C, false), 2000) }
+}
+function nearEnd () { return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160 }
+function scrollEnd (instant) { requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: instant ? 'auto' : 'smooth' })) }
+function notify () {}   // desktop notifications come with the notification settings
+
+function chatAdd (C, e, history) {
+  if ((e.session || 'you') !== 'you') return
+  const recent = Date.now() - (e.at || 0) < 10 * 60 * 1000
+  switch (e.t) {
+    case 'you': {
+      C.typing.hidden = history && !recent
+      const text = (e.text || '').trim()
+      if (text === '/new' || text === '/reset') { add(C, h('div', { class: 'chat-divider' }, h('span', {}, 'New conversation')), ''); break }
+      for (const f of e.files || []) C.shared.push({ ...f, from: 'you', at: e.at })
+      add(C, h('div', { class: 'msg-you' }, h('div', { class: 'bubble' },
+        (e.files || []).length ? h('div', { class: 'bubble-files' }, e.files.map((f) => fileChip(C.agent, f))) : null,
+        text ? (text.startsWith('/') ? h('code', {}, text) : h('div', { class: 'md plain' }, text)) : null),
+      h('time', {}, clock(e.at))), 'you')
+      break
+    }
+    case 'preview': { const m = agentMsg(C, md(e.text || '…'), 'streaming', e.at); m.dataset.ctx = e.ctx || ''; C.previews.set(e.handle, m); add(C, m, 'agent'); break }
+    case 'update': { const m = C.previews.get(e.handle); if (m) m.querySelector('.agent-body').replaceChildren(md(e.text || '')); break }
+    case 'delete': { const m = C.previews.get(e.handle); if (m) { m.remove(); C.previews.delete(e.handle); whoLast(C) } break }
+    case 'reply':
+      for (const [k, m] of C.previews) if (!e.ctx || m.dataset.ctx === e.ctx) { m.remove(); C.previews.delete(k) }
+      whoLast(C)
+      C.typing.hidden = true
+      add(C, agentMsg(C, md(e.text || ''), '', e.at), 'agent')
+      break
+    case 'buttons': C.typing.hidden = true; add(C, buttonsMsg(C, e), 'agent'); break
+    case 'card': C.typing.hidden = true; add(C, agentMsg(C, cardOf(C, e.card), 'card-msg', e.at), 'agent'); break
+    case 'file':
+      C.shared.push({ ...e, from: 'agent' })
+      add(C, agentMsg(C, h('div', { class: 'bubble-files' }, fileChip(C.agent, e)), '', e.at), 'agent')
+      break
+    case 'typing': C.typing.hidden = !e.on || (history && !recent); break
+    case 'action': {
+      const q = [...C.list.querySelectorAll('.choices:not(.is-answered)')].reverse().find((el) => (el.dataset.values || '').split('\n').includes(e.action))
+      if (q) answered(q, e.label || e.action)
+      break
+    }
+    case 'error': add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
+    case 'status': C.connected = e.connected; break
+  }
+}
+function whoLast (C) { // who spoke last, once a preview is gone
+  const last = C.list.lastElementChild
+  C.lastWho = !last ? '' : last.classList.contains('msg-agent') ? 'agent' : last.classList.contains('msg-you') ? 'you' : ''
+}
+function add (C, el, who) {
+  C.list.append(el)
+  C.lastWho = who
+}
+function clock (t) { return t ? new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
+function agentMsg (C, body, cls, at) {
+  const first = C.lastWho !== 'agent'
+  return h('div', { class: 'msg-agent' + (cls ? ' ' + cls : '') + (first ? ' first' : '') },
+    first ? h('div', { class: 'agent-who' }, avatar(C.agent, 20), h('b', {}, nameOf(C.agent)), at ? h('time', {}, clock(at)) : null) : null,
+    h('div', { class: 'agent-body' }, body))
+}
+function fileChip (a, f) {
+  const name = f.name || (f.path || '').split('/').pop()
+  if (isPicture(name) && f.path) {
+    return h('a', { class: 'pic', href: fileUrl(a, f.path), target: '_blank', rel: 'noopener', title: name }, h('img', { src: fileUrl(a, f.path), alt: name, loading: 'lazy' }))
+  }
+  return h('a', { class: 'file-chip', href: f.path ? fileUrl(a, f.path, true) : null, download: name }, h('span', { class: 'file-ic' }, icon('file-text')),
+    h('span', { class: 'grow' }, h('b', {}, name), f.size ? h('span', { class: 'sub' }, size(f.size)) : null), f.path ? icon('download') : null)
+}
+// Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons).
+function buttonsMsg (C, e) {
+  const all = (e.buttons || []).flat()
+  const perm = all.some((b) => /^perm:/.test(b.data))
+  const box = h('div', { class: 'choices' + (perm ? ' approval' : '') })
+  box.dataset.values = all.map((b) => b.data).join('\n')
+  const body = perm
+    ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants to go ahead')), h('pre', { class: 'approval-what' }, (e.text || '').trim())]
+    : [md(e.text || '')]
+  box.append(...body, h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) =>
+    h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, b.text) }, b.text)))))
+  return agentMsg(C, box, '', e.at)
+}
+function choose (C, box, value, label) {
+  answered(box, label)
+  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label } }).catch((err) => { box.classList.remove('is-answered'); alert(err.message) })
+}
+function answered (box, label) {
+  box.classList.add('is-answered')
+  box.querySelectorAll('button').forEach((b) => { b.disabled = true })
+  const row = box.querySelector('.choice-row')
+  if (row) row.replaceWith(h('div', { class: 'chosen' }, icon('check'), 'You chose: ', h('b', {}, label.replace(/^[^\p{L}\p{N}]+/u, ''))))
+}
+// cc-connect's cards (/help, /usage, model pickers…): headers, text, notes and buttons
+function cardOf (C, card) {
+  const box = h('div', { class: 'card-box choices' })
+  const values = []
+  const b = (text, value, kind) => { values.push(value); return h('button', { type: 'button', class: 'btn sm' + (kind === 'primary' ? ' primary' : ''), onclick: () => choose(C, box, value, text) }, text) }
+  if (card && card.header && card.header.title) box.append(h('div', { class: 'card-title' }, card.header.title))
+  for (const el of (card && card.elements) || []) {
+    if (el.type === 'markdown') box.append(md(el.content || ''))
+    else if (el.type === 'divider') box.append(h('hr'))
+    else if (el.type === 'note') box.append(h('p', { class: 'small muted' }, el.text || ''))
+    else if (el.type === 'actions') box.append(h('div', { class: 'choice-row' }, (el.buttons || []).map((x) => b(x.text, x.value, x.btn_type))))
+    else if (el.type === 'list_item') box.append(h('div', { class: 'list-item' }, h('span', { class: 'grow' }, el.text || ''), el.btn_value ? b(el.btn_text || 'Choose', el.btn_value, el.btn_type) : null))
+    else if (el.type === 'select') {
+      const sel = h('select', { onchange: () => sel.value && choose(C, box, sel.value, sel.selectedOptions[0].textContent) },
+        h('option', { value: '' }, el.placeholder || 'Choose…'), (el.options || []).map((o) => { values.push(o.value); return h('option', { value: o.value }, o.text) }))
+      box.append(h('div', { class: 'choice-row' }, sel))
+    }
+  }
+  box.dataset.values = values.join('\n')
+  if (!values.length) box.classList.add('is-answered')
+  return box
+}
+
+async function attach (C, files) {
+  for (const f of [...files]) {
+    if (f.size > 25 * 1024 * 1024) { alert(`${f.name} is bigger than 25 MB`); continue }
+    const item = { name: f.name, uploading: true }
+    C.attached.push(item)
+    drawAttached(C)
+    try {
+      const res = await fetch(`/api/chat/${C.agent}/upload?name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'X-Cage-Token': TOKEN }, body: f })
+      const d = await res.json()
+      if (!res.ok) throw new Error(d.error || res.statusText)
+      Object.assign(item, d, { uploading: false })
+    } catch (e) { C.attached.splice(C.attached.indexOf(item), 1); alert(`Couldn’t attach ${f.name}: ${e.message}`) }
+    drawAttached(C)
+  }
+}
+function drawAttached (C) {
+  C.chips.replaceChildren(...C.attached.map((f) => h('span', { class: 'chip' + (f.uploading ? ' busy' : '') }, f.uploading ? h('span', { class: 'spinner' }) : icon(isPicture(f.name) ? 'image' : 'paperclip'), f.name,
+    h('button', { type: 'button', class: 'chip-x', 'aria-label': 'Remove ' + f.name, onclick: () => { C.attached.splice(C.attached.indexOf(f), 1); drawAttached(C) } }, icon('x')))))
+}
+async function chatSend (C, text) {
+  const a = agentOf(C.agent)
+  const msg = text !== undefined ? text : C.ta.value
+  const files = C.attached.filter((f) => !f.uploading && f.path)
+  if (!msg.trim() && !files.length) return
+  if (C.attached.some((f) => f.uploading)) return
+  if (!a.enabled || a.state === 'login') { drawChatState(C, true); return }
+  try {
+    await api(`/api/chat/${C.agent}/send`, { method: 'POST', body: { text: msg, files: files.map(({ path, name, mime }) => ({ path, name, mime })) } })
+  } catch (e) { alert(e.message); return }
+  if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C) }
+  C.typing.hidden = false
+  if (['asleep', 'none'].includes(a.state) && !C.waking) { // it waits in its folder; wake the agent up to read it
+    C.waking = true
+    api('/api/jobs', { method: 'POST', body: { args: ['up', C.agent] } }).catch(() => {})
+  }
+  drawChatState(C)
+}
+// The line above the message box: what's in the way of a reply, if anything
+function drawChatState (C, nudge) {
+  const a = agentOf(C.agent)
+  if (!a) return
+  if (a.state === 'ready' || a.state === 'installing') C.waking = false
+  const ban = (tone, ic, text, action) => { C.banner.className = 'chat-banner ' + tone; C.banner.replaceChildren(icon(ic), h('span', { class: 'grow' }, text), action || ''); C.banner.hidden = false }
+  C.empty.hidden = C.list.childElementCount > 0 || !C.loaded
+  if (!a.enabled) ban('info', 'sparkles', `Add ${a.label} to chat with it. It uses ${a.plan}.`, btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'sm primary'))
+  else if (a.state === 'login') ban('warn', 'log-in', `Sign ${a.label} in first (it uses ${a.plan}).`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm primary'))
+  else if (C.waking) ban('info', 'power', `Waking ${a.label} up… your message goes as soon as it’s ready (about a minute).`)
+  else if (a.state === 'asleep' || a.state === 'none') ban('idle', 'moon', `${a.label} is asleep. Sending a message wakes it up.`)
+  else if (a.state === 'installing') ban('info', 'loader-circle', `${a.label} is getting ready (the first time takes a few minutes). You can write already.`)
+  else if (a.state === 'stuck') ban('bad', 'circle-alert', `${a.label} is stuck.`, btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), 'sm'))
+  else C.banner.hidden = true
+  if (nudge && !C.banner.hidden) { C.banner.classList.remove('nudge'); void C.banner.offsetWidth; C.banner.classList.add('nudge') }
+}
+
+function pageAgent (name, tab) {
+  const a = agentOf(name)
   if (!a) return h('div', { class: 'page' }, pageHead('No such agent', ''), btn('Back to Home', () => go('home')))
   const s = statusOf(a)
   const st = STATUS[s]
-  const meta = AGENT[a.name]
-  const headTitle = h('div', { class: 'agent-head', style: { '--c': meta.color } }, avatar(a.name, 56),
-    h('div', {}, h('h1', {}, a.label), h('p', { class: 'status ' + st.tone }, dot(st.tone), st.label, h('span', { class: 'muted' }, ' · uses ' + a.plan))))
+  const tabs = [['', 'Chat', 'message-circle'], ['files', 'Files', 'folder'], ['settings', 'Settings', 'settings']]
+  const head = h('header', { class: 'agent-bar' },
+    h('div', { class: 'agent-head', style: { '--c': AGENT[a.name].color } }, avatar(a.name, 40),
+      h('div', {}, h('h1', {}, a.label), h('p', { class: 'status ' + st.tone }, dot(st.tone), st.label, h('span', { class: 'muted' }, ' · uses ' + a.plan)))),
+    a.enabled ? h('nav', { class: 'tabs', 'aria-label': a.label }, tabs.map(([t, label, ic]) =>
+      h('a', { href: '#agent/' + a.name + (t ? '/' + t : ''), class: (tab || '') === t ? 'on' : '', 'aria-current': (tab || '') === t ? 'page' : null }, icon(ic), label))) : null,
+    !tab && a.enabled ? h('button', { type: 'button', class: 'icon-btn', title: 'New conversation', 'aria-label': 'New conversation', onclick: () => { if (CHAT) chatSend(CHAT, '/new') } }, icon('square-pen')) : null)
   if (!a.enabled) {
-    return h('div', { class: 'page' }, h('header', { class: 'page-head' }, headTitle),
+    return h('div', { class: 'page' }, head,
       h('div', { class: 'empty-state' }, icon('sparkles', 'lg'), h('h2', {}, 'Add ' + a.label),
-        h('p', {}, `cage gives ${a.label} its own private computer, signs it in to your ${a.plan} plan and connects it to a chat app. About five minutes.`),
-        btn('Set up ' + a.label, () => runJob(['setup', a.name], 'Set up ' + a.label), 'primary')))
+        h('p', {}, `cage gives ${a.label} its own private computer and signs it in (it uses ${a.plan}). Then you chat with it right here; chat apps on your phone are optional.`),
+        btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'primary')))
   }
-  let primary = null
-  if (s === 'nochat') primary = btn('Connect a chat', () => runJob(['setup', a.name], 'A chat for ' + a.label), 'primary')
-  else if (s === 'asleep' || s === 'none') primary = btn('Wake up', () => runJob(['up', a.name], 'Waking ' + a.label), 'primary', 'power')
-  else if (s === 'login') primary = btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in to ' + a.plan), 'primary', 'log-in')
-  else if (s === 'stuck') primary = btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), 'primary', 'rotate-cw')
+  if (tab === 'files') return h('div', { class: 'page agent-page' }, head, pageFiles(a))
+  if (tab === 'settings') return h('div', { class: 'page agent-page' }, head, agentSettings(a))
+  const C = chatOpen(a.name)
+  drawChatState(C)
+  return h('div', { class: 'page agent-page chat-page' }, head, C.el)
+}
 
+// Files: what you and the agent sent each other, and its work folder (the agent's own computer)
+let FILES = { agent: '', path: '', list: null, error: '' }
+function pageFiles (a) {
+  const C = chatOpen(a.name)
+  if (FILES.agent !== a.name) FILES = { agent: a.name, path: '', list: null, error: '' }
+  const shared = C.shared.slice().reverse()
+  const awake = a.state === 'ready' || a.state === 'login' || a.state === 'installing'
+  const work = h('div', { class: 'card flush' })
+  const load = async (p) => {
+    FILES.path = p
+    try { const d = await api(`/api/chat/${a.name}/request`, { method: 'POST', body: { type: 'ls', path: p } }); FILES.list = d.ok ? d.entries : []; FILES.error = d.ok ? '' : d.error } catch (e) { FILES.error = e.message }
+    drawWork()
+  }
+  const download = async (p, btnEl) => {
+    btnEl.disabled = true
+    try {
+      const d = await api(`/api/chat/${a.name}/request`, { method: 'POST', body: { type: 'fetch', path: p } })
+      if (!d.ok) throw new Error(d.error)
+      const link = h('a', { href: fileUrl(a.name, d.path, true), download: d.name })
+      document.body.append(link); link.click(); link.remove()
+    } catch (e) { alert(e.message) }
+    btnEl.disabled = false
+  }
+  const up = h('input', { type: 'file', multiple: true, hidden: true, onchange: async () => {
+    for (const f of [...up.files]) {
+      try {
+        const res = await fetch(`/api/chat/${a.name}/upload?name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'X-Cage-Token': TOKEN }, body: f })
+        const d = await res.json()
+        if (!res.ok) throw new Error(d.error)
+        const r = await api(`/api/chat/${a.name}/request`, { method: 'POST', body: { type: 'put', from: d.path, dir: FILES.path, name: f.name } })
+        if (!r.ok) throw new Error(r.error)
+      } catch (e) { alert(`Couldn’t upload ${f.name}: ${e.message}`) }
+    }
+    up.value = ''
+    load(FILES.path)
+  } })
+  function drawWork () {
+    const crumbs = ['work', ...FILES.path.split('/').filter(Boolean)]
+    work.replaceChildren(
+      h('div', { class: 'crumbs' }, crumbs.map((c, i) => [i ? h('span', { class: 'muted' }, '/') : null,
+        h('button', { type: 'button', class: 'crumb', onclick: () => load(crumbs.slice(1, i + 1).join('/')) }, c)]),
+      h('span', { class: 'grow' }), h('button', { type: 'button', class: 'btn sm', onclick: () => up.click() }, icon('upload'), 'Upload here'), up),
+      FILES.error ? h('p', { class: 'empty' }, FILES.error)
+        : FILES.list === null ? h('p', { class: 'empty' }, 'Opening…')
+          : rows(FILES.list.slice().sort((x, y) => (y.dir - x.dir) || x.name.localeCompare(y.name)).map((f) => {
+            const p = (FILES.path ? FILES.path + '/' : '') + f.name
+            return h('li', {}, h('span', { class: 'chat-mark' }, icon(f.dir ? 'folder' : 'file')),
+              h('span', { class: 'grow' }, f.dir ? h('button', { type: 'button', class: 'linkish', onclick: () => load(p) }, h('b', {}, f.name)) : h('b', {}, f.name),
+                h('span', { class: 'sub' }, f.dir ? 'Folder' : `${size(f.size)} · ${ago(f.at / 1000)}`)),
+              f.dir ? null : h('button', { type: 'button', class: 'btn sm ghost', onclick: (e) => download(p, e.currentTarget) }, icon('download'), 'Download'))
+          }), 'This folder is empty.'))
+  }
+  if (awake) { drawWork(); if (FILES.list === null) load(FILES.path) } else work.append(h('p', { class: 'empty' }, `${a.label} is asleep; wake it up to see its work folder.`))
+  return [
+    section('In this chat', 'Files you sent each other.', h('div', { class: 'card flush' }, rows(shared.map((f) => h('li', {}, fileChip(a.name, f),
+      h('span', { class: 'muted small' }, f.from === 'you' ? 'You sent' : nameOf(a.name) + ' sent'))), 'Nothing yet. Attach files to a message, or ask it to send you one.'))),
+    section('Its work folder', `${a.label}’s own computer: what it makes and keeps. Download anything, or upload files for it to use.`, work)
+  ]
+}
+
+// Settings for one agent: chat apps, asking first, plan usage, privacy, stand-in, troubleshooting
+let USAGE = {}
+function agentSettings (a) {
+  const s = statusOf(a)
+  const meta = AGENT[a.name]
   const c = a.chats
   const chatRow = (key, label) => {
     const on = !!c[key]
@@ -537,10 +843,29 @@ function pageAgent (name) {
       h('span', { class: 'grow' }, h('b', {}, label), h('span', { class: 'sub' + (on ? ' on' : '') }, detail)), open, acts)
   }
   const others = agentsOn().filter((b) => b.name !== a.name)
-  return h('div', { class: 'page' },
-    h('header', { class: 'page-head' }, headTitle, primary ? h('div', { class: 'row' }, primary) : null),
-    st.help && s !== 'ready' ? h('p', { class: 'callout ' + st.tone }, icon(st.tone === 'bad' ? 'circle-alert' : 'info'), st.help) : null,
-    section('Where you talk to it', 'Only you can message it, unless you let others in.', h('ul', { class: 'list chats' }, CHATS.map(([k, n]) => chatRow(k, n)))),
+  const usageBox = h('div', { class: 'usage' })
+  const showUsage = () => {
+    const u = USAGE[a.name]
+    usageBox.replaceChildren(!u ? h('p', { class: 'muted small' }, 'Checking…')
+      : u.error ? h('p', { class: 'muted small' }, u.error)
+        : u.card ? cardOf({ agent: a.name }, u.card) : md(u.text || ''))
+  }
+  const checkUsage = async () => {
+    USAGE[a.name] = null
+    showUsage()
+    try { USAGE[a.name] = await api(`/api/chat/${a.name}/usage`, { method: 'POST', body: {} }) } catch (e) { USAGE[a.name] = { error: e.message } }
+    showUsage()
+  }
+  if (a.state === 'ready') { if (!(a.name in USAGE)) checkUsage(); else showUsage() } else usageBox.append(h('p', { class: 'muted small' }, 'Wake it up and sign it in to see how much is left.'))
+  return [
+    section('Plan usage', `How much is left on its plan (${a.plan}). Only Claude Code and Codex can tell.`, h('div', { class: 'card usage-card' }, usageBox,
+      a.state === 'ready' ? h('div', { class: 'row' }, btn('Check again', checkUsage, 'sm ghost', 'refresh-cw')) : null)),
+    section('Asking first', '', h('div', { class: 'card' },
+      setting('Ask before acting in your apps', a.name === 'claude'
+        ? 'Before it sends an email, books a meeting or changes anything in an app you connected, it asks you in the chat. Work on its own computer goes ahead.'
+        : `${a.label} can only ask before every action, so expect more questions. It asks in the chat, with Allow and Deny buttons.`,
+      toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Asking first'), 'Ask before acting')))),
+    section('Chat apps', 'Talk to it from your phone too. Only you can message it, unless you let others in.', h('ul', { class: 'list chats' }, CHATS.map(([k, n]) => chatRow(k, n)))),
     section('Preferences', '', h('div', { class: 'card' },
       setting('Privacy mask', `Emails, phone and card numbers, and your own words reach ${meta.vendor} as placeholders like [EMAIL_1], and come back as themselves.`,
         toggle(a.mask, (on) => runJob(['mask', on ? 'on' : 'off', a.name], 'Privacy mask for ' + a.label), 'Privacy mask for ' + a.label)),
@@ -551,7 +876,8 @@ function pageAgent (name) {
         btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), '', 'rotate-cw'),
         btn('Terminal', () => runJob(['shell', a.name], 'Inside ' + a.label + '’s computer'), '', 'square-terminal'),
         btn('Put to sleep', () => runJob(['down', a.name], 'Putting ' + a.label + ' to sleep'), '', 'moon')
-      ] : h('p', { class: 'muted small' }, 'Wake it up first.'))))
+      ] : btn('Wake up', () => runJob(['up', a.name], 'Waking ' + a.label), '', 'power')))
+  ]
 }
 function fallbackSelect (a, others) {
   return h('select', { 'aria-label': 'Stand-in for ' + a.label, onchange: (e) => runJob(['fallback', a.name, e.target.value || 'off'], 'Stand-in for ' + a.label) },
@@ -753,16 +1079,16 @@ function drawNav () {
     return h('a', { href: '#agent/' + a.name, 'data-nav': 'agent/' + a.name, class: a.enabled ? '' : 'off', title: a.label + ': ' + st.label },
       avatar(a.name, 18), h('span', { class: 'label' }, a.label), a.enabled ? dot(st.tone) : h('span', { class: 'nav-add' }, icon('plus')))
   }))
-  document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === page))
+  document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === page.split('/').slice(0, 2).join('/')))
   const badge = (id, n) => { const b = document.getElementById(id); b.hidden = !n; b.textContent = n || '' }
   badge('badge-memory', S.memory.inbox)
   badge('badge-security', S.events.unseen)
   const ver = document.getElementById('version')
   ver.replaceChildren(h('span', {}, 'cage ' + S.version))
   if (newer(LATEST, S.version)) ver.append(h('button', { type: 'button', class: 'update', onclick: () => runJob(['update'], 'Updating cage') }, icon('download'), 'Update to ' + LATEST))
-  const todo = agentsOn().filter((a) => ['login', 'stuck', 'nochat'].includes(statusOf(a))).length + S.connectors.filter((c) => c.broken).length + (S.events.unseen ? 1 : 0)
+  const todo = agentsOn().filter((a) => ['login', 'stuck'].includes(statusOf(a))).length + S.connectors.filter((c) => c.broken).length + (S.events.unseen ? 1 : 0)
   document.title = todo ? `(${todo}) cage` : 'cage'
-  document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6)) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
+  document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
 function render (force) {
   if (!STATE) return
@@ -777,7 +1103,7 @@ function render (force) {
   const kept = {}
   if (main.dataset.page === page) main.querySelectorAll('[data-keep]').forEach((el) => { kept[el.dataset.keep] = el.value })
   const fn = !STATE.configured ? pageHome
-    : page.startsWith('agent/') ? () => pageAgent(page.slice(6))
+    : page.startsWith('agent/') ? () => pageAgent(...page.slice(6).split('/'))
       : { home: pageHome, apps: pageApps, signins: pageSignins, memory: pageMemory, security: pageSecurity, settings: pageSettings }[page]
   const same = main.dataset.page === page
   main.dataset.page = page
@@ -794,7 +1120,7 @@ function route () {
     history.replaceState(null, '', location.pathname + '#home')
   }
   const p = location.hash.slice(1)
-  page = PAGES.includes(p) || /^agent\/[a-z]+$/.test(p) ? p : 'home'
+  page = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|settings))?$/.test(p) ? p : 'home'
   document.body.classList.remove('nav-open')
   if (TOKEN) start()
   render()

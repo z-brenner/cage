@@ -1,7 +1,7 @@
 // Drives cage's web app in a real (headless) browser against a stub msb: the page, its token, a question with a
-// hidden answer, a yes/no question, a terminal view, asking your agents, the phone layout, and that nothing works
-// without the token.
-//   node test/ui.test.mjs <base url> <token> <cage home>
+// hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one (test/fake-vm.mjs plays
+// its VM), the phone layout, and that nothing works without the token.
+//   node test/ui.test.mjs <base url> <token> <cage home> <the fake VM's work folder>
 // (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
 import fs from 'node:fs'
 import path from 'node:path'
@@ -9,7 +9,7 @@ import { createRequire } from 'node:module'
 // PLAYWRIGHT_MODULE: where the playwright package is, when it isn't installed next to this file
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const [base, token, home] = process.argv.slice(2)
+const [base, token, home, work] = process.argv.slice(2)
 let pass = 0
 const ok = (m) => { pass++; console.log('ok - ' + m) }
 const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
@@ -30,9 +30,9 @@ await page.goto(base + '/#' + token)
 await page.locator('.agent', { hasText: 'Claude Code' }).getByText('Ready').waitFor({ timeout: 20000 })
 if (page.url().includes(token)) fail('the token stayed in the address bar')
 const card = page.locator('.agent', { hasText: 'Claude Code' })
-if (!(await card.getByRole('link', { name: '@my_claude_bot' }).count())) fail('no link to the bot')
+if (!(await card.getByRole('link', { name: 'Chat', exact: true }).count())) fail('no way to chat')
 if (!(await page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.dot.ok').count())) fail('no ready dot in the sidebar')
-ok('agents: Claude ready with its bot link, in the list and the sidebar; the token is moved out of the address bar')
+ok('agents: Claude ready to chat, in the list and the sidebar; the token is moved out of the address bar')
 
 // ask your agents: the awake ones answer side by side
 await page.getByLabel('Question for your agents').fill('capital of France?')
@@ -41,6 +41,56 @@ await page.getByLabel('Question for your agents').press('Enter')
 await page.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris').waitFor({ timeout: 15000 })
 if (!(await page.locator('.answer-card strong', { hasText: 'the stub' }).count())) fail('the answer is not formatted')
 ok('ask your agents: the awake ones answer side by side, formatted')
+
+// chat with an agent in the app: a starter, a file, a streamed answer, a file back, asking before acting
+await card.getByRole('link', { name: 'Chat', exact: true }).click()
+const chat = page.locator('.chat')
+await chat.getByRole('button', { name: 'Summarize a document' }).click()
+if (!(await chat.locator('textarea').inputValue()).startsWith('Summarize the attached document')) fail('the starter did not fill the message')
+fs.writeFileSync(path.join(work, '..', 'brief.pdf'), '%PDF-1.4 brief')
+await chat.locator('input[type=file]').setInputFiles(path.join(work, '..', 'brief.pdf'))
+await chat.locator('.attached .chip:not(.busy)', { hasText: 'brief.pdf' }).waitFor({ timeout: 10000 })
+await chat.locator('textarea').press('Enter')
+await chat.locator('.msg-you', { hasText: 'Summarize the attached document' }).locator('.file-chip', { hasText: 'brief.pdf' }).waitFor({ timeout: 10000 })
+await chat.locator('.msg-agent', { hasText: 'second point' }).locator('strong', { hasText: 'first' }).waitFor({ timeout: 10000 })
+if (await chat.locator('.msg-agent.streaming').count()) fail('the streamed preview stayed after the answer')
+const back = chat.locator('.file-chip', { hasText: 'reviewed-brief.pdf' })
+await back.waitFor({ timeout: 10000 })
+const [download] = await Promise.all([page.waitForEvent('download'), back.click()])
+if (fs.readFileSync(await download.path(), 'utf8') !== '%PDF-1.4 brief') fail('the file the agent sent back')
+await chat.locator('textarea').fill('Email Bob that the brief is ready')
+await chat.locator('textarea').press('Enter')
+const approval = chat.locator('.choices.approval')
+await approval.getByText('mcp__zapier__gmail_send_email').waitFor({ timeout: 10000 })
+await approval.getByRole('button', { name: 'Allow', exact: true }).click()
+await chat.getByText('Sent the email to bob@acme.com.').waitFor({ timeout: 10000 })
+if (!(await approval.getByText('You chose:').count())) fail('the choice is not shown')
+if (!fs.readFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), 'utf8').includes('"action":"perm:allow"')) fail('the approval did not reach the agent')
+ok('chat: starters, a file each way, a streamed answer, and asking before acting (Allow reaches the agent)')
+
+// its files and its plan usage
+await page.locator('.tabs').getByRole('link', { name: 'Files' }).click()
+await page.locator('.card', { hasText: 'notes.md' }).waitFor({ timeout: 15000 })
+await page.getByRole('button', { name: 'reports' }).click()
+const q3 = page.locator('li', { hasText: 'q3.txt' })
+await q3.waitFor({ timeout: 15000 })
+const [dl2] = await Promise.all([page.waitForEvent('download'), q3.getByRole('button', { name: 'Download' }).click()])
+if (!fs.readFileSync(await dl2.path(), 'utf8').startsWith('Q3: up 12%')) fail('download from the work folder')
+if (!(await page.locator('.card', { hasText: 'brief.pdf' }).count())) fail('files of the chat are not listed')
+await page.locator('.tabs').getByRole('link', { name: 'Settings' }).click()
+await page.locator('.usage').getByText('42% used').waitFor({ timeout: 15000 })
+if (!(await page.getByRole('link', { name: '@my_claude_bot' }).count())) fail('no link to the bot in its settings')
+ok("files: what you sent each other, and its work folder to download from; its plan's usage in its settings")
+
+// an asleep agent: sending wakes it up, and the message waits in its folder
+await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
+await page.locator('.chat-banner', { hasText: 'asleep' }).waitFor({ timeout: 10000 })
+await page.locator('.chat textarea').fill('hello codex')
+await page.locator('.chat textarea').press('Enter')
+await page.locator('.chat-banner', { hasText: 'Waking Codex up' }).waitFor({ timeout: 10000 })
+const waiting = fs.readdirSync(path.join(home, 'app', 'codex', 'in')).filter((n) => n.endsWith('.json'))
+if (waiting.length !== 1 || !fs.readFileSync(path.join(home, 'app', 'codex', 'in', waiting[0]), 'utf8').includes('hello codex')) fail('the message is not waiting for codex')
+ok('an asleep agent wakes up when you message it; the message waits for it')
 
 // a question with a hidden answer: add a key
 await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
@@ -82,7 +132,7 @@ ok('the privacy mask preview shows tokens')
 
 // a terminal view: an agent's logs
 await page.locator('#nav-agents').getByRole('link', { name: 'Claude Code' }).click()
-await page.getByRole('heading', { name: 'Claude Code' }).waitFor({ timeout: 10000 })
+await page.locator('.tabs').getByRole('link', { name: 'Settings' }).click()
 await page.getByRole('button', { name: 'Activity log' }).click()
 await dialog.locator('.job-term .xterm').waitFor({ timeout: 15000 })
 await page.waitForFunction(() => document.querySelector('.job-term')?.innerText.includes('cc-connect: line 3'), null, { timeout: 15000 })

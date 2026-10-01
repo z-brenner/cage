@@ -12,6 +12,7 @@ CAGE_HOME="${CAGE_HOME:-$HOME/.cage}"
 CAGE_ENV="${CAGE_ENV:-$CAGE_HOME/cage.env}"
 BRAIN="$CAGE_HOME/brain"
 SECRETS="$CAGE_HOME/secrets"
+APPDIR="$CAGE_HOME/app"   # the app's chat with each agent (see app_dirs)
 MSB="${CAGE_MSB:-msb}"
 # The microsandbox installer puts msb in ~/.local/bin, which isn't on PATH in non-login sessions
 # (autostart at login, `wsl.exe --exec`). Find it there too.
@@ -214,8 +215,12 @@ vm() { echo "cage-$1"; }
 
 # cc-connect agent type and autonomy mode for each agent. "yolo" is safe because the microVM is the sandbox.
 cc_type() { case "$1" in claude) echo claudecode ;; *) echo "$1" ;; esac; }
+# Asking before acting (cage approve <agent> on): Claude asks only before it uses your apps (its MCP tools), since
+# everything else it can do stays inside its VM; the others ask before every action, which is all they offer.
+CLAUDE_INSIDE="Agent Task Bash BashOutput KillShell Edit MultiEdit Write Read Glob Grep LS NotebookEdit NotebookRead
+  WebFetch WebSearch TodoWrite ExitPlanMode Skill SlashCommand ListMcpResourcesTool ReadMcpResourceTool mcp__browser"
 cc_mode() {
-  if [ "$CAGE_MODE" != yolo ]; then echo default; return; fi
+  if [ "$CAGE_MODE" != yolo ] || [ "$(cvar APPROVE "$1")" = on ]; then echo default; return; fi
   case "$1" in claude) echo bypassPermissions ;; cursor) echo force ;; *) echo yolo ;; esac
 }
 cc_cmd() { case "$1" in cursor) echo cursor-agent ;; antigravity) echo agy ;; *) echo "" ;; esac; }
@@ -414,18 +419,38 @@ yes_no() { # yes_no <question> <default y|n>: true for yes
   fi
 }
 
+app_token() { # app_token <agent>: the secret its in-VM adapters use with cc-connect (made once, kept)
+  local f="$CAGE_HOME/agents/$1/app.token"
+  mkdir -p "$CAGE_HOME/agents/$1"
+  [ -s "$f" ] || ( umask 077; head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
+  cat "$f"
+}
+
+# The app's chat with an agent goes through $APPDIR/<agent>, which its VM sees as /cage-app (guest/app.mjs):
+#   in/        what you send (written here; the VM hands it to cc-connect and removes it)
+#   log.jsonl  everything said, in order (written by the VM; read by host/ui/server.py)
+#   files/     files sent either way;  out/  answers to the app's requests (scheduled tasks, files in its work folder)
+# The VM's agent user writes there, so the folders are world-writable, inside a 0700 folder only you can enter. The
+# app treats everything in them as the agent's (never follows a link out, never runs anything).
+app_dirs() {
+  local d="$APPDIR/$1" x
+  mkdir -p "$APPDIR" && chmod 700 "$APPDIR"
+  for x in "" /in /out /files; do mkdir -p "$d$x" && chmod 777 "$d$x"; done
+}
+
 # Writes $CAGE_HOME/agents/<agent>/cc-connect.toml (0600). Values are validated, so no TOML escaping is needed.
 render_config() {
-  local a="$1" token dir cmd cmdline="" platforms="" admins="" v bridge
+  local a="$1" token dir cmd cmdline="" platforms="" admins="you" v bridge app tools=""
   dir="$CAGE_HOME/agents/$a"
   mkdir -p "$dir"
   chmod 700 "$CAGE_HOME" "$CAGE_HOME/agents" "$dir"
+  app="$(app_token "$a")"
   token="$(token_for "$a")"
   if [ -n "$token" ]; then
     valid_token "$token" || die "CAGE_TELEGRAM_TOKEN_$a is not a bot token (cage setup $a)"
     [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "CAGE_TELEGRAM_ALLOW must be your numeric Telegram user id(s), comma-separated"
     [[ "$CAGE_TELEGRAM_GROUP_REPLY_ALL" =~ ^(true|false)$ ]] || die "CAGE_TELEGRAM_GROUP_REPLY_ALL must be true or false"
-    admins="$CAGE_TELEGRAM_ALLOW"
+    admins="$admins,$CAGE_TELEGRAM_ALLOW"
     platforms="$platforms
 [[projects.platforms]]
 type = \"telegram\"
@@ -465,26 +490,45 @@ token = \"$v\"
 allow_from = \"$(cvar DISCORD_ALLOW "$a")\"
 "
   fi
-  bridge=""
-  v="$(cvar WHATSAPP_MODE "$a")"
-  if [ -n "$v" ] && [ -n "$platforms" ]; then
-    [[ "$v" =~ ^(own|spare)$ && "$(cvar WHATSAPP_ALLOW "$a")" =~ ^[0-9]*$ && "$(cvar WHATSAPP_TOKEN "$a")" =~ ^[a-f0-9]{16,}$ ]] \
-      || die "$a's WhatsApp settings are broken; cage chat add whatsapp $a"
-    if [ "$v" = own ]; then admins="$admins,me"; else admins="$admins,$(cvar WHATSAPP_ALLOW "$a")"; fi
-    # cc-connect's bridge, for the adapter in the same VM (guest/whatsapp.sh); nothing outside the VM can reach it
-    bridge="
+  # cc-connect's bridge and management API, for adapters in the same VM: the app's chat (guest/app.sh) and
+  # WhatsApp (guest/whatsapp.sh). Nothing outside the VM can reach them; they share this agent's app token.
+  bridge="
 [bridge]
 enabled = true
 port = 9810
-token = \"$(cvar WHATSAPP_TOKEN "$a")\"
+token = \"$app\"
+
+[management]
+enabled = true
+port = 9820
+token = \"$app\"
 "
+  ( umask 077; printf 'APP_BRIDGE_PORT=9810\nAPP_MGMT_PORT=9820\nAPP_TOKEN=%s\n' "$app" > "$dir/app.env" )
+  v="$(cvar WHATSAPP_MODE "$a")"
+  if [ -n "$v" ]; then
+    [[ "$v" =~ ^(own|spare)$ && "$(cvar WHATSAPP_ALLOW "$a")" =~ ^[0-9]*$ ]] || die "$a's WhatsApp settings are broken; cage chat add whatsapp $a"
+    if [ "$v" = own ]; then admins="$admins,me"; else admins="$admins,$(cvar WHATSAPP_ALLOW "$a")"; fi
     ( umask 077; printf 'WA_MODE=%s\nWA_ALLOW=%s\nWA_BRIDGE_PORT=9810\nWA_BRIDGE_TOKEN=%s\nWA_NAME=%s\n' \
-        "$v" "$(cvar WHATSAPP_ALLOW "$a")" "$(cvar WHATSAPP_TOKEN "$a")" "$(agent_short "$a")" > "$dir/whatsapp.env" )
+        "$v" "$(cvar WHATSAPP_ALLOW "$a")" "$app" "$(agent_short "$a")" > "$dir/whatsapp.env" )
   else
     rm -f "$dir/whatsapp.env"
   fi
   admins="$(printf '%s' "$admins" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)"
-  [ -n "$platforms" ] || die "CAGE_TELEGRAM_TOKEN_$a is missing, so nobody can reach $a: cage setup $a (Telegram), or cage chat add slack|discord $a"
+  if [ -z "$platforms" ]; then
+    # cc-connect wants at least one chat platform, and with no chat app you talk to this agent in cage's app
+    # (the bridge above). This placeholder never carries a message: it only listens inside the VM, for messages
+    # signed with a secret nobody has, from nobody, and it calls nothing until it has a message to answer.
+    platforms="
+[[projects.platforms]]
+type = \"line\"
+
+[projects.platforms.options]
+channel_secret = \"$(rand_word 32)\"
+channel_token = \"$(rand_word 32)\"
+allow_from = \"nobody\"
+port = \"9830\"
+"
+  fi
   cmd="$(cc_cmd "$a")"
   # Cursor asks before it uses an MCP server, and headless nobody can answer: once you've connected apps for it
   # (connector_plan runs first), approve them.
@@ -496,6 +540,9 @@ token = \"$(cvar WHATSAPP_TOKEN "$a")\"
     rm -f "$dir/mask.terms" "$dir/mask.on"
   fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
+  if [ "$a" = claude ] && [ "$(cvar APPROVE "$a")" = on ] && [ "$CAGE_MODE" = yolo ]; then
+    tools="allowed_tools = [$(printf '"%s",' $CLAUDE_INSIDE | sed 's/,$//')]"
+  fi
   # /all and stand-ins: cc-connect's hooks only notify, so guest/hook.sh leaves requests for cage (see outbox_process)
   local features extras=""
   features="$(agent_features "$a")"
@@ -540,6 +587,7 @@ type = "$(cc_type "$a")"
 work_dir = "/home/agent/work"
 mode = "$(cc_mode "$a")"
 $cmdline
+$tools
 $platforms
 EOF2
   )
@@ -1735,8 +1783,7 @@ cmd_doctor() {
         fi
       fi
       if [ $any = 0 ] && ! valid_token "$(token_for "$a")"; then
-        echo "  ${C_ERR}✗${C_0} CAGE_TELEGRAM_TOKEN_$a missing, so nobody can reach $a"
-        echo "    ${C_DIM}→ cage setup $a, cage chat add slack|discord $a, or drop $a from CAGE_AGENTS${C_0}"; good=0
+        echo "  ${C_OK}✓${C_0} $a: you chat with it in the app (cage ui); no chat app for your phone"
       fi
     done
     if command -v qrencode >/dev/null 2>&1; then echo "  ${C_OK}✓${C_0} QR codes for your phone (qrencode)"
@@ -1804,7 +1851,7 @@ cmd_setup() {
   if [ $# -gt 0 ]; then
     local keep=() k
     for k in $KINDS; do
-      if [[ " ${AGENTS[*]} " == *" $k "* ]] || { [[ " $CAGE_AGENTS " == *" $k "* ]] && valid_token "$(token_for "$k")"; }; then
+      if [[ " ${AGENTS[*]} " == *" $k "* ]] || { [[ " $CAGE_AGENTS " == *" $k "* ]] && { valid_token "$(token_for "$k")" || set_up "$k"; }; }; then
         keep+=("$k")
       fi
     done
@@ -1936,6 +1983,7 @@ cmd_up() {
     render_config "$a"
     secret_plan "$a"
     events_harvest "$a"   # its runtime log goes with the old VM
+    app_dirs "$a"
     local outbox=()
     if [ -n "$(agent_features "$a")" ]; then
       mkdir -p "$OUTBOX/$a" && chmod 700 "$OUTBOX" && chmod 777 "$OUTBOX/$a"   # written by the VM's agent user
@@ -1958,7 +2006,7 @@ cmd_up() {
       --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
       --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
       --mount-dir "$BRAIN/memory:/memory:ro" \
-      --mount-dir "$BRAIN/inbox/$a:/memory-inbox" ${outbox[@]+"${outbox[@]}"} \
+      --mount-dir "$BRAIN/inbox/$a:/memory-inbox" --mount-dir "$APPDIR/$a:/cage-app" ${outbox[@]+"${outbox[@]}"} \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} \
       ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
@@ -2258,6 +2306,47 @@ cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
   done
   printf '\n'
   rm -rf "$tmp"
+}
+
+cmd_add() { # cage add <agents>: your agents, to talk to in the app (chat apps are optional, later)
+  [ $# -gt 0 ] || die "usage: cage add <agent…> (claude codex cursor antigravity)"
+  cmd_init
+  load_env
+  local a keep=() k
+  for a in "$@"; do check_agent "$a"; done
+  for k in $KINDS; do
+    if [[ " $* " == *" $k "* ]] || { [[ " $CAGE_AGENTS " == *" $k "* ]] && set_up "$k"; }; then keep+=("$k"); fi
+  done
+  set_env CAGE_AGENTS "${keep[*]}"
+  CAGE_AGENTS="${keep[*]}"
+  for a in "$@"; do app_dirs "$a"; ok "$(agent_name "$a") is one of your agents"; done
+  find_msb || { hint "next: cage up"; return 0; }
+  cmd_up "$@"
+  if interactive; then
+    for a in "$@"; do
+      refresh_running
+      [ "$(probe "$a")" = ready ] && continue
+      ( cmd_login "$a" ) || warn "no problem: sign $a in later (cage login $a)"
+    done
+  fi
+}
+
+cmd_approve() { # cage approve <agent> [on|off]: ask you before it acts in your apps
+  load_env
+  local a="${1:-}"
+  [ -n "$a" ] || die "usage: cage approve <agent> on|off"
+  check_agent "$a"
+  case "${2:-}" in
+    on) set_env "CAGE_APPROVE_$a" on; printf -v "CAGE_APPROVE_$a" '%s' on
+      if [ "$a" = claude ]; then ok "Claude Code asks you before it uses your apps (email, calendar, GitHub…)"
+      else ok "$(agent_name "$a") asks you before every action (it can't tell your apps from its own work)"; fi
+      hint "it asks in the chat, with Allow and Deny buttons" ;;
+    off) set_env "CAGE_APPROVE_$a" ""; printf -v "CAGE_APPROVE_$a" '%s' ""
+      ok "$(agent_name "$a") acts without asking (inside its VM, and in the apps you connected)" ;;
+    "") say "$(agent_name "$a") asks first: ${C_B}$( [ "$(cvar APPROVE "$a")" = on ] && echo on || echo off)${C_0}"; return 0 ;;
+    *) die "usage: cage approve $a on|off" ;;
+  esac
+  features_apply
 }
 
 cmd_ask_all() { # cage ask-all [on|off]
@@ -2625,9 +2714,10 @@ state_json() { # everything the web app shows, as one JSON object
     [ $first = 1 ] || printf ','; first=0
     printf '{"name":"%s","label":%s,"plan":%s,"enabled":%s,"state":"%s","bot":%s,"reachable":%s' "$a" "$(jstr "$(agent_name "$a")")" \
       "$(jstr "$(agent_plan "$a")")" "$(jbool for_agent " ${CAGE_AGENTS:-} " "$a")" "$st" "$(jstr "$(bot_for "$a")")" \
-      "$( [ "$configured" = true ] && jbool reachable "$a" || printf false)"
+      "$( [ "$configured" = true ] && jbool for_agent " ${CAGE_AGENTS:-} " "$a" || printf false)"
     printf ',"chats":{"telegram":%s,"slack":%s,"discord":%s,"whatsapp":%s}' "$(jbool test -n "$(token_for "$a")")" \
       "$(jbool test -n "$(cvar SLACK_BOT_TOKEN "$a")")" "$(jbool test -n "$(cvar DISCORD_TOKEN "$a")")" "$(jstr "$(cvar WHATSAPP_MODE "$a")")"
+    printf ',"chat_apps":%s,"approve":%s' "$( [ "$configured" = true ] && jbool has_chat "$a" || printf false)" "$(jbool test "$(cvar APPROVE "$a")" = on)"
     printf ',"mask":%s,"fallback":%s,"allow":%s}' "$(jbool mask_on "$a")" "$(jstr "$(cvar FALLBACK "$a")")" "$(jstr "$(cvar ALLOW_HOSTS "$a")")"
   done
   printf ']'
@@ -2881,22 +2971,25 @@ cmd_restore() {
   # wake the agents someone can talk to (the others were never set up)
   local wake=()
   load_env
-  for v in $CAGE_AGENTS; do if reachable "$v"; then wake+=("$v"); fi; done
+  for v in $CAGE_AGENTS; do if set_up "$v"; then wake+=("$v"); fi; done
   if [ ${#wake[@]} -eq 0 ]; then hint "next: cage"; return 0; fi
   cmd_up "${wake[@]}"
 }
 
 # --- the guided first run ---------------------------------------------------------------------------------------
-reachable() { # reachable <agent>: it has at least one complete way to talk to you
+has_chat() { # has_chat <agent>: a chat app (Telegram, Slack, Discord) reaches it, besides cage's own app
   { valid_token "$(token_for "$1")" && [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; } ||
     { slack_bot_ok "$(cvar SLACK_BOT_TOKEN "$1")" && slack_app_ok "$(cvar SLACK_APP_TOKEN "$1")"; } ||
     discord_token_ok "$(cvar DISCORD_TOKEN "$1")"
+}
+set_up() { # set_up <agent>: it was set up here (it has a chat app, or it has talked in the app)
+  has_chat "$1" || [ -d "$APPDIR/$1" ]
 }
 
 configured() {
   [ -f "$CAGE_ENV" ] || return 1
   ( load_env >/dev/null 2>&1
-    for a in $CAGE_AGENTS; do reachable "$a" && exit 0; done
+    for a in $CAGE_AGENTS; do set_up "$a" && exit 0; done
     exit 1 )
 }
 
@@ -3012,6 +3105,7 @@ usage() {
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
   row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too"
+  row "  approve <a> on|off" "ask you before it acts in your apps"
   row "  ask \"…\" [agents]" "every awake agent answers, here"
   row "  ask-all on|off" "/all <question> in chat: all of them answer"
   row "  fallback <a> <b>" "when a is out of quota, b answers instead"
@@ -3024,6 +3118,7 @@ usage() {
   row "  network [strict|open]" "the open internet, or only what each agent needs"
   row "  allow <host> [agents]" "let agents reach a host in strict mode"
   printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"
+  row "  add <agents>" "your agents, to talk to in the app (cage ui)"
   row "  setup [agents]" "Telegram bots, and who may talk to them"
   row "  doctor" "check this computer, the config and the bots"
   row "  ui" "all of this in your browser"
@@ -3063,6 +3158,8 @@ main() {
     security|events) cmd_security "$@" ;;
     network) cmd_network "$@" ;;
     allow) cmd_allow "$@" ;;
+    add) cmd_add "$@" ;;
+    approve) cmd_approve "$@" ;;
     ask) cmd_ask "$@" ;;
     ask-all) cmd_ask_all "$@" ;;
     fallback) cmd_fallback "$@" ;;

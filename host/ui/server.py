@@ -17,8 +17,19 @@ API call needs the token in ~/.cage/ui.token, which `cage ui` puts in the addres
   POST /api/jobs/<id>/cancel
   GET|PUT /api/memory/about             what your agents know about you (about-me.md)
   GET  /api/update                      the latest release, and this one
+
+The chat with an agent goes through ~/.cage/app/<agent>, a folder its VM shares (guest/app.mjs relays it to
+cc-connect). The VM writes there, so nothing in it is trusted: no links are followed, only regular files are read,
+and only pictures are shown in the page (everything else downloads).
+  GET  /api/chat/<a>/log?from=N|tail=N   server-sent events: {"o": offset, "e": entry} per line of log.jsonl
+  POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
+  POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
+  POST /api/chat/<a>/action             {"action", "label"?}  (a button in the chat)
+  POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
+  POST /api/chat/<a>/usage              your plan's usage, as cc-connect's /usage answers it
+  GET  /api/chat/<a>/file?p=files/…     a file from the chat (pictures shown, the rest downloaded)
 """
-import base64, fcntl, hmac, http.server, json, os, pty, re, signal, struct, subprocess, sys, termios, threading, time
+import base64, fcntl, hmac, http.server, json, os, pty, re, signal, stat, struct, subprocess, sys, termios, threading, time
 import urllib.parse, urllib.request
 
 CAGE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "..", "cage")
@@ -26,11 +37,19 @@ HOME = os.environ.get("CAGE_HOME") or os.path.expanduser("~/.cage")
 PORT = int(os.environ.get("CAGE_UI_PORT", "7771"))
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TOKEN_FILE = os.path.join(HOME, "ui.token")
-ALLOWED = {"", "onboard", "setup", "up", "down", "login", "update", "logs", "shell", "chat", "connect", "password",
+ALLOWED = {"", "onboard", "setup", "add", "approve", "up", "down", "login", "update", "logs", "shell", "chat", "connect", "password",
            "secret", "memory", "autostart", "backup", "restore", "security", "network", "allow", "ask", "ask-all",
            "fallback", "voice", "mask", "destroy", "doctor", "status", "version"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2"}
+APPDIR = os.path.join(HOME, "app")
+AGENTS = ("claude", "codex", "cursor", "antigravity")
+MAX_FILE = 25 << 20
+PICTURES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+MIME = dict(PICTURES, **{".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv",
+                         ".json": "application/json", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"})
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
@@ -143,6 +162,144 @@ class Job:
         with cls.lock:
             for k in [k for k, j in cls.jobs.items() if j.done and time.time() - j.started > 600]:
                 del cls.jobs[k]
+
+
+def safe_name(name):
+    base = re.sub(r"[^\w.\- ()+,@]+", "_", os.path.basename(str(name or ""))).lstrip(". ")[-120:]
+    return base or "file"
+
+
+class Chat:
+    """An agent's chat folder (~/.cage/app/<agent>), opened without following links: its VM writes in there."""
+    D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def __init__(self, agent):
+        if agent not in AGENTS:
+            raise KeyError("no such agent")
+        self.agent = agent
+        os.makedirs(APPDIR, mode=0o700, exist_ok=True)
+        top = os.open(APPDIR, self.D)
+        try:
+            try:
+                self.fd = os.open(agent, self.D, dir_fd=top)
+            except FileNotFoundError:
+                os.mkdir(agent, 0o777, dir_fd=top)
+                self.fd = os.open(agent, self.D, dir_fd=top)
+                os.fchmod(self.fd, 0o777)
+        finally:
+            os.close(top)
+
+    def close(self):
+        os.close(self.fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def sub(self, name):
+        try:
+            return os.open(name, self.D, dir_fd=self.fd)
+        except FileNotFoundError:
+            if os.path.lexists(os.path.join(f"/proc/self/fd/{self.fd}", name)):
+                raise   # a dangling link: not ours to replace
+            os.mkdir(name, 0o777, dir_fd=self.fd)
+            fd = os.open(name, self.D, dir_fd=self.fd)
+            os.fchmod(fd, 0o777)
+            return fd
+
+    def open_file(self, rel):
+        """A regular file in this folder (rel: "log.jsonl", "files/x", "out/x"), never through a link."""
+        parts = rel.split("/")
+        if not 1 <= len(parts) <= 2 or any(p in ("", ".", "..") for p in parts):
+            raise FileNotFoundError(rel)
+        d = self.sub(parts[0]) if len(parts) == 2 else self.fd
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=d)
+        except OSError:   # a link (ELOOP), or anything else that isn't a plain file we can read
+            raise FileNotFoundError(rel)
+        finally:
+            if d != self.fd:
+                os.close(d)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise FileNotFoundError(rel)
+        return fd
+
+    def write_new(self, folder, name, data, mode=0o644):
+        """A new file in in/ or files/ (written, then renamed into place, so the VM never sees half of it)."""
+        d = self.sub(folder)
+        tmp = "." + name + ".tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=d)
+            try:
+                os.fchmod(fd, mode)   # readable by the VM's own user, whatever this process's umask
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+            finally:
+                os.close(fd)
+            os.rename(tmp, name, src_dir_fd=d, dst_dir_fd=d)
+        finally:
+            os.close(d)
+        return f"{folder}/{name}"
+
+    def send(self, req):
+        req["id"] = req.get("id") or f"{int(time.time() * 1000):013d}-{os.urandom(3).hex()}"
+        self.write_new("in", req["id"] + ".json", json.dumps(req).encode())
+        return req["id"]
+
+    def answer(self, rid, timeout=20):
+        """The VM's answer to a request (out/<id>.json)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                fd = self.open_file(f"out/{rid}.json")
+            except FileNotFoundError:
+                time.sleep(0.25)
+                continue
+            with os.fdopen(fd, "rb") as f:
+                data = f.read(4 << 20)
+            d = self.sub("out")
+            try:
+                os.unlink(f"{rid}.json", dir_fd=d)
+            except OSError:
+                pass
+            finally:
+                os.close(d)
+            return json.loads(data or b"{}")
+        return None
+
+    def size(self):
+        try:
+            st = os.stat("log.jsonl", dir_fd=self.fd, follow_symlinks=False)
+            return st.st_size if stat.S_ISREG(st.st_mode) else 0, st.st_ino
+        except FileNotFoundError:
+            return 0, 0
+
+    def read_log(self, start, limit=4 << 20):
+        """Whole lines of log.jsonl from byte `start`: [(offset after the line, entry)]."""
+        try:
+            fd = self.open_file("log.jsonl")
+        except FileNotFoundError:
+            return [], start
+        with os.fdopen(fd, "rb") as f:
+            f.seek(start)
+            data = f.read(limit)
+        end = data.rfind(b"\n")
+        if end < 0:
+            return [], start
+        out, pos = [], start
+        for line in data[:end + 1].split(b"\n")[:-1]:
+            pos += len(line) + 1
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict):
+                out.append((pos, e))
+        return out, pos
 
 
 class State:
@@ -259,6 +416,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.api(method, path, query)
         except (ValueError, KeyError, TypeError) as e:
             return self.send(400, {"error": str(e)})
+        except OSError:   # missing, a link, not a folder: nothing the app will touch
+            return self.send(404, {"error": "no such file"})
 
     def static(self, path):
         if path == "/":
@@ -293,6 +452,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     fh.write(text)
                 os.replace(tmp, f)
                 return self.send(200, {"ok": True})
+        if len(parts) == 3 and parts[0] == "chat":
+            return self.chat(method, parts[1], parts[2], query)
         if parts == ["jobs"] and method == "POST":
             args = self.body().get("args", [])
             if not (isinstance(args, list) and all(isinstance(a, str) and len(a) < 8192 and "\0" not in a for a in args)):
@@ -323,6 +484,145 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send(404, {"error": "no such action"})
                 return self.send(200, {"ok": True})
         return self.send(404, {"error": "no such endpoint"})
+
+    def chat(self, method, agent, what, query):
+        with Chat(agent) as c:
+            if what == "log" and method == "GET":
+                return self.tail(c, query)
+            if what == "file" and method == "GET":
+                return self.file(c, query.get("p", [""])[0], query.get("dl", [""])[0] == "1")
+            if method != "POST":
+                return self.send(405, {"error": "method"})
+            if what == "upload":
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > MAX_FILE:
+                    return self.send(413, {"error": "files can be 25 MB at most"})
+                data = self.rfile.read(n) if n else b""
+                name = safe_name(query.get("name", ["file"])[0])
+                rel = c.write_new("files", f"{int(time.time() * 1000)}-{os.urandom(2).hex()}-{name}", data)
+                mime = MIME.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+                return self.send(200, {"path": rel, "name": name, "size": len(data), "mime": mime})
+            b = self.body()
+            session = str(b.get("session") or "you")
+            if not re.fullmatch(r"[a-z0-9-]{1,32}", session):
+                raise ValueError("bad session")
+            if what == "send":
+                text = str(b.get("text", ""))
+                if len(text) > 200000:
+                    raise ValueError("that message is too long")
+                files = []
+                for f in (b.get("files") or [])[:10]:
+                    p = str(f.get("path", ""))
+                    if not re.fullmatch(r"files/[^/]+", p):
+                        raise ValueError("bad file")
+                    os.close(c.open_file(p))
+                    files.append({"path": p, "name": safe_name(f.get("name") or p.split("/")[-1]), "mime": str(f.get("mime") or "")[:100]})
+                if not text.strip() and not files:
+                    raise ValueError("nothing to send")
+                return self.send(200, {"id": c.send({"type": "message", "session": session, "text": text, "files": files})})
+            if what == "action":
+                return self.send(200, {"id": c.send({"type": "action", "session": session, "action": str(b.get("action", ""))[:512],
+                                                     "label": str(b.get("label", ""))[:200]})})
+            if what == "request":
+                kind = b.get("type")
+                req = {"type": kind}
+                if kind == "api":
+                    req.update(method=str(b.get("method", "GET")).upper(), path=str(b.get("path", "")))
+                    if "body" in b:
+                        req["body"] = b["body"]
+                elif kind in ("ls", "fetch"):
+                    req["path"] = str(b.get("path", ""))[:1000]
+                elif kind == "put":
+                    req.update(dir=str(b.get("dir", ""))[:1000], name=safe_name(b.get("name")), **{"from": str(b.get("from", ""))})
+                    os.close(c.open_file(req["from"]))
+                else:
+                    raise ValueError("bad request")
+                ans = c.answer(c.send(req))
+                return self.send(200, ans) if ans is not None else self.send(504, {"error": "the agent didn't answer; is it awake?"})
+            if what == "usage":
+                start, _ = c.size()
+                rid = c.send({"type": "message", "session": "usage", "text": "/usage"})
+                end = time.time() + 25
+                while time.time() < end:
+                    entries, _ = c.read_log(start)
+                    for _, e in entries:
+                        if e.get("session") == "usage" and e.get("ctx") == rid and e.get("t") in ("reply", "card", "error"):
+                            return self.send(200, e)
+                    time.sleep(0.4)
+                return self.send(504, {"error": "the agent didn't answer; is it awake?"})
+        return self.send(404, {"error": "no such endpoint"})
+
+    def tail(self, c, query):
+        size, ino = c.size()
+        if "tail" in query:   # the last part of the chat, from a line's start
+            start = max(0, size - int(query["tail"][0]))
+            if start:
+                start = self.line_start(c, start)
+        else:
+            start = int(query.get("from", ["0"])[0])
+            if start > size:
+                start = 0
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True
+        pos, quiet = start, 0.0
+        try:
+            self.wfile.write(b"data: " + json.dumps({"o": pos, "start": True}).encode() + b"\n\n")
+            self.wfile.flush()
+            while True:
+                size, now = c.size()
+                if now != ino or size < pos:   # the VM started a new log: the page starts over
+                    ino, pos = now, 0
+                    self.wfile.write(b'data: {"reset": true, "o": 0}\n\n')
+                entries, pos = c.read_log(pos)
+                for o, e in entries:
+                    self.wfile.write(b"data: " + json.dumps({"o": o, "e": e}).encode() + b"\n\n")
+                if entries:
+                    self.wfile.flush()
+                    quiet = 0.0
+                else:
+                    quiet += 0.3
+                    if quiet >= 15:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        quiet = 0.0
+                    time.sleep(0.3)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    @staticmethod
+    def line_start(c, start):
+        try:
+            fd = c.open_file("log.jsonl")
+        except FileNotFoundError:
+            return 0
+        with os.fdopen(fd, "rb") as f:
+            f.seek(start - 1)
+            chunk = f.read(1 << 20)
+        i = chunk.find(b"\n")
+        return start + i if i >= 0 else start
+
+    def file(self, c, rel, download):
+        if not re.fullmatch(r"files/[^/]+", rel):
+            return self.send(404, {"error": "no such file"})
+        try:
+            fd = c.open_file(rel)
+        except OSError:   # missing, a link, not a folder: nothing the app will touch
+            return self.send(404, {"error": "no such file"})
+        with os.fdopen(fd, "rb") as f:
+            data = f.read(MAX_FILE + 1)
+        name = rel.split("/", 1)[1]
+        name = re.sub(r"^\d+-[0-9a-z]{1,8}-", "", name) or name
+        ext = os.path.splitext(name)[1].lower()
+        if ext in PICTURES and not download:   # only pictures are shown here; anything else could be a page
+            return self.send(200, data, PICTURES[ext], {"Content-Security-Policy": "default-src 'none'"})
+        quoted = urllib.parse.quote(name)
+        return self.send(200, data, "application/octet-stream", {
+            "Content-Disposition": f"attachment; filename=\"{safe_name(name)}\"; filename*=UTF-8''{quoted}",
+            "Content-Security-Policy": "default-src 'none'"})
 
     def stream(self, job, n):
         self.send_response(200)

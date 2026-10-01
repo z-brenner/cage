@@ -49,10 +49,20 @@ cage init 2>/dev/null
 [ "$(stat -c %a "$CAGE_HOME/cage.env")" = 600 ] || fail "config not 0600"
 ok "init writes a 0600 config"
 
-# refuses empty tokens / allowlist
-if cage up claude 2>"$T/err"; then fail "up succeeded without tokens"; fi
-grep -q 'CAGE_TELEGRAM_TOKEN_claude' "$T/err" || fail "missing-token error unclear: $(cat "$T/err")"
-ok "up refuses a missing bot token"
+# no chat app: the agent is talked to in the app (cc-connect's bridge), behind a placeholder platform
+cage up claude 2>"$T/err" || fail "up without a chat app: $(cat "$T/err")"
+f="$CAGE_HOME/agents/claude/cc-connect.toml"
+tok="$(cat "$CAGE_HOME/agents/claude/app.token")"
+[[ "$tok" =~ ^[a-f0-9]{32}$ ]] && [ "$(stat -c %a "$CAGE_HOME/agents/claude/app.token")" = 600 ] || fail "app token"
+grep -A3 '^\[bridge\]$' "$f" | grep -q "^token = \"$tok\"$" && grep -A3 '^\[management\]$' "$f" | grep -q "^token = \"$tok\"$" \
+  || fail "bridge and management API with the app token: $(cat "$f")"
+grep -q '^type = "line"$' "$f" && grep -q '^allow_from = "nobody"$' "$f" && grep -q '^admin_from = "you"$' "$f" || fail "placeholder platform: $(cat "$f")"
+grep -qx "APP_TOKEN=$tok" "$CAGE_HOME/agents/claude/app.env" || fail "app.env"
+[ "$(stat -c %a "$CAGE_HOME/app")" = 700 ] && [ "$(stat -c %a "$CAGE_HOME/app/claude/in")" = 777 ] || fail "chat folder modes"
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "--mount-dir | $CAGE_HOME/app/claude:/cage-app" || fail "chat folder not mounted"
+[ "$(cat "$CAGE_HOME/agents/claude/app.token")" = "$tok" ] || fail "app token changed"
+ok "no chat app needed: the app talks to the agent through cc-connect's bridge, behind a placeholder platform"
+: > "$MSB_LOG"
 
 cat >> "$CAGE_HOME/cage.env" <<'EOF'
 CAGE_TELEGRAM_ALLOW="111,222"
@@ -74,7 +84,7 @@ for a in claude codex cursor antigravity; do
   [ -f "$f" ] || fail "no config for $a"
   [ "$(stat -c %a "$f")" = 600 ] || fail "$a config not 0600"
   grep -q "^allow_from = \"111,222\"$" "$f" || fail "$a allowlist"
-  grep -q "^admin_from = \"111,222\"$" "$f" || fail "$a admin_from"
+  grep -q "^admin_from = \"you,111,222\"$" "$f" || fail "$a admin_from"
 done
 grep -q '^type = "claudecode"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude type"
 grep -q '^mode = "bypassPermissions"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude mode"
@@ -410,6 +420,32 @@ grep -qF '{"t":"asking","text":"is it \"raining\"?","agents":["claude","codex"]}
 grep -qF '{"t":"answer","text":"answer from cage-claude to: is it \"raining\"?","agent":"claude"}' <<<"$ev" \
   && grep -qF '"agent":"codex"}' <<<"$ev" || fail "cage ask for the web app, the answers: $ev"
 ok "cage ask, for the web app: the question, then each agent's answer as its own event"
+
+# asking before acting: Claude only for your apps (everything inside its VM is pre-approved), the others for everything
+sed -i 's/^CAGE_MODE=ask/CAGE_MODE=yolo/' "$CAGE_HOME/cage.env"
+cage approve claude on </dev/null >/dev/null 2>&1
+cage approve codex on </dev/null >/dev/null 2>&1
+cage up claude codex </dev/null >/dev/null 2>&1
+c="$CAGE_HOME/agents/claude/cc-connect.toml"
+grep -q '^mode = "default"$' "$c" && grep -q '^allowed_tools = \[.*"Bash".*"mcp__browser"\]$' "$c" || fail "claude asks only for apps: $(grep -E '^(mode|allowed_tools)' "$c")"
+grep -q 'mcp__zapier\|mcp__github' "$c" && fail "an app is pre-approved"
+grep -q '^mode = "default"$' "$CAGE_HOME/agents/codex/cc-connect.toml" && ! grep -q '^allowed_tools' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex asks for everything"
+cage _state 2>/dev/null | python3 -c 'import json,sys; d={a["name"]: a for a in json.load(sys.stdin)["agents"]}; assert d["claude"]["approve"] and not d["cursor"]["approve"], d' || fail "approve in the state"
+cage approve claude off </dev/null >/dev/null 2>&1; cage approve codex off </dev/null >/dev/null 2>&1
+cage up claude </dev/null >/dev/null 2>&1
+grep -q '^mode = "bypassPermissions"$' "$c" && ! grep -q '^allowed_tools' "$c" || fail "approve off"
+ok "asking first: Claude asks before using your apps only, the others before every action; off again"
+
+# cage add: agents to talk to in the app, no chat app needed; earlier agents are kept only if they were set up
+( export CAGE_HOME="$T/added"
+  "$ROOT/cage" add codex cursor </dev/null >/dev/null 2>&1 || fail "cage add"
+  grep -q '^CAGE_AGENTS="codex cursor"$' "$CAGE_HOME/cage.env" || fail "added agents: $(grep CAGE_AGENTS "$CAGE_HOME/cage.env")"
+  [ -d "$CAGE_HOME/app/codex/in" ] && [ -f "$CAGE_HOME/agents/cursor/cc-connect.toml" ] || fail "added agents not woken"
+  "$ROOT/cage" add claude </dev/null >/dev/null 2>&1
+  grep -q '^CAGE_AGENTS="claude codex cursor"$' "$CAGE_HOME/cage.env" || fail "add kept the others: $(grep CAGE_AGENTS "$CAGE_HOME/cage.env")"
+  "$ROOT/cage" _state 2>/dev/null | python3 -c 'import json,sys; d={a["name"]: a for a in json.load(sys.stdin)["agents"]}
+assert d["codex"]["reachable"] and not d["codex"]["chat_apps"] and not d["antigravity"]["enabled"], d' || fail "state: reachable in the app" )
+ok "cage add: agents you chat with in the app, no bot needed; agents added before are kept"
 
 cage ask-all off </dev/null 2>/dev/null; cage fallback claude off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
 : > "$MSB_LOG"
