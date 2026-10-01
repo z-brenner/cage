@@ -1,111 +1,90 @@
-# cage
+<p align="center"><img src="assets/logo.svg" width="168" alt="cage: a cartoon birdcage with big eyes"></p>
 
-Your coding agents on your own subscriptions, **each in its own microVM**, each reachable as a **Telegram bot**. The agents are Claude Code, Codex, Cursor and Antigravity (Google's successor to Gemini CLI).
+<h1 align="center">cage</h1>
 
-cage builds almost nothing itself. It is about 700 lines of shell that wire together two existing, actively maintained open-source projects:
+<p align="center"><b>Your AI agents, each in its own little cage.</b><br>
+Claude Code, Codex, Cursor and Antigravity on your own subscriptions.<br>
+Each one lives in a private microVM and talks to you as a Telegram bot.</p>
 
-| Need | Solved by | Why this one |
-|---|---|---|
-| Chat bot + drivers for the official agent CLIs: sessions, `/stop`, permission prompts, streaming progress, file send-back, cron, voice | **[cc-connect](https://github.com/chenhg5/cc-connect)** (MIT, Go, ~15.7k★, releases weekly) | The only project found that drives all four official CLIs headlessly on your own logins **and** speaks Telegram |
-| One VM per agent, persistent volumes, egress policy that blocks host/LAN/cloud-metadata | **[microsandbox](https://github.com/superradcompany/microsandbox)** (Apache-2.0, ~8.5k★, released today) | The only open-source microVM runtime found that covers both Apple-Silicon Macs and Linux/KVM with a simple CLI |
-| The agents themselves | the vendors' **unmodified official CLIs** | Terms of service (see below) |
+<p align="center"><img src="assets/screenshot.png" width="720" alt="The cage home screen: the mascot, then one row per agent showing its state as a little face"></p>
 
-What cage adds:
-- one cc-connect config per agent, generated from a single env file
-- first-boot provisioning inside each VM
-- login flows that run inside the VM
-- lifecycle commands (`up`, `login`, `status`, `logs`, `shell`, `update`, `down`, `destroy`)
+## Get started
 
-```
- Telegram (you)                                  host: ./cage → msb (microsandbox CLI)
-   @dot_claude  ─────long-poll────▶  ┌─ microVM cage-claude ─────────────────────────┐
-   @dot_codex                        │  cc-connect ──▶ claude   (your Claude login)   │
-   @dot_cursor                       │  /home/agent = named volume: login, sessions,  │
-   @dot_antigravity                  │                work; survives restarts         │
-   group: @mention several bots      └────────────────────────────────────────────────┘
-          → fan-out                  … the same shape once per agent
-                                     egress: public internet only (host, LAN, loopback,
-                                             cloud metadata blocked)
-```
-
-## Quick start
-
-Requirements: Linux with KVM, or Windows 11 through WSL 2 ([below](#windows-wsl-2)); [microsandbox](https://docs.microsandbox.dev); one Telegram bot per agent. (The macOS/Apple-Silicon code path exists but is untested.)
-
-`/dev/kvm` must be readable and writable by you (`sudo usermod -aG kvm $USER`, then log out and back in). The installer puts `msb` in `~/.local/bin`; cage finds it there even when that isn't on your `PATH`.
+On Linux, or on Windows 11 inside [WSL 2](#windows):
 
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh
 git clone https://github.com/z-brenner/cage && cd cage
-
-./cage setup                 # asks for one @BotFather token per agent (checked with Telegram), then learns your
-                             # Telegram user id from one message you send the first bot. Writes ~/.cage/cage.env (0600)
-                             # Only some subscriptions? Name them: ./cage setup claude cursor (add more later the same way)
-./cage doctor                # host, config, and every bot token checked live
-./cage up                    # one microVM per agent; each installs its CLI + cc-connect in the background (~1 min)
-./cage login claude          # then: codex, cursor, antigravity
-./cage status
-./cage autostart on          # optional: run `cage up` at login so the bots survive reboots
+./cage
 ```
 
-### Windows (WSL 2)
+That's the whole setup. `./cage` walks you through it in about five minutes:
 
-On Windows, cage runs inside WSL 2 and behaves exactly as on Linux. It needs **Windows 11** (WSL 2 runs nested VMs only on Windows 11) and an x64 PC with virtualization enabled in firmware. Windows on ARM can't run nested VMs.
+1. checks your computer, and installs [microsandbox](https://github.com/superradcompany/microsandbox) if it's missing
+2. asks which subscriptions you have
+3. helps you make a Telegram bot for each, and gives every bot its own face
+4. lets only *your* Telegram account talk to them
+5. starts each agent in its own VM and signs it in with your subscription
 
-In PowerShell, once (it may ask to reboot):
+After that, `./cage` shows how everyone's doing. Message your bots on Telegram and they work in their cages.
+
+<p align="center"><img src="assets/avatars.png" width="440" alt="The four bot avatars: claude in peach, codex in mint, cursor in sky blue, antigravity in lilac"></p>
+
+## Reading the faces
+
+Every agent is a little creature in a cage, and its eyes tell you how it is.
+
+| | |
+|---|---|
+| `[•\|•]` | awake and ready |
+| `[o\|o]` | needs you to sign in: `./cage login <agent>` |
+| `[•\|-]` | busy (it blinks while it installs) |
+| `[-\|-]` | asleep: `./cage up` |
+| `[ \| ]` | no cage yet |
+
+## Everyday commands
+
+```text
+./cage                  set up, or see how your agents are doing
+./cage up [agents]      wake agents up (a fresh VM; logins and files are kept)
+./cage down [agents]    put them to sleep
+./cage login <agent>    sign an agent in to your subscription
+./cage logs <agent>     watch what an agent's VM is doing
+./cage doctor           check this computer, the config and the bots
+./cage autostart on     wake them up whenever you log in
+./cage help             everything else
+```
+
+In Telegram, each chat is a session: `/new` starts fresh, `/stop` interrupts, `/list` and `/switch` move between sessions, `/model` and `/mode` change how the agent works, `/usage` shows your quota.
+
+**Ask several agents at once:** add your bots to one Telegram group, turn **Group Privacy** off for each (BotFather → Bot Settings), then @mention the bots you want in one message. Set `CAGE_TELEGRAM_GROUP_REPLY_ALL=true` to have all of them answer everything there.
+
+## Windows
+
+cage runs inside WSL 2 and behaves just as on Linux. It needs **Windows 11** on an x64 PC with virtualization turned on: WSL 2 only runs VMs inside it on Windows 11, and Windows on ARM can't.
 
 ```powershell
 wsl --install -d Ubuntu-24.04
 ```
 
-Open **Ubuntu 24.04** from the Start menu, create your Linux user, then:
+Open **Ubuntu 24.04** from the Start menu, then run the two lines from [Get started](#get-started). Keep cage in your Linux home (`~/cage`), not under `/mnt/c`.
 
-```bash
-ls -l /dev/kvm                  # must exist (see below if it doesn't)
-sudo usermod -aG kvm "$USER"     # then in PowerShell: wsl --terminate Ubuntu-24.04, and reopen Ubuntu
-```
+- **Closing the window is fine.** WSL normally stops Ubuntu about 15 seconds after its last window closes, VMs included. `./cage up` keeps one hidden WSL session open so your agents stay up; `./cage down` lets it go.
+- **Reboots:** `./cage autostart on` wakes your agents at every Windows login (no admin needed; a window flashes for a few seconds).
+- **Memory:** WSL gets half your RAM, and each agent takes 4 GB of that. With 16 GB or less, put `CAGE_MEMORY=2G` in `~/.cage/cage.env`.
+- **No `/dev/kvm`?** Check that `nestedVirtualization` isn't `false` in `%UserProfile%\.wslconfig`, that `wsl -l -v` shows version 2, and that Task Manager → Performance → CPU says *Virtualization: Enabled*. Then `wsl --shutdown` and reopen Ubuntu.
 
-Then follow the Quick start inside Ubuntu. Keep cage in your Linux home (`~/cage`), not under `/mnt/c`.
+## Good to know
 
-- **Staying up:** WSL stops a distro about 15 seconds after its last window closes, and every VM in it. So on WSL, `cage up` also opens one hidden WSL session that keeps the distro running (`cage status` shows `WSL keepalive: running`), and `cage down` releases it.
-- **Reboots:** `cage autostart on` adds a per-user Windows login entry (no admin rights) that runs `cage up` in your distro; a console window shows for a few seconds at login. `cage autostart off` removes it.
-- **Memory:** WSL gets half your RAM by default, and each agent VM takes `CAGE_MEMORY` (4G) out of that. With 16 GB or less, set `CAGE_MEMORY=2G` in `~/.cage/cage.env` or raise `memory=` in `%UserProfile%\.wslconfig`.
-- **Sign-ins:** the URLs `cage login` prints open in your Windows browser (Ctrl+click).
-- **No `/dev/kvm`:** make sure `nestedVirtualization` isn't `false` in `%UserProfile%\.wslconfig`, that `wsl -l -v` shows VERSION 2, and that Task Manager → Performance → CPU says *Virtualization: Enabled*. Then run `wsl --shutdown` and reopen Ubuntu.
-
-Then message the bots. Each chat has its own session. cc-connect's commands:
-
-| Command | What it does |
-|---|---|
-| `/new` | start a fresh session |
-| `/list`, `/switch` | list and switch sessions |
-| `/stop` | cancel the current run |
-| `/mode` | change permission mode |
-| `/model` | switch model |
-| `/usage` | quota |
-| `/dir` | change work directory |
-| `/help` | list commands |
-
-**Fan-out ("ask all"):** put all your bots in one Telegram group and turn **Group Privacy off** for each (BotFather → Bot Settings → Group Privacy). Then @mention the bots you want in a single message. To have every bot answer every message in that group, set `CAGE_TELEGRAM_GROUP_REPLY_ALL=true`.
-
-## Logins (inside each VM, on your subscriptions)
-
-| Agent | `cage login` runs | Notes |
-|---|---|---|
-| claude | `claude auth login --claudeai` | Open the URL, paste the code back. |
-| codex | `codex login --device-auth` | **First** enable device-code login for Codex in ChatGPT → Settings → Security. |
-| cursor | `cursor-agent login` | Open the URL on any device; it completes on its own. |
-| antigravity | `agy` | Sign in on first launch with your Google AI Pro/Ultra account, then quit. |
-
-Logins live on each VM's named volume (`cage-<agent>-home`). They survive `cage up`/`cage update` (which re-create the VM) and `cage destroy --keep-login`.
-
-**After a reboot:** microsandbox has no daemon, so VMs don't auto-start. Run `cage up`, which re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept. Or run `cage autostart on` once so it happens at every login (a Linux systemd user unit, or on Windows a per-user login entry).
-
-**If the microsandbox installer fails with "Could not determine latest release version" (HTTP 403):** it looks up the latest release through GitHub's anonymous API, which is rate-limited per IP (shared office or VPN IPs hit it). Wait an hour, or pin a version with `MSB_VERSION=v0.7.5 test/install-msb-pinned.sh`.
+- **Sign-ins happen inside each VM**, with each vendor's own CLI, and stay on that agent's volume. They survive `up`, `update`, reboots and `./cage destroy <agent> --keep-login`.
+- **Codex:** turn on device-code sign-in first (ChatGPT → Settings → Security).
+- **Antigravity** is Google's successor to Gemini CLI for AI Pro/Ultra (since 2026-06-18). Google has suspended accounts over third-party use of its CLI logins, so consider a spare Google account.
+- **After a reboot** your agents sleep until `./cage up` (or `./cage autostart on`, once). Waking reinstalls each CLI in about a minute; logins, sessions and files are kept.
+- **Settings** live in `~/.cage/cage.env` (CPU, memory, disk, network rules, `CAGE_MODE=ask` to approve each tool call in chat).
+- **Installer error "Could not determine latest release version"?** That's GitHub rate-limiting your IP. `./cage` falls back to a pinned microsandbox automatically.
 
 ## Security model
 
-- **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your Mac, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
+- **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
 - **Network:** microsandbox's default policy. The public internet is allowed; your host, LAN, loopback and cloud-metadata endpoints are blocked. You can tighten this to a domain allowlist via `CAGE_MSB_EXTRA_ARGS` (`--net-rule`; see the [microsandbox networking docs](https://docs.microsandbox.dev/networking/overview.md)).
 - **Only the allowlisted Telegram user ids** in `CAGE_TELEGRAM_ALLOW` can talk to the bots. They are also the only admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
 - **Mounts:** the only host paths a VM sees, both read-only, are `guest/` (the provisioning scripts) and its own generated config.
@@ -124,32 +103,18 @@ The rule is the same across vendors: **the official CLI with your own login is f
 - **Google** retired Gemini CLI for AI Pro/Ultra subscribers on **2026-06-18** ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)); Antigravity CLI replaced it. Google has suspended accounts for using its CLI OAuth from third-party software. cc-connect runs the official `agy` binary, but if losing that Google account would hurt, use a separate one.
 - **Cursor:** headless mode is documented. How API-key billing works is unclear; cage uses the normal login.
 
-## Alternatives considered
+## Terms of service
 
-The research behind this design, as of 2026-09-30:
+**The official CLI with your own login is fine. Extracting its tokens or sharing your subscription is not.** cage never reads or moves tokens: each vendor's own CLI signs in and runs inside your VM.
 
-| Project | Verdict |
-|---|---|
-| **OpenClaw** (+ acpx) | Massive and fast-moving; Telegram/Signal/WhatsApp. But its ACP agents "run on the host runtime, not inside the sandbox", and Anthropic singled out its harness in its April 2026 billing change. |
-| **Happy / Happier** | Excellent end-to-end-encrypted mobile/web clients for Claude/Codex/Cursor over your own logins, with multi-machine support. No Telegram and no fan-out. The best choice if you prefer an app over a bot: run its daemon inside each microVM instead of cc-connect. |
-| **takopi / Untether** | Clean Python Telegram bridge, but no Cursor, and takopi is quiet since May. |
-| **vibe-kanban**, **coder/agentapi**, **Crystal**, **Terragon**, **vibekit** | Sunsetting, archived, deprecated or stale. |
-| **Kimaki**, **sandbox-agent** | ToS-risky auth: OpenCode advertising itself as Claude Code, and pulling credentials out of local configs. |
-| **Docker Sandboxes (`sbx`)** | Polished microVMs for agents, but proprietary and needs a Docker account. |
-| **Apple `container`** | macOS 26 only; no egress allowlist and no automation API beyond its CLI. |
-| **smolvm** | A close second to microsandbox (also libkrun). |
-| **matchlock** | Uses Firecracker on Linux, but it's young and built for ephemeral sandboxes. |
-| **E2B self-host**, **Kata**, **flintlock** | Linux-only or heavy infrastructure. |
-| **Lima** | Full VMs, no egress policy, SSH-only. |
-| **Raw Firecracker** | What the first version of this repo hand-rolled (rootfs builds, TAP/iptables, guest init, SSH). microsandbox replaces all of it. |
-| **ACP** (Agent Client Protocol, v1 stable; native in Cursor, Gemini, Copilot; adapters for Claude, Codex) | The right protocol for normalizing agents. cc-connect already speaks it, so cage doesn't have to. |
+- **Anthropic** allows "an end user signing in to the unmodified Claude Code binary with their own Claude subscription", and bars routing other people's requests through Pro/Max. **Personal use only.**
+- **OpenAI** supports ChatGPT sign-in with `codex exec`; its docs still call API keys the default for automation.
+- **Google:** see the Antigravity note above.
+- **Cursor:** headless mode is documented; cage uses the normal login.
 
-## Not in this version
+## How it's built
 
-Compared with the first, hand-built version (branch `claude/cage-agent-vms`):
-- **Pre-send PII redaction.** cc-connect has no message hook. The right fix is a small upstream PR adding a `message_filter` command hook, which is also where a Sonomos masker would plug in. I'd rather propose that upstream than maintain a fork.
-- **A single `/all` command.** Replaced by group @mentions (above).
-- **Lima/Firecracker/local backends.** Replaced by microsandbox.
+cage is a few hundred lines of shell around two open-source projects: [cc-connect](https://github.com/chenhg5/cc-connect) (the Telegram bot and drivers for the official agent CLIs) and [microsandbox](https://github.com/superradcompany/microsandbox) (one microVM per agent). The research behind that choice, and what was left out, is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Development
 

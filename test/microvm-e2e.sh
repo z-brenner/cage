@@ -48,7 +48,7 @@ ax "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"
 ok "$BIN runs as agent"
 
 out="$(cage status 2>&1)"
-grep -q "^$A  *NOT logged in" <<<"$out" || fail "status should report not logged in: $out"
+grep -qF "[o|o]  $(printf '%-12s' "$A") needs a login" <<<"$out" || fail "status should report not logged in: $out"
 ok "cage status probes the login inside the VM (not logged in, as expected)"
 
 # `cage login` reaches the vendor's sign-in inside the VM (through a real PTY). Antigravity's full-screen

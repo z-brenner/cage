@@ -17,6 +17,11 @@ import http.server, json, re, sys
 log = open(sys.argv[2], "a")
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def do_POST(self):  # setMyProfilePhoto: multipart upload
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        ok = b'attach://avatar' in body and b'name="avatar"' in body and b'\xff\xd8' in body
+        log.write(self.path + (" photo-ok\n" if ok else " photo-bad\n")); log.flush()
+        self.reply(200 if ok else 400, {"ok": ok})
     def do_GET(self):
         log.write(self.path + "\n"); log.flush()
         m = re.match(r"^/bot([^/]+)/(\w+)", self.path)
@@ -26,6 +31,8 @@ class H(http.server.BaseHTTPRequestHandler):
         if method == "getMe":
             name = token.split(":GOOD")[1] or "x"
             return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot", "username": "dot_" + name + "_bot"}})
+        if method in ("setMyDescription", "setMyShortDescription"):
+            return self.reply(200, {"ok": True, "result": True})
         if method == "getUpdates":
             if "offset=" in self.path:
                 return self.reply(200, {"ok": True, "result": []})
@@ -66,7 +73,14 @@ grep -q '@dot_claude_bot' "$T/setup.err" || fail "bot username not shown"
 grep -q 'Zack' "$T/setup.err" || fail "sender name not shown for confirmation"
 grep -q '/bot100:GOODclaude/getUpdates?offset=501' "$T/requests.log" || fail "the id-discovery message was not acknowledged"
 grep -qx 'CAGE_AGENTS="claude codex"' "$env_file" || fail "CAGE_AGENTS not narrowed to the agents set up: $(grep CAGE_AGENTS "$env_file")"
+grep -qx 'CAGE_TELEGRAM_BOT_claude="dot_claude_bot"' "$env_file" || fail "bot username not remembered"
 ok "setup validates tokens with Telegram, learns the user id, acknowledges the message, narrows CAGE_AGENTS"
+grep -q '^/bot100:GOODclaude/setMyProfilePhoto photo-ok$' "$T/requests.log" || fail "claude bot got no avatar: $(cat "$T/requests.log")"
+grep -q '^/bot200:GOODcodex/setMyProfilePhoto photo-ok$' "$T/requests.log" || fail "codex bot got no avatar"
+grep -qE '^/bot100:GOODclaude/setMyDescription[?]description=.*Claude(%20|[+])Code' "$T/requests.log" || fail "no description: $(cat "$T/requests.log")"
+grep -q '^/bot100:GOODclaude/setMyShortDescription?short_description=' "$T/requests.log" || fail "no short description"
+grep -q 'gave it a face and a hello' "$T/setup.err" || fail "setup did not say it dressed the bots"
+ok "new bots get the agent's avatar, a description and a short description"
 
 # --- re-running keeps working tokens and the allowlist without prompting
 : > "$T/requests.log"
@@ -74,7 +88,8 @@ cage setup claude codex </dev/null 2>"$T/setup2.err" || fail "second setup faile
 grep -q 'keeping bot @dot_claude_bot' "$T/setup2.err" || fail "did not keep existing bot"
 grep -q 'allowlist already set: 4242' "$T/setup2.err" || fail "did not keep allowlist"
 grep -q getUpdates "$T/requests.log" && fail "polled for a user id although the allowlist was set"
-ok "re-running setup keeps valid settings"
+grep -q setMy "$T/requests.log" && fail "re-dressed bots that were already set up"
+ok "re-running setup keeps valid settings and leaves existing bots alone"
 
 # --- adding one agent later keeps the earlier ones; doctor then checks exactly those
 printf '%s\n' '300:GOODcursor' | cage setup cursor 2>/dev/null || fail "adding cursor failed"
@@ -141,7 +156,7 @@ PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage autostart
 grep -qxF 'reg.exe delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v cage /f' "$T/os.log" || fail "Run key not removed: $(cat "$T/os.log")"
 out="$(PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage doctor 2>&1 || true)"
 grep -q '✓ WSL distro Ubuntu-24.04 with Windows interop' <<<"$out" || fail "doctor WSL line: $out"
-grep -qE '✓ /dev/kvm accessible|no /dev/kvm in WSL: cage needs WSL 2 on Windows 11|wsl --terminate Ubuntu-24.04' <<<"$out" || fail "doctor WSL KVM hint: $out"
+grep -qE 'KVM is ready|no /dev/kvm in WSL: cage needs WSL 2 on Windows 11|wsl --terminate Ubuntu-24.04' <<<"$out" || fail "doctor WSL KVM hint: $out"
 ok "on WSL, autostart uses the per-user Run key and doctor gives WSL-specific hints"
 
 echo "all $pass setup tests passed"
