@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cage: each coding agent in its own microVM, reachable from Telegram, Slack or Discord.
+# cage: each coding agent in its own microVM, reachable from Telegram, Slack, Discord or WhatsApp.
 #
 # This script is glue. The heavy lifting is done by two existing projects:
 #   microsandbox  (https://github.com/superradcompany/microsandbox)  microVM per agent, volumes, egress policy
@@ -379,7 +379,7 @@ yes_no() { # yes_no <question> <default y|n>: true for yes
 
 # Writes $CAGE_HOME/agents/<agent>/cc-connect.toml (0600). Values are validated, so no TOML escaping is needed.
 render_config() {
-  local a="$1" token dir cmd cmdline="" platforms="" admins="" v
+  local a="$1" token dir cmd cmdline="" platforms="" admins="" v bridge
   dir="$CAGE_HOME/agents/$a"
   mkdir -p "$dir"
   chmod 700 "$CAGE_HOME" "$CAGE_HOME/agents" "$dir"
@@ -428,6 +428,25 @@ token = \"$v\"
 allow_from = \"$(cvar DISCORD_ALLOW "$a")\"
 "
   fi
+  bridge=""
+  v="$(cvar WHATSAPP_MODE "$a")"
+  if [ -n "$v" ] && [ -n "$platforms" ]; then
+    [[ "$v" =~ ^(own|spare)$ && "$(cvar WHATSAPP_ALLOW "$a")" =~ ^[0-9]*$ && "$(cvar WHATSAPP_TOKEN "$a")" =~ ^[a-f0-9]{16,}$ ]] \
+      || die "$a's WhatsApp settings are broken; cage chat add whatsapp $a"
+    if [ "$v" = own ]; then admins="$admins,me"; else admins="$admins,$(cvar WHATSAPP_ALLOW "$a")"; fi
+    # cc-connect's bridge, for the adapter in the same VM (guest/whatsapp.sh); nothing outside the VM can reach it
+    bridge="
+[bridge]
+enabled = true
+port = 9810
+token = \"$(cvar WHATSAPP_TOKEN "$a")\"
+"
+    ( umask 077; printf 'WA_MODE=%s\nWA_ALLOW=%s\nWA_BRIDGE_PORT=9810\nWA_BRIDGE_TOKEN=%s\nWA_NAME=%s\n' \
+        "$v" "$(cvar WHATSAPP_ALLOW "$a")" "$(cvar WHATSAPP_TOKEN "$a")" "$(agent_short "$a")" > "$dir/whatsapp.env" )
+  else
+    rm -f "$dir/whatsapp.env"
+  fi
+  admins="$(printf '%s' "$admins" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)"
   [ -n "$platforms" ] || die "CAGE_TELEGRAM_TOKEN_$a is missing, so nobody can reach $a: cage setup $a (Telegram), or cage chat add slack|discord $a"
   cmd="$(cc_cmd "$a")"
   # Cursor asks before it uses an MCP server, and headless nobody can answer: once you've connected apps for it
@@ -442,7 +461,7 @@ data_dir = "/home/agent/.cc-connect/data"
 
 [log]
 level = "info"
-
+$bridge
 [[projects]]
 name = "$a"
 admin_from = "$admins"
@@ -581,6 +600,7 @@ tls_bypass_for() { # hosts that must not be intercepted: the chat apps it uses, 
   echo "api.telegram.org"
   if [ -n "$(cvar SLACK_BOT_TOKEN "$1")" ]; then echo "slack.com *.slack.com *.slack-edge.com"; fi
   if [ -n "$(cvar DISCORD_TOKEN "$1")" ]; then echo "discord.com *.discord.com discord.gg *.discord.gg *.discordapp.com *.discordapp.net"; fi
+  if [ -n "$(cvar WHATSAPP_MODE "$1")" ]; then echo "whatsapp.com *.whatsapp.com whatsapp.net *.whatsapp.net"; fi
   case "$1" in
     claude) echo "anthropic.com *.anthropic.com claude.ai *.claude.ai claude.com *.claude.com" ;;
     codex) echo "openai.com *.openai.com chatgpt.com *.chatgpt.com" ;;
@@ -1023,13 +1043,96 @@ chat_add_discord() {
   ok "$( [ "$allow" = "*" ] && echo "everyone there" || echo "only you") can DM it, or @mention it in a channel"
 }
 
-chat_add() { # chat_add <slack|discord> [agent]
+chat_add_whatsapp() {
+  local a="$1" mode="" num=""
+  printf '\n%s%s %sWhatsApp%s  %s%s gets a WhatsApp number%s\n' "$IND" "$(face "$a" ready)" "$C_B" "$C_0" "$C_DIM" "$a" "$C_0" >&2
+  say "  $a links to WhatsApp the way WhatsApp Web does, through Baileys (an open-source, unofficial client)."
+  warn "WhatsApp doesn't allow unofficial clients and has banned numbers for it, so a spare number is safest:"
+  say "  a cheap prepaid SIM, or a second number in the WhatsApp Business app. Your own number works too."
+  while [ -z "$mode" ]; do
+    prompt "which number will $a use? (spare / mine) [spare] " mode
+    case "$mode" in ""|spare|s) mode=spare ;; mine|own|m) mode=own ;; *) warn "spare or mine?"; mode="" ;; esac
+  done
+  if [ "$mode" = spare ]; then
+    while true; do
+      prompt "your own number, with country code, so only you can message it (e.g. +1 555 123 4567): " num
+      num="${num//[^0-9]/}"
+      [ ${#num} -ge 8 ] && [ ${#num} -le 15 ] && break
+      warn "that doesn't look like a phone number with its country code"
+    done
+  else
+    warn "Linked to your own number, the VM holds a key to your whole WhatsApp. $a only reads and answers your"
+    say "  \"Message yourself\" chat, and marks its replies there with [•|•]."
+    yes_no "Use your own number anyway?" n || die "nothing saved; run it again and choose a spare number"
+  fi
+  set_env "CAGE_WHATSAPP_MODE_$a" "$mode"
+  set_env "CAGE_WHATSAPP_ALLOW_$a" "$num"
+  set_env "CAGE_WHATSAPP_TOKEN_$a" "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  load_env
+  ok "WhatsApp is on for $a"
+}
+
+qr_redraw() { # qr_redraw <text>: draws a QR code in place of the one drawn before (QR_LINES)
+  local out n
+  out="$(qrencode -t ANSIUTF8 -m 2 "$1" 2>/dev/null | sed "s/^/$IND  /")" || return 0
+  [ "${QR_LINES:-0}" -gt 0 ] && printf '\033[%sA\033[J' "$QR_LINES" >&2
+  printf '%s\n' "$out" >&2
+  n="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+  QR_LINES="$n"
+}
+
+whatsapp_link() { # whatsapp_link <agent>: shows the code to scan until the phone has linked
+  local a="$1" st state last="" code="" num i shown=0
+  [ -n "$(cvar WHATSAPP_MODE "$a")" ] || die "WhatsApp isn't on for $a: cage chat add whatsapp $a"
+  refresh_running
+  [[ "$RUNNING" == *" $(vm "$a") "* ]] || die "$a is asleep: cage up $a"
+  if [ "$UI" != 1 ] || ! command -v qrencode >/dev/null 2>&1; then
+    say "No QR codes here (install qrencode for those), so you'll type a code into WhatsApp instead."
+    prompt "the number $a will use, with country code: " num
+    num="${num//[^0-9]/}"
+    [ ${#num} -ge 8 ] || die "that doesn't look like a phone number"
+    agent_exec "$a" no "mkdir -p ~/.cage/whatsapp && printf %s $num > ~/.cage/whatsapp/pair && rm -f ~/.cage/whatsapp/status.json && pkill -f adapter.mjs || true" >/dev/null 2>&1 || true
+  fi
+  say "On the phone with $( [ "$(cvar WHATSAPP_MODE "$a")" = own ] && echo "your number" || echo "$a's number"): WhatsApp → Settings → ${C_B}Linked devices${C_0} → ${C_B}Link a device${C_0}"
+  QR_LINES=0
+  [ -t 0 ] && hint "press Enter to stop waiting"
+  for i in $(seq 1 200); do
+    st="$(agent_exec "$a" no 'cat ~/.cage/whatsapp/status.json 2>/dev/null' 2>/dev/null || true)"
+    state="$(printf '%s' "$st" | jget state)"
+    case "$state" in
+      linked)
+        [ "$QR_LINES" -gt 0 ] && printf '\033[%sA\033[J' "$QR_LINES" >&2
+        ok "linked to +$(printf '%s' "$st" | jget me)"
+        if [ "$(cvar WHATSAPP_MODE "$a")" = own ]; then hint "talk to $a in your \"Message yourself\" chat"
+        else hint "message +$(printf '%s' "$st" | jget me) from your phone to talk to $a"; fi
+        return 0 ;;
+      qr) code="$(printf '%s' "$st" | jget qr)"; [ "$code" = "$last" ] || { last="$code"; qr_redraw "$code"; } ;;
+      code) if [ $shown = 0 ]; then
+              say "Tap ${C_B}Link with phone number instead${C_0} and enter: ${C_B}$(printf '%s' "$st" | jget code)${C_0}"; shown=1
+            fi ;;
+      *) [ "$UI" = 1 ] && [ "$QR_LINES" = 0 ] && printf '\r%s%s getting WhatsApp ready…' "$IND" "$(face "$a" "busy$(( i % 2 + 1 ))")" >&2 ;;
+    esac
+    if key_pressed 2; then break; fi
+  done
+  [ "$UI" = 1 ] && printf '\r\033[2K' >&2
+  hint "not linked yet; try again any time: cage chat link whatsapp $a"
+}
+
+chat_add() { # chat_add <slack|discord|whatsapp> [agent]
   local where="${1:-}"
-  case "$where" in slack|discord) ;; *) die "usage: cage chat add slack|discord [agent]" ;; esac
+  case "$where" in slack|discord|whatsapp) ;; *) die "usage: cage chat add slack|discord|whatsapp [agent]" ;; esac
   command -v curl >/dev/null || die "curl is required"
   pick_agent "join $(printf '%s' "$where" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "${2:-}"
+  if [ "$where" = whatsapp ] && ! valid_token "$(token_for "$PICKED")" && [ -z "$(cvar SLACK_BOT_TOKEN "$PICKED")$(cvar DISCORD_TOKEN "$PICKED")" ]; then
+    die "WhatsApp comes on top of Telegram, Slack or Discord; set one of those up for $PICKED first"
+  fi
   "chat_add_$where" "$PICKED"
-  connect_apply "$PICKED"
+  if [ "$where" = whatsapp ]; then
+    if [ "$UI" = 1 ] && [ -t 0 ]; then cmd_up "$PICKED"; whatsapp_link "$PICKED"
+    else hint "next: cage up $PICKED, then cage chat link whatsapp $PICKED"; fi
+  else
+    connect_apply "$PICKED"
+  fi
 }
 
 unset_env() { # unset_env <name>...: drops lines from the env file
@@ -1041,15 +1144,19 @@ unset_env() { # unset_env <name>...: drops lines from the env file
 
 chat_rm() { # chat_rm <slack|discord> <agent>
   local where="${1:-}" a="${2:-}"
-  case "$where" in slack|discord) ;; *) die "usage: cage chat rm slack|discord <agent>" ;; esac
+  case "$where" in slack|discord|whatsapp) ;; *) die "usage: cage chat rm slack|discord|whatsapp <agent>" ;; esac
   [ -n "$a" ] || die "usage: cage chat rm $where <agent>"
   check_agent "$a"
   if [ "$where" = slack ]; then
     unset_env "CAGE_SLACK_BOT_TOKEN_$a" "CAGE_SLACK_APP_TOKEN_$a" "CAGE_SLACK_OWNER_$a" "CAGE_SLACK_ALLOW_$a" "CAGE_SLACK_TEAM_$a"
     hint "to remove the app from Slack too: $(link https://api.slack.com/apps) → its app → Delete App"
-  else
+  elif [ "$where" = discord ]; then
     unset_env "CAGE_DISCORD_TOKEN_$a" "CAGE_DISCORD_OWNER_$a" "CAGE_DISCORD_ALLOW_$a"
     hint "to remove the bot from Discord too: $(link https://discord.com/developers/applications) → its app → Delete App"
+  else
+    unset_env "CAGE_WHATSAPP_MODE_$a" "CAGE_WHATSAPP_ALLOW_$a" "CAGE_WHATSAPP_TOKEN_$a"
+    if exists "$a"; then agent_exec "$a" no 'rm -rf ~/.cage/whatsapp/auth ~/.cage/whatsapp/status.json' >/dev/null 2>&1 || true; fi
+    hint "on the phone, also remove it under WhatsApp → Settings → Linked devices"
   fi
   load_env
   ok "$a left $where"
@@ -1072,10 +1179,14 @@ chat_list() {
       line="${line:+$line · }Discord"
       [ "$(cvar DISCORD_ALLOW "$a")" != "*" ] || line="$line, open to everyone there"
     fi
+    case "$(cvar WHATSAPP_MODE "$a")" in
+      own) line="${line:+$line · }WhatsApp (your own number)" ;;
+      spare) line="${line:+$line · }WhatsApp" ;;
+    esac
     printf '  %s  %-12s %s\n' "$(face "$a" ready)" "$a" "${line:-${C_DIM}nowhere yet${C_0}}" >&2
   done
   printf '\n' >&2
-  hint "add one: cage chat add slack [agent]  ·  cage chat add discord [agent]"
+  hint "add one: cage chat add slack|discord|whatsapp [agent]"
   printf '\n' >&2
 }
 
@@ -1084,8 +1195,10 @@ cmd_chat() {
   case "${1:-list}" in
     list) chat_list ;;
     add) shift; chat_add "$@" ;;
+    link) [ "${2:-}" = whatsapp ] && [ -n "${3:-}" ] || die "usage: cage chat link whatsapp <agent>"
+          check_agent "$3"; whatsapp_link "$3" ;;
     rm|remove) shift; chat_rm "$@" ;;
-    *) die "usage: cage chat [list] | add slack|discord [agent] | rm slack|discord <agent>" ;;
+    *) die "usage: cage chat [list] | add slack|discord|whatsapp [agent] | link whatsapp <agent> | rm <app> <agent>" ;;
   esac
 }
 
@@ -1751,7 +1864,7 @@ usage() {
   row "  logs <agent>" "watch what an agent's VM is doing"
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
-  row "  chat [add|rm]" "talk to them in Slack or Discord too"
+  row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too"
   row "  connect [add|rm]" "apps your agents can use: Gmail, GitHub, …"
   row "  secret add|list|rm" "keys agents can use but never see"
   printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"

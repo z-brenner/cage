@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Installs ONE agent CLI plus cc-connect into an Ubuntu 24.04 guest. Idempotent. Runs as root.
-#   usage: provision.sh <claude|codex|cursor|antigravity> [--update]
+#   usage: provision.sh <claude|codex|cursor|antigravity> [--update | --node]
+#   --node only makes sure Node.js 22 is there (for the WhatsApp adapter, on an already provisioned VM)
 # Called by guest/entry.sh on first boot of each microsandbox VM (and by `cage update`).
 # Vendor CLIs install system-wide (/opt/cage/tools, /usr/local/bin) so the agent's persistent home
 # volume holds only its login and work, never binaries.
@@ -18,7 +19,7 @@ log() { echo "provision[$KIND]: $*"; }
 
 [ "$(id -u)" = 0 ] || { echo "provision.sh must run as root" >&2; exit 1; }
 case "$KIND" in claude|codex|cursor|antigravity) ;; *) echo "unknown agent kind: $KIND" >&2; exit 2 ;; esac
-if [ -e "$MARK" ] && [ "$MODE" != "--update" ]; then
+if [ -e "$MARK" ] && [ "$MODE" != "--update" ] && [ "$MODE" != "--node" ]; then
   log "already provisioned ($(cat "$MARK"))"
   exit 0
 fi
@@ -111,12 +112,15 @@ ENV
   git config --system user.email "$KIND@cage.invalid"
 }
 
+if [ "$MODE" = "--node" ]; then node_22; exit 0; fi
 if [ "$MODE" = "--update" ] && [ -e "$MARK" ]; then
   log "updating CLIs only"
 else
   base_packages
 fi
 "install_$KIND"
+# Extras some agents run next to their CLI: the WhatsApp adapter needs Node.js.
+if [ -r /cage-config/whatsapp.env ]; then node_22; fi
 install_cc_connect
 guest_env
 case "$KIND" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$KIND" ;; esac
