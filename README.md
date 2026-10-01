@@ -10,16 +10,16 @@ Each one lives in a private microVM and talks to you as a Telegram bot.</p>
 
 ## Get started
 
-**Windows 11:** open PowerShell and paste
+**Windows 11:** download [Install-cage.cmd](https://github.com/z-brenner/cage/releases/latest/download/Install-cage.cmd) and double-click it, or open PowerShell and paste
 
 ```powershell
-irm https://raw.githubusercontent.com/z-brenner/cage/main/install.ps1 | iex
+irm https://github.com/z-brenner/cage/releases/latest/download/install.ps1 | iex
 ```
 
 **Linux:** open a terminal and paste
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/z-brenner/cage/main/install.sh | bash
+curl -fsSL https://github.com/z-brenner/cage/releases/latest/download/install.sh | bash
 ```
 
 That's the whole setup. It walks you through everything in about five minutes:
@@ -154,6 +154,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 - **Antigravity** is Google's successor to Gemini CLI for AI Pro/Ultra (since 2026-06-18). Google has suspended accounts over third-party use of its CLI logins, so consider a spare Google account.
 - **After a reboot** your agents sleep until `cage up` (or `cage autostart on`, once). Waking reinstalls each CLI in about a minute; logins, sessions and files are kept.
 - **Settings** live in `~/.cage/cage.env` (CPU, memory, disk, network rules, `CAGE_MODE=ask` to approve each tool call in chat).
+- **Updates:** `cage update` installs the newest cage release, then rebuilds the agents with the newest CLIs. Each release's download is checked against its `SHA256SUMS` before anything is replaced, and every file carries a signed build-provenance attestation: `gh attestation verify cage-v0.1.0.tar.gz --repo z-brenner/cage` shows it was built by this repo's release workflow from that tag. `cage --version` says which one you have. To follow the development version instead, install with `CAGE_REF=main`.
 - **Installer error "Could not determine latest release version"?** That's GitHub rate-limiting your IP. `cage` falls back to a pinned microsandbox automatically.
 
 ## Security model
@@ -184,7 +185,8 @@ cage is a few hundred lines of shell around two open-source projects: [cc-connec
 ## Development
 
 ```bash
-shellcheck cage guest/*.sh test/*.sh
+shellcheck cage install.sh guest/*.sh test/*.sh scripts/*.sh
+test/installer.sh               # install.sh from git and from releases (checksums, in-place updates, cage update)
 test/host.sh                    # cage against a stub msb: config rendering, validation, msb arguments, status, guards
 test/setup.sh                   # cage setup / doctor / autostart against a mock Telegram API and stubbed launchctl/systemctl
 CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # plus: real cc-connect loads every generated config
@@ -198,6 +200,8 @@ CI (`.github/workflows/ci.yml`) runs:
 - the host and setup tests under bash 5, and under bash 3.2 (what macOS ships), including WSL behavior against stubbed Windows tools
 - guest smoke tests for all four agents
 - the real-microVM end-to-end test for all four agents, on KVM-enabled GitHub runners
+
+Releases: push a tag like `v0.2.0` on main. `.github/workflows/release.yml` runs the quick checks, builds the release with `scripts/build-release.sh` (reproducible: the same commit gives the same tarball), attests it, and publishes it. The installers always take the latest release.
 
 Files:
 - `cage`: the host CLI.

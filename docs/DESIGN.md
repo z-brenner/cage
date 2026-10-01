@@ -17,6 +17,7 @@ What cage adds:
 - first-boot provisioning inside each VM
 - login flows that run inside the VM
 - lifecycle commands (`up`, `login`, `status`, `logs`, `shell`, `update`, `down`, `destroy`)
+- releases: a reproducible tarball per tag with `SHA256SUMS` (checked by `install.sh` and `cage update`) and a signed build-provenance attestation, so installers never install an unreviewed `main`
 
 ```
  Telegram (you)                                  host: ./cage → msb (microsandbox CLI)

@@ -1946,7 +1946,33 @@ cmd_logs() { [ -n "${1:-}" ] || die "usage: cage logs <agent>"; check_agent "$1"
 cmd_shell() { [ -n "${1:-}" ] || die "usage: cage shell <agent>"; check_agent "$1"; agent_exec "$1" yes "cd ~/work 2>/dev/null; exec bash -l"; }
 
 # A fresh VM installs the latest agent CLI and the pinned cc-connect; the home volume (login, work) is kept.
-cmd_update() { cmd_up "$@"; }
+cage_version() {
+  local v
+  if [ -f "$CAGE_ROOT/VERSION" ]; then cat "$CAGE_ROOT/VERSION"
+  elif v="$(git -C "$CAGE_ROOT" describe --tags --always --dirty 2>/dev/null)"; then echo "dev ($v)"
+  else echo dev; fi
+}
+
+# cage update [agents]: the newest cage first (the latest release, checked against its checksums; or the branch a
+# git install follows), then the agents rebuilt with the newest CLIs. A development checkout is left to git.
+cmd_update() {
+  if [ -z "${CAGE_NO_SELF_UPDATE:-}" ] && { [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; }; then
+    local before tmp rc=0 ref=""
+    before="$(cage_version)"
+    [ ! -f "$CAGE_ROOT/.git/cage-ref" ] || ref="$(cat "$CAGE_ROOT/.git/cage-ref")"
+    tmp="$(mktemp -d)"
+    cp "$CAGE_ROOT/install.sh" "$tmp/install.sh"   # it replaces itself
+    CAGE_DIR="$CAGE_ROOT" CAGE_REF="$ref" CAGE_NO_START=1 bash "$tmp/install.sh" >/dev/null 2>"$tmp/log" || rc=$?
+    grep -E '^  (✓|✗|!) ' "$tmp/log" | grep -v 'type .*cage.* in any new terminal' >&2 || true
+    rm -rf "$tmp"
+    if [ "$rc" != 0 ]; then
+      warn "couldn't update cage itself (still $before); updating the agents anyway"
+    elif [ "$(cage_version)" != "$before" ]; then
+      exec env CAGE_NO_SELF_UPDATE=1 "$CAGE_ROOT/cage" update "$@"   # the rest with the new cage
+    fi
+  fi
+  cmd_up "$@"
+}
 
 cmd_down() {
   load_env
@@ -2099,7 +2125,7 @@ usage() {
   row "  setup [agents]" "Telegram bots, and who may talk to them"
   row "  doctor" "check this computer, the config and the bots"
   row "  autostart on|off" "wake agents when you log in"
-  row "  update [agents]" "newest agent CLIs (same as up)"
+  row "  update [agents]" "newest cage and agent CLIs"
   row "  destroy <agent>" "--keep-login keeps its login, --yes deletes all"
   row "  init" "just write the config file, to edit by hand"
   printf '\n  %sagents%s  claude · codex · cursor · antigravity\n' "$C_DIM" "$C_0"
@@ -2133,6 +2159,7 @@ main() {
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
     _open) UI=1 open_url "${1:-}" ;;
     _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT; while :; do oauth_refresh_all 900; sleep 300 & wait "$!"; done ;;
+    version|--version|-V) echo "cage $(cage_version)" ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

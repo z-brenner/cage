@@ -23,7 +23,7 @@ if [ "$cmd" = exec ]; then case "$*" in *cage:ready*) echo cage:ready ;; esac; f
 exit 0
 EOF
 chmod +x "$T/bin/msb"
-export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing"
+export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
 : > "$MSB_EXISTING"
 cage() { "$ROOT/cage" "$@"; }
 
