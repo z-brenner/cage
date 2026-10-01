@@ -47,6 +47,21 @@ case "$A" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$A" ;; 
 ax "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"
 ok "$BIN runs as agent"
 
+# the app's chat: the relay in the VM (guest/app.mjs) reaches cc-connect's bridge; cc-connect answers /help itself
+D="$CAGE_HOME/app/$A"
+app_send() { printf '%s' "$2" > "$D/in/.$1.tmp" && mv "$D/in/.$1.tmp" "$D/in/$1.json"; }
+app_log() { msb logs "$VM" 2>&1 | grep 'cage-app' | tail -5; tail -5 "$D/log.jsonl" 2>/dev/null; }
+retry 300 grep -q '"t":"status","connected":true' "$D/log.jsonl" || fail "the app's relay never reached cc-connect's bridge: $(app_log)"
+app_send e2e-1 '{"type":"message","id":"e2e-1","session":"you","text":"/help"}'
+retry 120 grep -q '"ctx":"e2e-1"' "$D/log.jsonl" || fail "no answer to /help in the app: $(app_log)"
+app_send e2e-2 '{"type":"ls","id":"e2e-2","path":""}'
+retry 60 test -s "$D/out/e2e-2.json" || fail "no answer about the work folder: $(app_log)"
+grep -q '"AGENTS.md"' "$D/out/e2e-2.json" || fail "work folder listing: $(cat "$D/out/e2e-2.json")"
+app_send e2e-3 '{"type":"api","id":"e2e-3","method":"GET","path":"/api/v1/cron"}'
+retry 60 test -s "$D/out/e2e-3.json" || fail "no answer from the management API: $(app_log)"
+grep -q '"ok":true' "$D/out/e2e-3.json" || fail "management API: $(cat "$D/out/e2e-3.json")"
+ok "the app's chat: the relay reaches cc-connect (it answers /help), the work folder and scheduled tasks"
+
 ax sh -c 'echo "# Remember this" > /memory-inbox/e2e.md' || fail "agent can't write its inbox"
 [ -f "$CAGE_HOME/brain/inbox/$A/e2e.md" ] || fail "inbox note didn't reach the host"
 if ax sh -c 'echo x > /memory/x.md' 2>/dev/null; then fail "/memory is writable"; fi
@@ -227,6 +242,15 @@ ax python3 /cage/mask.py "$BIN" --version >/dev/null || fail "$BIN doesn't run b
 gx grep -q 'Masked values' /home/agent/work/AGENTS.md || fail "the agent wasn't told about masked values"
 cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
 ok "privacy mask: the real CLI runs behind it, your terms and emails become tokens, the agent is told"
+
+# no chat app at all: cc-connect runs behind the placeholder platform, and the app still reaches it
+sed -i "/^CAGE_TELEGRAM_TOKEN_$A=/d" "$CAGE_HOME/cage.env"
+cage up "$A"
+retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned without a chat app"
+retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect doesn't run without a chat app: $(msb logs "$VM" 2>&1 | tail -20)"
+app_send e2e-4 '{"type":"message","id":"e2e-4","session":"you","text":"/help"}'
+retry 180 grep -q '"ctx":"e2e-4"' "$D/log.jsonl" || fail "no answer in the app without a chat app: $(app_log)"
+ok "no chat app needed: cc-connect runs behind the placeholder, and you talk to the agent in the app"
 
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi

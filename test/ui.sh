@@ -6,7 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
 SERVER=""
-trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; rm -rf "$T"' EXIT
+VM=""
+trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -48,8 +49,28 @@ curl -s -H "X-Cage-Token: $TOK" "$B/api/state" | python3 -c 'import json,sys; d=
   || fail "state"
 ok "only this computer, with the token, and only cage's own commands; a strict content security policy"
 
+# The chat folders are written by the VMs: the app never follows a link out of them, never shows an agent's page
+A="$CAGE_HOME/app"
+mkdir -p "$A/claude/files" "$A/cursor" "$T/elsewhere" && chmod 700 "$A"
+ln -s "$CAGE_HOME/cage.env" "$A/claude/files/1-ab-evil.png"
+printf '<script>alert(1)</script>' > "$A/claude/files/1-ab-page.html"
+printf 'PNG' > "$A/claude/files/1-ab-pic.png"
+ln -s "$T/elsewhere" "$A/cursor/in"
+H=(-H "X-Cage-Token: $TOK")
+[ "$(code "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-evil.png")" = 404 ] || fail "followed a link out of the chat folder"
+[ "$(code "${H[@]}" "$B/api/chat/claude/file?p=files/../../cage.env")" = 404 ] && [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=../cage.env")" = 404 ] || fail "a path out of the chat folder"
+curl -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-page.html" | grep -qi '^content-disposition: attachment' || fail "an agent's page shown in the app"
+curl -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^content-type: image/png' || fail "pictures are shown"
+[ "$(code "${H[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
+[ "$(code "${H[@]}" "$B/api/chat/evil/log")" = 400 ] || fail "not an agent"
+rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
+ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
+
+mkdir -p "$T/work/reports" && printf 'Q3: up 12%%\n' > "$T/work/reports/q3.txt" && printf '# Notes\n' > "$T/work/notes.md"
+node "$ROOT/test/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
+
 if command -v node >/dev/null 2>&1; then
-  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" \
+  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" \
     || fail "the web app in a browser (above)"
   ok "the web app in a real browser"
 fi

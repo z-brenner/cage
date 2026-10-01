@@ -4,7 +4,7 @@
 
 <p align="center"><b>Your AI agents, each in its own little cage.</b><br>
 Claude Code, Codex, Cursor and Antigravity on your own subscriptions.<br>
-Each one lives in a private microVM and talks to you on Telegram, Slack, Discord or WhatsApp.</p>
+Each one lives in a private microVM. You chat with it in cage's app, or on Telegram, Slack, Discord or WhatsApp.</p>
 
 <p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/app-dark.png"><img src="assets/app.png" width="760" alt="cage in the browser: a sidebar with each agent and its status, what needs you, and two agents' answers to the same question side by side"></picture></p>
 
@@ -33,9 +33,9 @@ That's the whole setup. cage then opens in your browser and walks you through ev
 After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
 
 The app does everything, in plain words:
-- **Home** shows what needs you (a sign-in, a chat to connect, something cage blocked) and how each agent is doing.
+- **Home** shows what needs you (a sign-in, something cage blocked) and how each agent is doing.
 - **Ask your agents** sends one question to every awake agent and shows their answers side by side, so you can see where they agree.
-- **Each agent's page** has its chats, its privacy mask, who answers when it hits its usage limit, and its activity log.
+- **Each agent's page** is a chat with it, its files, and its settings: chat apps, asking before it acts, plan usage, privacy mask, and who answers when it hits its usage limit.
 - **Apps, Sign-ins & keys, Memory, Security and Settings** cover the rest. Press Ctrl+K (⌘K on a Mac) to jump to any of them.
 
 Each action runs cage itself and shows its questions in a side panel, as a conversation. Vendor sign-ins open in a terminal view inside that panel. The app only listens on your own computer and needs the private link it opened with. It works on a phone-sized window too, and follows your system's light or dark mode.
@@ -66,6 +66,8 @@ cage ui               the same, and everything else, in your browser
 cage up [agents]      wake agents up (a fresh VM; logins and files are kept)
 cage down [agents]    put them to sleep
 cage login <agent>    sign an agent in to your subscription
+cage add <agents>     more agents, to chat with in the app (no bot needed)
+cage approve <a> on   it asks you before it acts in your apps (email, calendar, GitHub…)
 cage logs <agent>     watch what an agent's VM is doing
 cage memory           review what your agents want to remember
 cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
@@ -99,9 +101,21 @@ Answers from `/all` and stand-ins are read-only and don't use your connected app
 - `CAGE_VOICE_MODEL=small` in `~/.cage/cage.env` is more accurate but slower. `CAGE_VOICE_LANGUAGE=en` skips language detection.
 - `cage voice on groq` uses Groq's Whisper API instead: faster, with your key, which the VMs never see.
 
+## Chat in the app
+
+Every agent has a chat in cage's app, on its page: no bot or phone needed.
+- **Files go both ways.** Attach files with the paperclip, drop them on the chat, or paste a picture. Files the agent makes for you show up in the chat, and the **Files** tab lists them, along with the agent's own work folder: download anything from it, or upload files for it to use.
+- **Answers stream in** as the agent writes them, and **starters** on an empty chat show what to ask.
+- **Asking first:** with **Ask before acting in your apps** on (`cage approve claude on`), Claude Code asks before it sends an email, books a meeting or changes anything in an app you connected, with Allow and Deny buttons; work on its own computer goes ahead. Codex, Cursor and Antigravity can only ask before every action.
+- **Plan usage:** each agent's settings show how much of your plan is left (Claude Code and Codex report it).
+- **An asleep agent wakes up** when you message it; your message waits for it.
+- **New conversation** (the pencil, or `/new`) starts fresh. cc-connect's other commands work too: `/stop`, `/model`, `/usage`.
+
+How it works: the app and each agent's VM share a folder, `~/.cage/app/<agent>`. A small relay in the VM ([guest/app.mjs](guest/app.mjs)) passes your messages to cc-connect through its [bridge](https://github.com/chenhg5/cc-connect/blob/main/docs/bridge-protocol.md), and writes the replies to a log the app reads. So the chat is still there when you reopen the app, including what scheduled tasks said meanwhile.
+
 ## Slack, Discord and WhatsApp
 
-Telegram is where setup starts, and you can add an agent to Slack, Discord or WhatsApp as well. Each one is that agent's own bot there, run by the same VM, with the same login and files.
+You can also talk to an agent from your phone: Telegram, Slack, Discord or WhatsApp. Each one is that agent's own bot there, run by the same VM, with the same login and files.
 
 ```bash
 cage chat add slack claude      # opens a Slack app for claude, already filled in; you paste two tokens
@@ -114,7 +128,7 @@ cage chat                       # who's where
 - **Discord:** cage turns on the permission it needs to read your messages, gives it its face, and shows an invite link (and a QR code) for your server. DM it, or @mention it in a channel.
 - **Only you can talk to it** unless you say otherwise: cage finds your Slack account from your email, and your Discord account from the app's owner.
 - **Letting coworkers use it** is possible (`everyone`, or a list of emails in Slack), but think twice. Each agent runs on *your* personal subscription. Those plans are for one person, so sharing one with a team likely breaks their terms (see below). Everyone you let in can also reach what you connected it to: your email, files and keys. For a team bot, use the vendor's team plan or API key instead.
-- **WhatsApp:** your agent links as a device of a WhatsApp number, through [Baileys](https://github.com/WhiskeySockets/Baileys) (an open-source, unofficial WhatsApp Web client) plugged into cc-connect's bridge. WhatsApp doesn't allow unofficial clients and has banned numbers for it, so **use a spare number** if you can (a prepaid SIM, or a second number in the WhatsApp Business app), then message it from your own phone. Linking your own number works too: the agent then answers only in your "Message yourself" chat, but its VM holds a key to your whole WhatsApp. It comes on top of Telegram, Slack or Discord. If the link drops: `cage chat link whatsapp <agent>`.
+- **WhatsApp:** your agent links as a device of a WhatsApp number, through [Baileys](https://github.com/WhiskeySockets/Baileys) (an open-source, unofficial WhatsApp Web client) plugged into cc-connect's bridge. WhatsApp doesn't allow unofficial clients and has banned numbers for it, so **use a spare number** if you can (a prepaid SIM, or a second number in the WhatsApp Business app), then message it from your own phone. Linking your own number works too: the agent then answers only in your "Message yourself" chat, but its VM holds a key to your whole WhatsApp. If the link drops: `cage chat link whatsapp <agent>`.
 
 ## Privacy mask
 
@@ -224,7 +238,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 
 ## Security model
 
-- **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
+- **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. `cage approve <agent> on` makes it ask first (for Claude, only before it uses your apps), and `CAGE_MODE=ask` makes every agent approve each tool call in chat.
 - **Network:** by default, microsandbox's policy applies: the public internet is allowed, and your computer, LAN, loopback and cloud-metadata endpoints are blocked. **`cage network strict`** switches each agent to deny-by-default. It may then reach only:
   - its own service and its chat apps;
   - where it installs from;
@@ -238,7 +252,8 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 
   Your home screen flags new ones, and `cage security` lists them, with the `cage allow` line for each blocked host.
 - **Only you can talk to the bots:** the Telegram ids in `CAGE_TELEGRAM_ALLOW`, and in Slack or Discord your own account unless you allowed others. Only your own accounts are admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
-- **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox.
+- **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox and its chat folder.
+- **The chat folder is the VM's to write, so the app trusts nothing in it.** It never follows a link out of it, reads only plain files, and shows only pictures; anything else an agent sends downloads instead of opening in the app. cc-connect's bridge and management API listen only inside the VM, behind a token made for that agent.
 - **`/all` and stand-ins cross VMs, so they're opt-in.**
   - The VMs can't reach each other. cage relays on your computer instead: an agent's cc-connect hook leaves a request in a folder only that VM can write, and cage asks the others through `msb exec`.
   - cage treats everything in that folder as untrusted: no links or FIFOs, size limits, strict session keys, rate limits. Request text is only ever passed as an argument, never run.
