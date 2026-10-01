@@ -4,7 +4,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null; rm -rf "$T"' EXIT
+unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -108,6 +109,55 @@ ok "status lists VMs and probes each agent's login inside its VM"
 
 if cage up nonsense 2>/dev/null; then fail "unknown agent accepted"; fi
 ok "unknown agents are rejected"
+
+# msb installed by the official installer but not on PATH (autostart and `wsl.exe --exec` have no login shell)
+mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb"
+: > "$MSB_LOG"
+HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
+grep -qx 'stop | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
+ok "finds msb in the installer's location when it isn't on PATH"
+
+# --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
+# (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
+mkdir -p "$T/wslroot" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$T/wslroot/"
+W="$T/wslroot/cage"
+cat > "$T/bin/powershell.exe" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/ps.log"
+# stand-in for Start-Process launching \`wsl.exe … --exec <cage> _keepalive\` detached
+case "\$*" in *"'_keepalive'"*) ( "$W" _keepalive >/dev/null 2>&1 & ) ;; esac
+EOF
+chmod +x "$T/bin/powershell.exe"
+alive() { pgrep -f -- "$W _keepalive" >/dev/null; }
+gone() { for _ in 1 2 3 4 5; do alive || return 0; sleep 1; done; return 1; }
+export WSL_DISTRO_NAME=Ubuntu-24.04
+: > "$T/ps.log"
+"$W" up claude 2>"$T/err" || fail "up on WSL: $(cat "$T/err")"
+grep -qF "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','Ubuntu-24.04','-u','$(id -un)','--exec','$W','_keepalive'" "$T/ps.log" \
+  || fail "keepalive launch: $(cat "$T/ps.log")"
+alive || fail "keepalive is not running"
+grep -q 'hidden session keeps Ubuntu-24.04 running' "$T/err" || fail "up did not explain the keepalive: $(cat "$T/err")"
+: > "$T/ps.log"
+"$W" up claude 2>/dev/null
+[ ! -s "$T/ps.log" ] || fail "up started a second keepalive"
+"$W" status 2>/dev/null | grep -q '^WSL keepalive: running$' || fail "status does not show the keepalive"
+"$W" down claude 2>/dev/null
+alive || fail "down <agent> released the keepalive while other VMs may still run"
+"$W" down 2>/dev/null
+gone || fail "down did not release the keepalive"
+ok "on WSL, up holds one hidden session open; down (all agents) releases it"
+
+"$W" _autostart 2>/dev/null
+grep -q 'starting cage-claude' "$CAGE_HOME/autostart.log" || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
+alive || fail "_autostart did not start the keepalive"
+"$W" down 2>/dev/null; gone || fail "keepalive left running"
+ok "the Windows-login entry point runs up, logs to autostart.log and starts the keepalive"
+
+mv "$T/bin/powershell.exe" "$T/ps.off"
+"$W" up claude 2>"$T/err"
+grep -q 'Windows interop is off' "$T/err" || fail "no warning without interop: $(cat "$T/err")"
+unset WSL_DISTRO_NAME
+ok "without Windows interop, up warns that WSL will stop the VMs"
 
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   for a in claude codex cursor antigravity; do

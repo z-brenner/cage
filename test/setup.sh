@@ -48,6 +48,7 @@ for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
 port="$(cat "$T/port")"
 export CAGE_TELEGRAM_API="http://127.0.0.1:$port" CAGE_HOME="$T/home" HOME="$T/userhome"
 unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 mkdir -p "$HOME"
 cage() { "$ROOT/cage" "$@"; }
 
@@ -99,7 +100,7 @@ ok "doctor verifies each bot token with Telegram"
 
 # --- autostart (stubbed OS tools)
 mkdir -p "$T/bin"
-for tool in launchctl systemctl; do
+for tool in launchctl systemctl reg.exe powershell.exe; do
   printf '#!/bin/sh\necho "%s $*" >> "%s/os.log"\n' "$tool" "$T" > "$T/bin/$tool"
   chmod +x "$T/bin/$tool"
 done
@@ -129,5 +130,18 @@ grep -q 'systemctl --user enable cage-up.service' "$T/os.log" || fail "unit not 
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart off 2>/dev/null
 [ ! -e "$unit" ] || fail "unit not removed"
 ok "autostart on/off installs and removes a systemd user unit"
+
+# --- Windows (WSL 2): autostart is the per-user Run key (no admin); doctor explains WSL-specific KVM problems
+: > "$T/os.log"
+PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage autostart on 2>/dev/null
+grep -qxF "reg.exe add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v cage /t REG_SZ /d wsl.exe -d Ubuntu-24.04 -u $(id -un) --exec $ROOT/cage _autostart /f" "$T/os.log" \
+  || fail "Run key: $(cat "$T/os.log")"
+[ ! -e "$HOME/.config/systemd/user/cage-up.service" ] || fail "wrote a systemd unit on WSL"
+PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage autostart off 2>/dev/null
+grep -qxF 'reg.exe delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v cage /f' "$T/os.log" || fail "Run key not removed: $(cat "$T/os.log")"
+out="$(PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage doctor 2>&1 || true)"
+grep -q '✓ WSL distro Ubuntu-24.04 with Windows interop' <<<"$out" || fail "doctor WSL line: $out"
+grep -qE '✓ /dev/kvm accessible|no /dev/kvm in WSL: cage needs WSL 2 on Windows 11|wsl --terminate Ubuntu-24.04' <<<"$out" || fail "doctor WSL KVM hint: $out"
+ok "on WSL, autostart uses the per-user Run key and doctor gives WSL-specific hints"
 
 echo "all $pass setup tests passed"

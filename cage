@@ -11,6 +11,13 @@ CAGE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CAGE_HOME="${CAGE_HOME:-$HOME/.cage}"
 CAGE_ENV="${CAGE_ENV:-$CAGE_HOME/cage.env}"
 MSB="${CAGE_MSB:-msb}"
+# The microsandbox installer puts msb in ~/.local/bin, which isn't on PATH in non-login sessions
+# (autostart at login, `wsl.exe --exec`). Find it there too.
+if [ -z "${CAGE_MSB:-}" ] && ! command -v msb >/dev/null 2>&1; then
+  for _m in "$HOME/.local/bin/msb" "${MSB_HOME:-$HOME/.microsandbox}/bin/msb"; do
+    if [ -x "$_m" ]; then MSB="$_m"; break; fi
+  done
+fi
 KINDS="claude codex cursor antigravity"
 
 die() { echo "cage: $*" >&2; exit 1; }
@@ -157,6 +164,65 @@ EOF
 
 exists() { "$MSB" inspect "$(vm "$1")" >/dev/null 2>&1; }
 
+# --- Windows: cage runs inside WSL 2 -------------------------------------------------------------------------
+# WSL stops a distro ~15 s after its last wsl.exe session ends, and every microVM in it dies with it. So on WSL,
+# `cage up` holds one hidden wsl.exe session open (`cage _keepalive`, a sleep), `cage down` releases it, and
+# `cage autostart on` runs `cage up` at Windows login through the per-user Run key (no admin rights needed).
+is_wsl() { [ -n "${WSL_DISTRO_NAME:-}" ]; }
+
+win_cmd() { # win_cmd <name.exe>: a Windows executable, reached through WSL interop
+  local p
+  for p in "$(command -v "$1" 2>/dev/null || true)" "/mnt/c/Windows/System32/$1" "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/$1"; do
+    [ -n "$p" ] && [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+# Names and paths end up inside a PowerShell string and a registry value, so allow only plain characters.
+wsl_check_names() {
+  [[ "$WSL_DISTRO_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "unsupported WSL distro name \"$WSL_DISTRO_NAME\" (letters, digits, . _ - only)"
+  [[ "$(id -un)" =~ ^[A-Za-z0-9._-]+$ ]] || die "unsupported user name \"$(id -un)\""
+  [[ "$CAGE_ROOT" =~ ^[A-Za-z0-9._/-]+$ ]] || die "on Windows, keep cage at a path without spaces or quotes (now: $CAGE_ROOT)"
+}
+
+keepalive_pattern() { echo "$CAGE_ROOT/cage _keepalive"; }   # the keepalive's command line
+keepalive_running() { pgrep -f -- "$(keepalive_pattern)" >/dev/null 2>&1; }
+
+wsl_keepalive_start() {
+  keepalive_running && return 0
+  ( wsl_check_names ) || { say "warning: no WSL keepalive; WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
+  local ps i
+  if ! ps="$(win_cmd powershell.exe)"; then
+    say "warning: Windows interop is off, so WSL will stop these VMs ~15 s after you close the last WSL window"
+    return 0
+  fi
+  # Start-Process gives wsl.exe its own hidden console, so it outlives this terminal.
+  "$ps" -NoProfile -NonInteractive -Command \
+    "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','$WSL_DISTRO_NAME','-u','$(id -un)','--exec','$CAGE_ROOT/cage','_keepalive'" \
+    >/dev/null 2>&1 || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do keepalive_running && break; sleep 1; done
+  if keepalive_running; then
+    say "WSL: a hidden session keeps $WSL_DISTRO_NAME running after you close this window (\`cage down\` releases it)"
+  else
+    say "warning: could not start the WSL keepalive; WSL will stop the VMs ~15 s after you close the last WSL window"
+  fi
+}
+
+wsl_keepalive_stop() { pkill -f -- "$(keepalive_pattern)" 2>/dev/null || true; }
+
+wsl_autostart() { # wsl_autostart on|off
+  local reg key='HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+  reg="$(win_cmd reg.exe)" || die "can't reach reg.exe from WSL (is Windows interop enabled in /etc/wsl.conf?)"
+  if [ "$1" = off ]; then
+    "$reg" delete "$key" /v cage /f >/dev/null 2>&1 || true
+    say "autostart off"
+    return 0
+  fi
+  wsl_check_names
+  "$reg" add "$key" /v cage /t REG_SZ /d "wsl.exe -d $WSL_DISTRO_NAME -u $(id -un) --exec $CAGE_ROOT/cage _autostart" /f >/dev/null
+  say "autostart on: at each Windows login, a console window opens for a few seconds while 'cage up' starts your VMs in $WSL_DISTRO_NAME (log: $CAGE_HOME/autostart.log)"
+}
+
 wait_provisioned() {
   local a="$1" i=0
   until "$MSB" exec --no-stdin "$(vm "$a")" -- test -e "/opt/cage/provisioned-$a" >/dev/null 2>&1; do
@@ -187,7 +253,19 @@ cmd_doctor() {
   case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) echo "✓ macOS on Apple Silicon" ;;
     Darwin/*) echo "✗ microsandbox needs Apple Silicon on macOS"; ok=0 ;;
-    Linux/*) if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "✓ /dev/kvm accessible"; else echo "✗ /dev/kvm not accessible (enable virtualization; sudo usermod -aG kvm \$USER)"; ok=0; fi ;;
+    Linux/*)
+      if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "✓ /dev/kvm accessible"
+      elif is_wsl && [ ! -e /dev/kvm ]; then
+        echo "✗ no /dev/kvm in WSL: cage needs WSL 2 on Windows 11 with nested virtualization (on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run wsl --shutdown)"; ok=0
+      elif is_wsl; then echo "✗ /dev/kvm not accessible: sudo usermod -aG kvm \$USER, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen"; ok=0
+      else echo "✗ /dev/kvm not accessible (enable virtualization; sudo usermod -aG kvm \$USER)"; ok=0
+      fi
+      if is_wsl; then
+        if win_cmd powershell.exe >/dev/null && win_cmd reg.exe >/dev/null; then echo "✓ WSL distro $WSL_DISTRO_NAME with Windows interop"
+        else echo "✗ Windows interop is off ([interop] in /etc/wsl.conf): cage can't keep WSL running after you close its window"; ok=0
+        fi
+      fi
+      ;;
   esac
   if [ -f "$CAGE_ENV" ]; then
     load_env
@@ -307,6 +385,7 @@ PLIST
       say "autostart on: $plist runs 'cage up' at login (log: $CAGE_HOME/autostart.log)"
       ;;
     Linux)
+      if is_wsl; then wsl_autostart "$mode"; return 0; fi
       local unit="$HOME/.config/systemd/user/cage-up.service"
       if [ "$mode" = off ]; then
         systemctl --user disable cage-up.service 2>/dev/null || true
@@ -359,6 +438,7 @@ cmd_up() {
       ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"
   done
+  if is_wsl; then wsl_keepalive_start; fi
   say "VMs are installing in the background (about a minute). Next: cage login <agent>  (cage logs <agent> shows progress)"
 }
 
@@ -386,6 +466,9 @@ cmd_status() {
     if ! exists "$a"; then printf '%-12s %s\n' "$a" "no VM (cage up $a)"; continue; fi
     if agent_exec "$a" no "$(auth_check_cmd "$a")" 2>/dev/null; then printf '%-12s %s\n' "$a" "logged in"; else printf '%-12s %s\n' "$a" "NOT logged in (cage login $a)"; fi
   done
+  if is_wsl; then
+    if keepalive_running; then echo "WSL keepalive: running"; else echo "WSL keepalive: not running (cage up starts it)"; fi
+  fi
 }
 
 cmd_logs() { [ -n "${1:-}" ] || die "usage: cage logs <agent>"; check_agent "$1"; exec "$MSB" logs -f "$(vm "$1")"; }
@@ -398,6 +481,7 @@ cmd_down() {
   load_env
   resolve_agents "$@"
   for a in "${AGENTS[@]}"; do "$MSB" stop "$(vm "$a")" || true; done
+  if [ $# -eq 0 ] && is_wsl; then wsl_keepalive_stop; fi
 }
 
 cmd_destroy() {
@@ -427,7 +511,7 @@ each in its own microVM (microsandbox), each reachable as a Telegram bot (cc-con
   cage update [agent...]          same as up: fresh VMs with the latest agent CLI + pinned cc-connect
   cage down [agent...]            stop VMs
   cage destroy <agent> --keep-login|--yes
-  cage autostart on|off           run 'cage up' at login (macOS LaunchAgent / Linux systemd user unit)
+  cage autostart on|off           run 'cage up' at login (Linux systemd user unit; Windows/WSL: per-user Run key)
 
 Agents: $KINDS
 EOF
@@ -449,6 +533,9 @@ main() {
     update) cmd_update "$@" ;;
     down) cmd_down "$@" ;;
     destroy) cmd_destroy "$@" ;;
+    # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
+    _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
+    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;
   esac
