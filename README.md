@@ -2,7 +2,7 @@
 
 Your coding agents on your own subscriptions, **each in its own microVM**, each reachable as a **Telegram bot**. The agents are Claude Code, Codex, Cursor and Antigravity (Google's successor to Gemini CLI).
 
-cage builds almost nothing itself. It is about 450 lines of shell (the host CLI is under 300) that wires together two existing, actively maintained open-source projects:
+cage builds almost nothing itself. It is about 700 lines of shell that wire together two existing, actively maintained open-source projects:
 
 | Need | Solved by | Why this one |
 |---|---|---|
@@ -30,12 +30,12 @@ What cage adds:
 
 ## Quick start
 
-Requirements: an Apple-Silicon Mac or a Linux box with KVM, [microsandbox](https://docs.microsandbox.dev), and one Telegram bot per agent.
+Requirements: Linux with KVM, or Windows 11 through WSL 2 ([below](#windows-wsl-2)); [microsandbox](https://docs.microsandbox.dev); one Telegram bot per agent. (The macOS/Apple-Silicon code path exists but is untested.)
 
-On Linux, `/dev/kvm` must be readable and writable by you (`sudo usermod -aG kvm $USER`, then log out and back in), and the installer puts `msb` in `~/.local/bin`, which must be on your `PATH`.
+`/dev/kvm` must be readable and writable by you (`sudo usermod -aG kvm $USER`, then log out and back in). The installer puts `msb` in `~/.local/bin`; cage finds it there even when that isn't on your `PATH`.
 
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh      # macOS: brew install superradcompany/tap/microsandbox
+curl -fsSL https://install.microsandbox.dev | sh
 git clone https://github.com/z-brenner/cage && cd cage
 
 ./cage setup                 # asks for one @BotFather token per agent (checked with Telegram), then learns your
@@ -47,6 +47,31 @@ git clone https://github.com/z-brenner/cage && cd cage
 ./cage status
 ./cage autostart on          # optional: run `cage up` at login so the bots survive reboots
 ```
+
+### Windows (WSL 2)
+
+On Windows, cage runs inside WSL 2 and behaves exactly as on Linux. It needs **Windows 11** (WSL 2 runs nested VMs only on Windows 11) and an x64 PC with virtualization enabled in firmware. Windows on ARM can't run nested VMs.
+
+In PowerShell, once (it may ask to reboot):
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Open **Ubuntu 24.04** from the Start menu, create your Linux user, then:
+
+```bash
+ls -l /dev/kvm                  # must exist (see below if it doesn't)
+sudo usermod -aG kvm "$USER"     # then in PowerShell: wsl --terminate Ubuntu-24.04, and reopen Ubuntu
+```
+
+Then follow the Quick start inside Ubuntu. Keep cage in your Linux home (`~/cage`), not under `/mnt/c`.
+
+- **Staying up:** WSL stops a distro about 15 seconds after its last window closes, and every VM in it. So on WSL, `cage up` also opens one hidden WSL session that keeps the distro running (`cage status` shows `WSL keepalive: running`), and `cage down` releases it.
+- **Reboots:** `cage autostart on` adds a per-user Windows login entry (no admin rights) that runs `cage up` in your distro; a console window shows for a few seconds at login. `cage autostart off` removes it.
+- **Memory:** WSL gets half your RAM by default, and each agent VM takes `CAGE_MEMORY` (4G) out of that. With 16 GB or less, set `CAGE_MEMORY=2G` in `~/.cage/cage.env` or raise `memory=` in `%UserProfile%\.wslconfig`.
+- **Sign-ins:** the URLs `cage login` prints open in your Windows browser (Ctrl+click).
+- **No `/dev/kvm`:** make sure `nestedVirtualization` isn't `false` in `%UserProfile%\.wslconfig`, that `wsl -l -v` shows VERSION 2, and that Task Manager → Performance → CPU says *Virtualization: Enabled*. Then run `wsl --shutdown` and reopen Ubuntu.
 
 Then message the bots. Each chat has its own session. cc-connect's commands:
 
@@ -74,9 +99,9 @@ Then message the bots. Each chat has its own session. cc-connect's commands:
 
 Logins live on each VM's named volume (`cage-<agent>-home`). They survive `cage up`/`cage update` (which re-create the VM) and `cage destroy --keep-login`.
 
-**After a reboot:** microsandbox has no daemon, so VMs don't auto-start. Run `cage up`, which re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept. Or run `cage autostart on` once so it happens at every login (a macOS LaunchAgent or a Linux systemd user unit).
+**After a reboot:** microsandbox has no daemon, so VMs don't auto-start. Run `cage up`, which re-creates each VM and reinstalls its CLI in about a minute; logins, sessions and work are kept. Or run `cage autostart on` once so it happens at every login (a Linux systemd user unit, or on Windows a per-user login entry).
 
-**If the microsandbox installer fails with "Could not determine latest release version" (HTTP 403):** it looks up the latest release through GitHub's anonymous API, which is rate-limited per IP (shared office or VPN IPs hit it). Use Homebrew on macOS, wait an hour, or pin a version with `MSB_VERSION=v0.7.5 test/install-msb-pinned.sh`.
+**If the microsandbox installer fails with "Could not determine latest release version" (HTTP 403):** it looks up the latest release through GitHub's anonymous API, which is rate-limited per IP (shared office or VPN IPs hit it). Wait an hour, or pin a version with `MSB_VERSION=v0.7.5 test/install-msb-pinned.sh`.
 
 ## Security model
 
@@ -140,7 +165,7 @@ test/microvm-e2e.sh claude      # REAL microVM via msb (KVM or Apple Silicon): p
 
 CI (`.github/workflows/ci.yml`) runs:
 - shellcheck
-- the host and setup tests under bash 5, and under bash 3.2 (what macOS ships)
+- the host and setup tests under bash 5, and under bash 3.2 (what macOS ships), including WSL behavior against stubbed Windows tools
 - guest smoke tests for all four agents
 - the real-microVM end-to-end test for all four agents, on KVM-enabled GitHub runners
 
@@ -153,5 +178,6 @@ Files:
 **Not covered by automated tests:**
 - Real subscription logins. They need your accounts, and tests should never hold them.
 - The live Telegram API. It needs your bot tokens.
+- Real Windows. GitHub's Windows runners can't run nested VMs, so the WSL keepalive and login entry are tested against stubbed `powershell.exe`/`reg.exe` only.
 
 Those are the two steps you do once, by hand: `cage login <agent>`, then message the bot.
