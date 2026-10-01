@@ -42,6 +42,34 @@ await page.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris'
 if (!(await page.locator('.answer-card strong', { hasText: 'the stub' }).count())) fail('the answer is not formatted')
 ok('ask your agents: the awake ones answer side by side, formatted')
 
+// ask v2: with two awake, where they disagree; a follow-up that sees the answers; earlier questions are kept
+fs.writeFileSync(process.env.STUB_AWAKE, '')
+await page.reload()
+await page.locator('.composer input[value=codex]:not([disabled])').waitFor({ state: 'attached', timeout: 15000 })
+await page.getByLabel('Question for your agents').fill('capital of France?')
+await page.getByLabel('Question for your agents').press('Enter')
+const round1 = page.locator('.round').first()
+await round1.locator('.answer-card', { hasText: 'Codex' }).getByText('Lyon').waitFor({ timeout: 15000 })
+await round1.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris').waitFor({ timeout: 15000 })
+await page.getByRole('button', { name: 'Where do they disagree?' }).click()
+await page.locator('.compare-card', { hasText: 'Where they agree and differ' }).getByText('Paris').waitFor({ timeout: 15000 })
+await page.getByLabel('Follow-up question').fill('and the second city?')
+await page.getByLabel('Follow-up question').press('Enter')
+const round2 = page.locator('.round').nth(1)
+await round2.getByText('and the second city?').waitFor({ timeout: 10000 })
+await round2.locator('.answer-card', { hasText: 'Codex' }).getByText('Lyon').waitFor({ timeout: 15000 })
+if (await page.locator('.compare-card').count()) fail('the comparison of the last round stayed after a follow-up')
+await page.reload()
+const earlier = page.locator('details.history')
+await earlier.locator('summary', { hasText: 'Earlier questions (2)' }).click({ timeout: 15000 })
+await earlier.locator('li', { hasText: 'capital of France?' }).filter({ hasText: '1 follow-up' }).getByRole('button', { name: 'Open' }).click()
+await page.locator('.round').nth(1).getByText('and the second city?').waitFor({ timeout: 10000 })
+fs.rmSync(process.env.STUB_AWAKE)
+await page.getByRole('button', { name: 'Clear' }).click()
+await page.reload()
+await page.locator('.composer input[value=codex][disabled]').waitFor({ state: 'attached', timeout: 15000 })
+ok('ask v2: where they disagree, a follow-up with the earlier answers, earlier questions kept in this browser')
+
 // chat with an agent in the app: a starter, a file, a streamed answer, a file back, asking before acting
 await card.getByRole('link', { name: 'Chat', exact: true }).click()
 const chat = page.locator('.chat')
@@ -95,6 +123,26 @@ await page.locator('#job-status', { hasText: 'Done' }).waitFor({ timeout: 15000 
 await page.locator('dialog#job').getByText('claude is signed in').waitFor({ timeout: 5000 })
 await page.locator('dialog#job').getByRole('button', { name: 'Close' }).click()
 ok('signing in: the link as a button and a box for the code, no terminal')
+
+// scheduled tasks: add one in plain words, run it now (it answers in the chat), delete it
+await page.locator('.tabs').getByRole('link', { name: 'Schedule' }).click()
+await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
+await page.getByLabel('What should it do?').fill('Summarize my inbox')
+await page.getByLabel('How often').selectOption('weekdays')
+await page.getByLabel('Time').fill('08:00')
+await page.getByRole('button', { name: 'Add', exact: true }).click()
+const task = page.locator('.card li', { hasText: 'Summarize my inbox' })
+await task.getByText(/Every weekday at 8:00\sAM/).waitFor({ timeout: 15000 })
+const cronJobs = JSON.parse(fs.readFileSync(path.join(home, 'app', 'cron.claude.json'), 'utf8'))
+if (cronJobs.length !== 1 || cronJobs[0].cron_expr !== '0 8 * * 1-5' || cronJobs[0].session_key !== 'app:you:you' || cronJobs[0].project !== 'claude') fail('the task: ' + JSON.stringify(cronJobs))
+await task.getByRole('button', { name: 'Run now' }).click()
+await page.locator('.chat .msg-agent', { hasText: 'Scheduled: Summarize my inbox (done)' }).waitFor({ timeout: 15000 })
+await page.locator('.tabs').getByRole('link', { name: 'Schedule' }).click()
+await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByText(/last ran/).waitFor({ timeout: 15000 })
+page.once('dialog', (d) => d.accept())
+await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByRole('button', { name: 'Delete' }).click()
+await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
+ok('scheduled tasks: added in plain words (weekdays at 8), run now answers in the chat, deleted')
 
 // an asleep agent: sending wakes it up, and the message waits in its folder
 await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
@@ -191,6 +239,32 @@ await p2.locator('.chat textarea').waitFor({ timeout: 10000 })
 if (!p2.url().endsWith('#agent/codex')) fail('setup should end in the chat: ' + p2.url())
 await p2.close()
 ok('setting up: the computer checked, agents picked (no bot), signed in by device code, about you saved, then the chat')
+
+// desktop notifications: on in Settings; a reply while you're elsewhere notifies and marks the agent unread
+await page.context().grantPermissions(['notifications'], { origin: base })
+await page.addInitScript(() => {
+  window.__notes = []
+  const note = (title, o) => window.__notes.push({ title, body: (o && o.body) || '' })
+  window.Notification = class { constructor (t, o) { note(t, o) } static get permission () { return 'granted' } static requestPermission () { return Promise.resolve('granted') } close () {} }
+  if (window.ServiceWorkerRegistration) window.ServiceWorkerRegistration.prototype.showNotification = function (t, o) { note(t, o); return Promise.resolve() }
+})
+await page.goto(base + '/#settings')
+await page.reload()   // the stub above runs on a load, not on a change of #
+const notify = page.getByRole('checkbox', { name: 'Desktop notifications' })
+await notify.waitFor({ state: 'attached', timeout: 15000 })
+await notify.click({ force: true })
+await page.waitForFunction(() => localStorage.getItem('cage-notify') === 'on', null, { timeout: 10000 })
+await page.goto(base + '/#home')
+await page.waitForTimeout(1000)   // the live stream is connected
+fs.appendFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'Your **report** is ready' }) + '\n')
+await page.waitForFunction(() => window.__notes.some((n) => n.title === 'Claude Code' && n.body === 'Your report is ready'), null, { timeout: 15000 })
+const badge = page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.badge.unread')
+await badge.getByText('1').waitFor({ timeout: 10000 })
+if (!(await page.title()).startsWith('(')) fail('the tab title does not count the unread message')
+await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
+await page.locator('.chat .msg-agent', { hasText: 'is ready' }).waitFor({ timeout: 10000 })
+if (await badge.count()) fail('the unread mark stayed after opening the chat')
+ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
 
 // on a phone: the sidebar is a menu
 await page.setViewportSize({ width: 390, height: 844 })

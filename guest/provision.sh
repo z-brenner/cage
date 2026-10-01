@@ -66,7 +66,7 @@ link_npm_bins() { # global npm commands, from the cache's prefix onto PATH
 base_packages() {
   log "base packages$(apt_cached && echo ' (cached)')"
   apt_install ca-certificates curl git jq ripgrep unzip xz-utils less procps util-linux sudo \
-    python3 python3-venv build-essential openssh-client
+    python3 python3-venv build-essential openssh-client tzdata
 }
 
 node_22() {

@@ -32,6 +32,13 @@ until bash /cage/provision.sh "$KIND" ${CAGE_REFRESH:+--refresh}; do   # `cage u
   delay=$(( delay < 240 ? delay * 2 : 240 ))
 done
 
+# Your time zone (cage passes it as TZ), so "every weekday at 8am" in a scheduled task means your 8am. Set for the
+# whole VM, since cc-connect starts with a clean environment.
+if [[ "${TZ:-}" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
+  ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
+  echo "$TZ" > /etc/timezone
+fi
+
 # The VM is the sandbox: the agent may administer its own VM.
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$U" > /etc/sudoers.d/agent
 chmod 0440 /etc/sudoers.d/agent
