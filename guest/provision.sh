@@ -19,6 +19,10 @@ TOOLS=/opt/cage/tools
 MARK="/opt/cage/provisioned-$KIND"
 export DEBIAN_FRONTEND=noninteractive
 APT=(apt-get -o DPkg::Lock::Timeout=600)
+# A stalled connection to a mirror can leave apt waiting for good (seen in CI, stuck at "base packages"): every apt-get
+# (ours, NodeSource's, Playwright's) retries and times out reads, and ours fetch under a hard time limit, so a stall
+# becomes a failure that entry.sh retries. Installing what was fetched is local and is never cut short.
+printf 'Acquire::Retries "3";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' > /etc/apt/apt.conf.d/80cage-net
 REFRESH=0
 [ "$MODE" = --refresh ] && REFRESH=1
 CACHED=0
@@ -52,7 +56,8 @@ apt_install() { # apt_install <packages…>: from the cache if it has them all, 
   if apt_cached && "${APT[@]}" install -y -qq --no-install-recommends --no-download "$@" >/dev/null 2>&1; then
     return 0
   fi
-  "${APT[@]}" update -qq
+  timeout -k 30 600 "${APT[@]}" update -qq
+  timeout -k 30 1500 "${APT[@]}" install -y -qq --no-install-recommends --download-only "$@" >/dev/null
   "${APT[@]}" install -y -qq --no-install-recommends "$@" >/dev/null
 }
 
