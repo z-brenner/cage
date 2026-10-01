@@ -7,7 +7,7 @@ faster-whisper runs the Whisper model on the CPU; nothing you say leaves the VM.
   STT_MODELS       where models are downloaded to (once)
 GET /health says whether the model is loaded. Started by guest/voice.sh as the agent user.
 """
-import email.parser, email.policy, http.server, json, os, sys, tempfile, threading
+import email.parser, email.policy, http.server, json, os, sys, tempfile, threading, traceback
 
 PORT = int(os.environ.get("STT_PORT", "8178"))
 MODEL = os.environ.get("STT_MODEL") or "base"
@@ -50,8 +50,13 @@ def transcribe(audio, filename, language):
     with tempfile.NamedTemporaryFile(suffix=suffix) as f:
         f.write(audio)
         f.flush()
-        segments, _ = state["model"].transcribe(f.name, language=language, beam_size=5, vad_filter=True)
-        return "".join(s.text for s in segments).strip()
+        try:   # skipping silence (VAD) needs onnxruntime; without it, transcribe everything
+            segments, _ = state["model"].transcribe(f.name, language=language, beam_size=5, vad_filter=True)
+            return "".join(s.text for s in segments).strip()
+        except Exception:
+            log("with silence detection: " + traceback.format_exc().strip().splitlines()[-1] + "; trying without")
+            segments, _ = state["model"].transcribe(f.name, language=language, beam_size=5, vad_filter=False)
+            return "".join(s.text for s in segments).strip()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -94,7 +99,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             text = transcribe(fields["file"][0], fields["file"][1], language)
         except Exception as e:
-            return self.error(500, f"transcription failed: {e}")
+            log("transcription failed: " + traceback.format_exc())
+            return self.error(500, f"transcription failed: {type(e).__name__}: {e}")
         fmt = fields.get("response_format", (b"json", None))[0].decode() or "json"
         if fmt == "text":
             self.reply(200, text + "\n", "text/plain; charset=utf-8")

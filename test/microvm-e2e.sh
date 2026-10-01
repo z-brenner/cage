@@ -203,8 +203,8 @@ if [ "$A" = claude ]; then
   gx bash -c 'curl -fsSL -o /tmp/s.flac https://huggingface.co/datasets/Narsil/asr_dummy/resolve/main/1.flac &&
     ffmpeg -loglevel error -y -i /tmp/s.flac -c:a libopus -f ogg /tmp/s.ogg && ffmpeg -loglevel error -y -i /tmp/s.ogg -f mp3 /tmp/s.mp3' \
     || fail "ffmpeg (for cc-connect) isn't working"
-  out="$(gx curl -fsS -F file=@/tmp/s.mp3 -F response_format=text http://127.0.0.1:8178/v1/audio/transcriptions)"
-  grep -qi "stew for dinner" <<<"$out" || fail "voice note transcript: $out"
+  out="$(gx curl -sS -F file=@/tmp/s.mp3 -F response_format=text http://127.0.0.1:8178/v1/audio/transcriptions)"
+  grep -qi "stew for dinner" <<<"$out" || fail "voice note transcript: $out / $(msb logs "$VM" 2>&1 | grep cage-stt | tail -20)"
   ok "voice notes: an ogg voice note, converted the way cc-connect does, becomes text on the VM"
 fi
 cage ask-all off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
