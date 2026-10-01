@@ -8,6 +8,7 @@ cage builds almost nothing itself. It is a few hundred lines of shell that wire 
 | One VM per agent, persistent volumes, egress policy that blocks host/LAN/cloud-metadata | **[microsandbox](https://github.com/superradcompany/microsandbox)** (Apache-2.0, ~8.5k★, released today) | The only open-source microVM runtime found that covers both Apple-Silicon Macs and Linux/KVM with a simple CLI |
 | The agents themselves | the vendors' **unmodified official CLIs** | Terms of service (see the README) |
 | Keys the agents can use but never see | **microsandbox secrets** | The VM holds a placeholder; the real key is swapped in outside the VM, only for hosts you allow |
+| Website sign-ins | **microsandbox secrets** with a custom placeholder and request-body substitution, plus **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** as the agents' browser | The agent types a placeholder; the real password is swapped in only on the way to that site |
 | Apps (Gmail, Calendar, Slack, GitHub…) | **remote MCP servers**, wired into each CLI's own config; **[Zapier MCP](https://mcp.zapier.com)** for most apps | Every CLI speaks MCP. Zapier handles the browser sign-ins for thousands of apps and gives back one key, which a microsandbox secret protects |
 
 What cage adds:

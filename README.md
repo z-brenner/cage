@@ -56,6 +56,7 @@ cage login <agent>    sign an agent in to your subscription
 cage logs <agent>     watch what an agent's VM is doing
 cage memory           review what your agents want to remember
 cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
+cage password add …   a website sign-in they can use but never see
 cage chat add slack   talk to an agent in Slack too (or discord, whatsapp)
 cage secret add …     give agents a key they can use but never see
 cage doctor           check this computer, the config and the bots
@@ -118,6 +119,21 @@ cage secret list
 ```
 
 The agent gets a stand-in for the key. When it calls `api.github.com` with it, microsandbox swaps in the real key on its way out of the VM; sent anywhere else, it's blocked. So even a tricked agent can't leak the key itself, though it can still use it at that host, so prefer narrow, read-only tokens. It covers keys sent in request headers, which is how most APIs work (not Telegram tokens or website passwords). To do the swap, microsandbox inspects that VM's HTTPS on your computer, except for the agent's own service and Telegram. Agents without keys aren't inspected.
+
+## Website passwords your agents can use but never see
+
+```bash
+cage password add example.com          # asks for the username and the password (hidden)
+cage password add app.example.com codex
+cage password                          # what's saved
+cage password rm example.com
+```
+
+Your agents get a web browser (headless Chromium, through Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp)) and, for each site, a placeholder like `cagepw-example-com-x7k2…`. They type it into the site's own password field. When the sign-in form is sent to that site, microsandbox swaps in your real password; sent anywhere else, it's blocked. The password never enters the VM, so a tricked agent can't leak it. It can still use the account while it's signed in, though, so prefer accounts with limited rights.
+
+- **Passwords with symbols** (`&`, `%`, `+`, spaces…) get a second placeholder holding the password already encoded for classic HTML forms. Agents are told to try that one if the site says the first one is wrong. Quotes and backslashes may not get through sign-ins that send JSON.
+- **Some sign-ins can't work this way:** sites that encrypt or hash the password in the page before sending it, and big providers that block automated browsers (Google, Microsoft, Apple). For Gmail and friends use Zapier ([above](#connect-your-apps)) instead.
+- The browser's profile lives in the agent's home, so it stays signed in across restarts. `cage connect add browser` gives an agent the browser without any passwords.
 
 ## Windows
 

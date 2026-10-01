@@ -149,11 +149,16 @@ grep -q ghp_s3cret <<<"$out" && fail "secret list shows the value"
 : > "$MSB_LOG"; : > "$T/env.log"
 MSB_ENV_LOG="$T/env.log" cage up claude codex 2>/dev/null
 cl="$(grep -- '--name | cage-claude |' "$MSB_LOG")" cx="$(grep -- '--name | cage-codex |' "$MSB_LOG")"
-for want in "--secret | GITHUB_TOKEN@api.github.com" "--tls-bypass | api.telegram.org" "--tls-bypass | *.anthropic.com"; do
-  [[ "$cl" == *"$want"* ]] || fail "claude's msb run lacks '$want': $cl"
+Y="$CAGE_HOME/msb/claude.yaml"
+[[ "$cl" == *"--conf | $Y"* ]] || fail "claude's msb run doesn't load its secrets config: $cl"
+[ "$(stat -c %a "$Y")" = 600 ] || fail "secrets config not 0600"
+for want in '  GITHUB_TOKEN:' '    value: "${GITHUB_TOKEN}"' '    allow: ["api.github.com"]' '    block_quic: true'; do
+  grep -qxF "$want" "$Y" || fail "claude's secrets config lacks '$want': $(cat "$Y")"
 done
-[[ "$cx" == *--secret* || "$cx" == *--tls-bypass* ]] && fail "codex got secrets or interception it doesn't need: $cx"
-grep -q ghp_s3cret "$MSB_LOG" && fail "the secret value is on msb's command line"
+grep -q 'bypass: \["api.telegram.org", "anthropic.com", "\*.anthropic.com"' "$Y" || fail "interception bypass: $(grep bypass "$Y")"
+[[ "$cx" == *--conf* ]] && fail "codex got secrets or interception it doesn't need: $cx"
+[ -e "$CAGE_HOME/msb/codex.yaml" ] && fail "codex has a secrets config"
+grep -q ghp_s3cret "$MSB_LOG" "$Y" && fail "the secret value is on msb's command line or in its config"
 grep -qx 'GITHUB_TOKEN=ghp_s3cret' "$T/env.log" || fail "msb didn't get the value in its environment: $(cat "$T/env.log")"
 grep -qx 'GITHUB_TOKEN' "$CAGE_HOME/agents/claude/secrets.names" || fail "VM not told the secret's name"
 grep -q 'api.github.com' "$CAGE_HOME/agents/claude/secrets.md" || fail "VM not told where the secret works"
@@ -182,9 +187,9 @@ grep -q '✓ zapier.*all agents' <<<"$out" && grep -q '✓ crm.*crm.example.com.
 : > "$MSB_LOG"; : > "$T/env.log"
 MSB_ENV_LOG="$T/env.log" cage up claude codex 2>/dev/null
 cl="$(grep -- '--name | cage-claude |' "$MSB_LOG")" cx="$(grep -- '--name | cage-codex |' "$MSB_LOG")"
-[[ "$cl" == *"--secret | ZAPIER_MCP_TOKEN@mcp.zapier.com"* ]] || fail "claude's VM lacks zapier's key: $cl"
-[[ "$cl" == *CRM_MCP_TOKEN* ]] && fail "claude got codex's crm key: $cl"
-[[ "$cx" == *"--secret | CRM_MCP_TOKEN@crm.example.com"* ]] || fail "codex's VM lacks the crm key: $cx"
+grep -A2 -x '  ZAPIER_MCP_TOKEN:' "$CAGE_HOME/msb/claude.yaml" | grep -qxF '    allow: ["mcp.zapier.com"]' || fail "claude's VM lacks zapier's key"
+grep -q CRM_MCP_TOKEN "$CAGE_HOME/msb/claude.yaml" && fail "claude got codex's crm key"
+grep -A2 -x '  CRM_MCP_TOKEN:' "$CAGE_HOME/msb/codex.yaml" | grep -qxF '    allow: ["crm.example.com"]' || fail "codex's VM lacks the crm key"
 grep -qx 'ZAPIER_MCP_TOKEN=zap_s3cret' "$T/env.log" || fail "msb didn't get zapier's key in its environment"
 cage up cursor 2>/dev/null
 grep -q '^cmd = "cursor-agent --approve-mcps"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor won't use its apps headless"
@@ -194,7 +199,7 @@ grep -qx 'notes|https://notes.example.com/mcp|Authorization|' "$L" || fail "keyl
 grep -q '^crm|' "$L" && fail "claude was given codex's connector"
 grep -qx 'crm|https://crm.example.com:8443/v1/mcp|X-API-Key|CRM_MCP_TOKEN' "$CAGE_HOME/agents/codex/connectors.list" || fail "codex's connectors"
 grep -q '^- zapier: Gmail' "$CAGE_HOME/agents/claude/connectors.md" || fail "the agent isn't told what zapier is"
-grep -rqE 'zap_s3cret|crm_s3cret' "$CAGE_HOME/agents" "$MSB_LOG" "$CAGE_HOME/connectors" && fail "a key leaked out of ~/.cage/secrets"
+grep -rqE 'zap_s3cret|crm_s3cret' "$CAGE_HOME/agents" "$MSB_LOG" "$CAGE_HOME/connectors" "$CAGE_HOME/msb" && fail "a key leaked out of ~/.cage/secrets"
 # shellcheck disable=SC2089  # the quote in the last address is the point: it must be rejected
 for bad in "nope" "Bad https://x.example.com/mcp" "evil http://x.example.com/mcp" "evil https://api.anthropic.com/mcp claude" \
            "evil https://x.example.com/mcp nobody" "zapier https://evil.example.com/mcp" "evil https://x.example.com/a\"b" \
@@ -211,6 +216,39 @@ cage up claude cursor 2>/dev/null
 [ ! -s "$CAGE_HOME/agents/claude/connectors.list" ] || fail "a removed connector is still handed to the VM"
 grep -q '^cmd = "cursor-agent"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor approves MCP servers with no apps connected"
 ok "connectors: built-in or any address, key kept as a secret for that app's hosts, VMs get addresses and names only"
+
+# website passwords: the agent gets a placeholder that survives form encoding (and a pre-encoded twin when the
+# password has characters forms encode), swapped in request bodies for that site only; a browser comes with it
+printf 'zack@example.com\np&ss w0rd\n' | cage password add https://www.Example.com/login claude 2>"$T/pw.err" || fail "password add: $(cat "$T/pw.err")"
+P="$CAGE_HOME/secrets/CAGE_PW_EXAMPLE_COM.conf"
+grep -qx 'hosts=example.com,\*.example.com' "$P" && grep -qx 'site=example.com' "$P" && grep -qx 'user=zack@example.com' "$P" || fail "password conf: $(cat "$P")"
+ph="$(sed -n 's/^placeholder=//p' "$P")" alt="$(sed -n 's/^alt=//p' "$P")"
+[[ "$ph" =~ ^cagepw-example-com-[a-z0-9]{12}$ && "$alt" =~ ^cagepwf-example-com-[a-z0-9]{12}$ ]] || fail "placeholders: $ph / $alt"
+[ "$(cat "$CAGE_HOME/secrets/CAGE_PW_EXAMPLE_COM_F")" = 'p%26ss%20w0rd' ] || fail "form-encoded twin: $(cat "$CAGE_HOME/secrets/CAGE_PW_EXAMPLE_COM_F")"
+grep -qx 'url=local:browser' "$CAGE_HOME/connectors/browser.conf" && grep -qx 'agents=claude' "$CAGE_HOME/connectors/browser.conf" || fail "no browser came with it"
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+Y="$CAGE_HOME/msb/claude.yaml"
+grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF "    placeholder: \"$ph\"" || fail "placeholder not in the msb config: $(cat "$Y")"
+grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    substitution: {headers: true, query: false, body: true}' || fail "no body substitution for the password"
+grep -A2 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    allow: ["example.com", "*.example.com"]' || fail "password allowed elsewhere"
+M="$CAGE_HOME/agents/claude/passwords.md"
+grep -qF "example.com: sign in as \`zack@example.com\` and type \`$ph\` as the password" "$M" && grep -qF "$alt" "$M" || fail "agent not told: $(cat "$M")"
+grep -q '^browser|local:browser|' "$CAGE_HOME/agents/claude/connectors.list" || fail "browser not handed to the VM"
+grep -q CAGE_PW "$CAGE_HOME/agents/claude/secrets.names" && fail "passwords listed as API keys"
+grep -rqF 'p&ss' "$CAGE_HOME/agents" "$CAGE_HOME/msb" "$MSB_LOG" && fail "the password leaked out of ~/.cage/secrets"
+grep -rqF 'p%26ss' "$CAGE_HOME/agents" "$CAGE_HOME/msb" "$MSB_LOG" && fail "the encoded password leaked out of ~/.cage/secrets"
+out="$(cage password 2>&1)"; grep -q 'example.com .*zack@example.com .*(claude)' <<<"$out" || fail "password list: $out"
+cage secret list 2>&1 | grep -q CAGE_PW && fail "passwords shown as secrets"
+if cage secret rm CAGE_PW_EXAMPLE_COM 2>/dev/null; then fail "secret rm removed a password"; fi
+for bad in "*.example.com" "not_a_site" "anthropic.com claude"; do
+  # shellcheck disable=SC2086
+  if printf 'u\np\n' | cage password add $bad 2>/dev/null; then fail "accepted: password add $bad"; fi
+done
+cage password rm example.com 2>/dev/null || fail "password rm"
+compgen -G "$CAGE_HOME/secrets/CAGE_PW_*" >/dev/null && fail "password files left behind"
+cage up claude 2>/dev/null; [ ! -s "$CAGE_HOME/agents/claude/passwords.md" ] || fail "removed sign-in still handed to the VM"
+ok "website passwords: placeholders (plus a form-encoded twin), body substitution for that site only, a browser, nothing leaks"
 
 # on a real terminal: colour, the pixel mascot on the home screen; NO_COLOR turns colour off
 if script --version 2>&1 | grep -q util-linux; then
