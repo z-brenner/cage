@@ -20,7 +20,7 @@ const STATUS = {
   off: { label: 'Not set up', tone: 'off', help: '' }
 }
 const CHATS = [['telegram', 'Telegram'], ['slack', 'Slack'], ['discord', 'Discord'], ['whatsapp', 'WhatsApp']]
-const PAGES = ['home', 'apps', 'signins', 'memory', 'security', 'settings']
+const PAGES = ['home', 'setup', 'apps', 'signins', 'memory', 'security', 'settings']
 
 let TOKEN = ''
 let STATE = null
@@ -180,6 +180,79 @@ function setStatus (kind, text) {
   document.getElementById('job-cancel').hidden = kind !== 'running'
   document.getElementById('job-close').hidden = kind === 'running'
 }
+// Signing in without a terminal: a vendor's sign-in prints a link, maybe a code, maybe asks for one back. The panel
+// shows those as a button, a code to copy and a box to paste into; the terminal itself is one click away.
+const SIGNIN_JOBS = ['login', 'add', 'onboard']
+const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>78]/g
+function signinParts (plain) { // what a sign-in printed: {url, code, paste}
+  const urls = [...plain.matchAll(/https:\/\/[^\s"'<>]+/g)].map((m) => m[0].replace(/[).,;:]+$/, ''))
+  const url = urls.reverse().find((u) => /oauth|authori[sz]e|login|device|signin|sign-in|activate|\bauth\b|accounts\./i.test(u)) || ''
+  const lines = plain.split('\n')
+  let code = ''
+  lines.forEach((l, i) => { if (/code/i.test(l)) { const m = (l + ' ' + (lines[i + 1] || '')).match(/\b([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b/); if (m) code = m[1] } })
+  const paste = /paste|authori[sz]ation code|enter (the |your )?code|code here/i.test(lines.slice(-8).join('\n'))
+  return { url, code, paste }
+}
+function signinAssistant (agent) {
+  const box = h('div', { class: 'signin' }, h('p', { class: 'muted small signin-wait' }, h('span', { class: 'spinner' }), 'Starting the sign-in…'))
+  const dec = new TextDecoder()
+  let text = ''
+  let shown = null
+  let found = false
+  const A = { box, placed: false }
+  A.feed = (bytes) => {
+    text = (text + dec.decode(bytes, { stream: true })).slice(-60000)
+    const p = signinParts(text.replace(ANSI, '').replace(/\r/g, ''))
+    const key = [p.url, p.code, p.paste].join('|')
+    if (key === shown) return
+    shown = key
+    if (p.url) found = true
+    if (p.url) draw(p)
+  }
+  A.found = () => found
+  A.started = () => /\S/.test(text.replace(ANSI, ''))
+  function draw ({ url, code, paste }) {
+    const qr = h('div', { class: 'signin-qr', hidden: true })
+    const q = qrcode(0, 'M'); q.addData(url); q.make()
+    qr.append(h('img', { src: q.createDataURL(5, 2), alt: 'QR code for the sign-in page' }), h('span', { class: 'small muted' }, 'Scan with your phone’s camera'))
+    let second
+    if (code) {
+      second = [h('b', {}, 'Enter this code on that page'), h('div', { class: 'row' }, h('code', { class: 'signin-code' }, code),
+        btn('Copy', (e) => { navigator.clipboard.writeText(code).then(() => { e.currentTarget.textContent = 'Copied' }).catch(() => {}) }, 'sm ghost', 'copy')),
+      h('p', { class: 'small muted' }, 'This finishes by itself once you’ve approved it there.')]
+    } else if (paste) {
+      const input = h('input', { type: 'text', placeholder: 'Paste the code here', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'The code from the sign-in page' })
+      const form = h('form', { class: 'ask-box flush' }, input, h('button', { type: 'submit', class: 'btn primary' }, 'Send'))
+      form.addEventListener('submit', (e) => {
+        e.preventDefault()
+        if (!input.value.trim()) return
+        send({ raw: btoa(String.fromCharCode(...new TextEncoder().encode(input.value.trim() + '\r'))) })
+        form.replaceWith(h('p', { class: 'chosen' }, icon('check'), 'Sent. Finishing the sign-in…'))
+      })
+      setTimeout(() => input.focus(), 50)
+      second = [h('b', {}, 'Paste the code it gives you'), h('p', { class: 'small muted' }, 'After you sign in, the page shows a code. Copy it, then paste it here.'), form]
+    } else {
+      second = [h('b', {}, 'Approve, then come back'), h('p', { class: 'small muted' }, 'This finishes by itself once you’ve signed in there.')]
+    }
+    box.replaceChildren(
+      h('div', { class: 'signin-step' }, h('span', { class: 'step-num' }, '1'), h('div', { class: 'grow' }, h('b', {}, 'Open the sign-in page'),
+        h('p', { class: 'small muted' }, 'Sign in there with the account that has your plan.'),
+        h('div', { class: 'row' }, h('a', { class: 'btn primary', href: url, target: '_blank', rel: 'noopener noreferrer' }, icon('external-link'), 'Open sign-in page'),
+          btn('Copy link', (e) => { navigator.clipboard.writeText(url).then(() => { e.currentTarget.lastChild.textContent = 'Copied' }).catch(() => {}) }, 'sm ghost', 'copy'),
+          btn('On your phone', () => { qr.hidden = !qr.hidden }, 'sm ghost', 'qr-code')), qr)),
+      h('div', { class: 'signin-step' }, h('span', { class: 'step-num' }, '2'), h('div', { class: 'grow' }, second)),
+      h('button', { type: 'button', class: 'linkish small muted details-toggle', onclick: () => revealTerminal() }, 'Show what it’s doing'))
+  }
+  return A
+}
+function revealTerminal () {
+  const el = document.getElementById('job-term')
+  if (!job || !el.hidden) return
+  el.hidden = false
+  dlg.classList.add('wide')
+  if (job.fitTerm) setTimeout(job.fitTerm, 220)
+}
+
 async function runJob (args, title, onDone) {
   if (job && !job.done) return
   const termEl = document.getElementById('job-term')
@@ -191,10 +264,11 @@ async function runJob (args, title, onDone) {
   setStatus('running', 'Working…')
   dlg.showModal()
   let id
-  try { id = (await api('/api/jobs', { method: 'POST', body: { args } })).id } catch (e) {
+  const assist = SIGNIN_JOBS.includes(args[0]) && !args.includes('antigravity')
+  try { id = (await api('/api/jobs', { method: 'POST', body: { args, cols: assist ? 400 : 100 } })).id } catch (e) {
     logEl.append(msg('bad', e.message)); setStatus('failed', 'That didn’t work'); return
   }
-  job = { id, done: false, term: null, onDone }
+  job = { id, done: false, term: null, onDone, signin: assist ? signinAssistant() : null }
   job.es = watch(id, handle)
 }
 async function quietJob (args) { // a command whose output nobody needs to see (marking events as seen)
@@ -212,7 +286,20 @@ function scrollDown () { logEl.scrollTop = logEl.scrollHeight }
 function send (payload) { return api(`/api/jobs/${job.id}/input`, { method: 'POST', body: payload }).catch(() => {}) }
 function handle (ev) {
   if (!job) return
-  if (ev.t === 'raw') { terminal().write(Uint8Array.from(atob(ev.data), (c) => c.charCodeAt(0))); return }
+  if (ev.t === 'raw') {
+    const bytes = Uint8Array.from(atob(ev.data), (c) => c.charCodeAt(0))
+    terminal().write(bytes)
+    if (job.signin) {
+      job.signin.feed(bytes)
+      if (!job.signin.placed && job.signin.started()) { // the sign-in starts: the helper, or the terminal if it finds no link
+        job.signin.placed = true
+        logEl.append(job.signin.box)
+        setTimeout(() => { if (job && job.signin && !job.signin.found()) revealTerminal() }, 15000)
+      }
+      scrollDown()
+    }
+    return
+  }
   if (ev.t === 'exit') {
     job.done = true
     logEl.querySelectorAll('.skip-box').forEach((b) => b.remove())
@@ -277,8 +364,7 @@ function confirmBox (question, yesDefault) {
 function terminal () {
   if (job.term) return job.term
   const el = document.getElementById('job-term')
-  el.hidden = false
-  dlg.classList.add('wide')
+  if (!job.signin) { el.hidden = false; dlg.classList.add('wide') }   // a sign-in keeps it tucked away
   const term = new Terminal({
     fontSize: 13,
     fontFamily: 'ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
@@ -290,10 +376,11 @@ function terminal () {
   term.loadAddon(fit)
   term.open(el)
   const resize = () => { try { fit.fit(); api(`/api/jobs/${job.id}/resize`, { method: 'POST', body: { cols: term.cols, rows: term.rows } }).catch(() => {}) } catch (e) {} }
-  setTimeout(resize, 220)   // after the panel has widened
-  window.addEventListener('resize', resize)
+  if (!job.signin) setTimeout(resize, 220)   // after the panel has widened
+  job.fitTerm = resize
+  window.addEventListener('resize', () => { if (!el.hidden) resize() })
   term.onData((d) => send({ raw: btoa(String.fromCharCode(...new TextEncoder().encode(d))) }))
-  term.focus()
+  if (!job.signin) term.focus()
   job.term = term
   return term
 }
@@ -475,7 +562,7 @@ function pageWelcome () {
       h('img', { src: 'logo.svg', alt: '', width: 88, height: 88 }),
       h('h1', {}, 'AI agents you can text, each in its own cage'),
       h('p', { class: 'lede' }, 'Every agent runs on its own sealed-off computer on this machine, so it can work freely without touching your files, passwords or network. You chat with it right here, or from your phone.'),
-      btn('Set up cage', () => runJob(['onboard'], 'Setting up cage'), 'primary lg'),
+      btn('Set up cage', () => { setupGo('computer'); go('setup') }, 'primary lg'),
       h('p', { class: 'small muted' }, 'Takes about five minutes.')),
     h('ol', { class: 'steps' }, stepsList.map(([t, d], i) => h('li', {}, h('span', { class: 'step-num' }, String(i + 1)), h('b', {}, t), h('span', {}, d)))),
     restoreBox())
@@ -489,6 +576,141 @@ function restoreBox () { // moving to a new computer: put a backup back before a
     STATE.backups.files.length ? rows(STATE.backups.files.map((b) => h('li', {}, h('span', { class: 'grow' }, b.name, ' ', h('span', { class: 'muted small' }, ago(b.at))),
       btn('Restore', () => runJob(['restore', b.path], 'Restoring ' + b.name), 'sm')))) : null,
     form)
+}
+
+// --- setting up: this computer, your agents, signing in, a little about you --------------------------------------------
+// A wizard instead of a conversation: each step shows where you are, what's next and what's in the way, in words.
+const SETUP_STEPS = [['computer', 'This computer'], ['agents', 'Your agents'], ['signin', 'Sign in'], ['about', 'About you'], ['done', 'Done']]
+const AGENT_BLURB = {
+  claude: 'Anthropic’s agent. Needs Claude Pro or Max.',
+  codex: 'OpenAI’s agent. Needs a ChatGPT Plus, Pro or Business plan.',
+  cursor: 'Cursor’s agent. Needs a Cursor account.',
+  antigravity: 'Google’s agent. Needs Google AI Pro or Ultra.'
+}
+let SETUP = { step: '', checks: null, picked: null, it: false }
+function setupStep () {
+  if (!SETUP.step) { try { SETUP.step = localStorage.getItem('cage-setup') || 'computer' } catch (e) { SETUP.step = 'computer' } }
+  return SETUP.step
+}
+function setupGo (step) {
+  SETUP.step = step
+  try { if (step) localStorage.setItem('cage-setup', step); else localStorage.removeItem('cage-setup') } catch (e) {}
+  render(true)
+  window.scrollTo(0, 0)
+}
+function pageSetup () {
+  const step = setupStep()
+  const at = SETUP_STEPS.findIndex(([k]) => k === step)
+  const rail = h('ol', { class: 'setup-rail' }, SETUP_STEPS.map(([k, label], i) =>
+    h('li', { class: i < at ? 'past' : i === at ? 'now' : '' }, h('span', { class: 'step-num' }, i < at ? icon('check') : String(i + 1)), label)))
+  const body = { computer: setupComputer, agents: setupAgents, signin: setupSignin, about: setupAbout, done: setupDone }[step] || setupComputer
+  return h('div', { class: 'page setup' }, h('div', { class: 'setup-top' }, h('img', { src: 'logo.svg', alt: '', width: 36, height: 36 }), h('b', {}, 'Setting up cage'),
+    h('button', { type: 'button', class: 'linkish small muted', onclick: () => { setupGo(''); go('home') } }, 'Later')), rail, h('section', { class: 'setup-card' }, body()))
+}
+function setupComputer () {
+  const box = h('div', { class: 'checks-list' }, h('p', { class: 'muted' }, h('span', { class: 'spinner' }), ' Looking at this computer…'))
+  const load = async () => {
+    SETUP.checks = null
+    try { SETUP.checks = (await api('/api/check')).checks } catch (e) { SETUP.checks = [{ id: 'x', status: 'bad', title: 'Couldn’t check this computer', detail: e.message }] }
+    render(true)
+  }
+  if (!SETUP.checks) { load(); return [h('h1', {}, 'First, this computer'), h('p', { class: 'lede' }, 'cage runs each agent in a small private computer of its own. Let’s make sure this one can.'), box] }
+  const C = SETUP.checks
+  const bad = C.filter((c) => c.status === 'bad')
+  const fixable = bad.filter((c) => c.fix)
+  const it = bad.filter((c) => c.it)
+  const note = it.length ? itNote(it) : ''
+  return [
+    h('h1', {}, bad.length ? 'A few things to sort out' : 'This computer is ready'),
+    h('p', { class: 'lede' }, bad.length ? 'cage can fix some of these itself. On a work computer, your IT department may need to do the rest.' : 'Everything your agents need is here.'),
+    h('ul', { class: 'checks-list' }, C.map((c) => h('li', { class: 'check-row ' + c.status }, h('span', { class: 'check-ic' }, icon(c.status === 'ok' ? 'circle-check' : c.status === 'warn' ? 'triangle-alert' : 'circle-alert')),
+      h('span', { class: 'grow' }, h('b', {}, c.title), c.detail ? h('span', { class: 'sub' }, c.detail) : null)))),
+    it.length ? h('div', { class: 'it-note' + (SETUP.it ? ' open' : '') },
+      h('div', { class: 'row spread' }, h('span', {}, icon('users'), ' A note for your IT department'),
+        btn(SETUP.it ? 'Copy it' : 'Show the note', () => { if (SETUP.it) navigator.clipboard.writeText(note).catch(() => {}); SETUP.it = true; render(true) }, 'sm', SETUP.it ? 'copy' : null)),
+      SETUP.it ? h('textarea', { readonly: true, rows: 9, 'aria-label': 'A note for your IT department' }, note) : null) : null,
+    h('div', { class: 'setup-actions' },
+      fixable.length ? btn('Fix ' + (fixable.length === 1 ? 'it' : 'these') + ' for me', () => runJob(['fix'], 'Getting this computer ready', load), 'primary', 'sparkles') : null,
+      bad.length ? btn('Check again', load, '', 'refresh-cw') : btn('Continue', () => setupGo('agents'), 'primary'),
+      bad.length ? h('button', { type: 'button', class: 'linkish small muted', onclick: () => setupGo('agents') }, 'Continue anyway') : null)
+  ]
+}
+function itNote (items) {
+  return `Hi,\n\nI'd like to use cage (https://github.com/z-brenner/cage), which runs AI assistants on this computer, each in a small local virtual machine (WSL 2 on Windows). It needs:\n\n${items.map((c) => '- ' + c.it).join('\n')}\n\nIt doesn't open any ports to the network. Could you help me set this up?\n\nThanks!`
+}
+function setupAgents () {
+  if (!SETUP.picked) SETUP.picked = new Set(STATE.agents.filter((a) => a.enabled).map((a) => a.name))
+  const P = SETUP.picked
+  return [
+    h('h1', {}, 'Which agents do you want?'),
+    h('p', { class: 'lede' }, 'Pick the ones you have a plan for. Each one gets its own private computer and uses your own subscription. You can add more later.'),
+    h('div', { class: 'pick-grid' }, STATE.agents.map((a) => h('label', { class: 'pick' + (P.has(a.name) ? ' on' : '') },
+      h('input', { type: 'checkbox', checked: P.has(a.name), onchange: (e) => { if (e.target.checked) P.add(a.name); else P.delete(a.name); render(true) } }),
+      avatar(a.name, 40), h('span', { class: 'grow' }, h('b', {}, a.label), h('span', { class: 'sub' }, AGENT_BLURB[a.name])),
+      h('span', { class: 'pick-mark', 'aria-hidden': 'true' }, icon('check'))))),
+    h('div', { class: 'setup-actions' },
+      btn('Back', () => setupGo('computer'), 'ghost'),
+      btn(P.size ? `Set up ${P.size === 1 ? 'this agent' : 'these ' + P.size}` : 'Pick at least one', () => {
+        if (!P.size) return
+        const fresh = [...P].filter((n) => !agentOf(n).enabled)
+        if (!fresh.length) return setupGo('signin')
+        runJob(['add', '--no-login', ...fresh], 'Setting up your agents', () => { dlg.close(); setupGo('signin') })
+      }, 'primary'))
+  ]
+}
+function setupSignin () {
+  const mine = agentsOn()
+  const ready = mine.filter((a) => a.state === 'ready')
+  return [
+    h('h1', {}, 'Sign each one in'),
+    h('p', { class: 'lede' }, 'Once, with the account that has your plan. Each agent keeps its own sign-in on its own computer.'),
+    h('ul', { class: 'list boxed signin-list' }, mine.map((a) => {
+      const s = statusOf(a)
+      let right
+      if (s === 'ready') right = h('span', { class: 'status ok' }, icon('circle-check'), 'Signed in')
+      else if (s === 'login') right = btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm primary', 'log-in')
+      else if (s === 'installing') right = h('span', { class: 'status busy' }, h('span', { class: 'spinner' }), 'Getting ready')
+      else if (s === 'stuck') right = btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), 'sm')
+      else right = btn('Wake up', () => runJob(['up', a.name], 'Waking ' + a.label), 'sm')
+      return h('li', {}, avatar(a.name, 32), h('span', { class: 'grow' }, h('b', {}, a.label),
+        h('span', { class: 'sub' }, s === 'installing' ? 'Installing its tools: a few minutes the first time. You can sign the others in meanwhile.' : 'Uses ' + a.plan + '.')), right)
+    })),
+    h('div', { class: 'setup-actions' },
+      btn('Back', () => setupGo('agents'), 'ghost'),
+      btn(ready.length ? 'Continue' : 'Skip for now', () => setupGo('about'), ready.length ? 'primary' : ''))
+  ]
+}
+function setupAbout () {
+  const ta = h('textarea', { rows: 6, placeholder: 'e.g. I’m Sam, a contracts lawyer in Berlin. Short answers, British English, and cite your sources.', 'aria-label': 'About you' })
+  api('/api/memory/about').then((d) => { if (!ta.value && d.text && !/^# About me\s*(<!--[\s\S]*?-->)?\s*$/.test(d.text)) ta.value = d.text }).catch(() => {})
+  return [
+    h('h1', {}, 'A little about you'),
+    h('p', { class: 'lede' }, 'Every agent reads this, so you don’t have to repeat yourself. Optional; you can change it any time under Memory.'),
+    ta,
+    h('div', { class: 'setup-actions' },
+      btn('Back', () => setupGo('signin'), 'ghost'),
+      btn('Skip', () => setupGo('done'), ''),
+      btn('Save and continue', async () => {
+        if (ta.value.trim()) { try { await api('/api/memory/about', { method: 'PUT', body: { text: '# About me\n\n' + ta.value.trim() + '\n' } }) } catch (e) { alert(e.message); return } }
+        setupGo('done')
+      }, 'primary'))
+  ]
+}
+function setupDone () {
+  const first = agentsOn().find((a) => a.state === 'ready') || agentsOn()[0]
+  const auto = h('input', { type: 'checkbox', checked: true })
+  return [
+    h('div', { class: 'done-hero' }, h('img', { src: 'logo.svg', alt: '', width: 72, height: 72 }), h('h1', {}, 'You’re all set'),
+      h('p', { class: 'lede' }, first ? `Chat with ${first.label} right here. Its page also has its files and settings.` : 'Add an agent any time from the sidebar.')),
+    h('label', { class: 'check big-check' }, auto, h('span', {}, h('b', {}, 'Start my agents when I log in'), h('span', { class: 'sub' }, 'So they’re ready when you message them.'))),
+    h('p', { class: 'small muted' }, 'Want them on your phone too? Each agent’s Settings tab connects Telegram, Slack, Discord or WhatsApp.'),
+    h('div', { class: 'setup-actions' },
+      btn(first ? 'Start chatting' : 'Open cage', () => {
+        if (auto.checked && !STATE.settings.autostart) quietJob(['autostart', 'on'])
+        setupGo('')
+        go(first ? 'agent/' + first.name : 'home')
+      }, 'primary lg'))
+  ]
 }
 
 // --- one agent: its chat, its files, its settings --------------------------------------------------------------------
@@ -873,6 +1095,7 @@ function agentSettings (a) {
     section('Troubleshooting', 'You won’t usually need these.', h('div', { class: 'tools' },
       s === 'ready' || s === 'stuck' || s === 'login' || s === 'installing' ? [
         btn('Activity log', () => runJob(['logs', a.name], a.label + ': activity log'), '', 'scroll-text'),
+        btn('Sign in again', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), '', 'log-in'),
         btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), '', 'rotate-cw'),
         btn('Terminal', () => runJob(['shell', a.name], 'Inside ' + a.label + '’s computer'), '', 'square-terminal'),
         btn('Put to sleep', () => runJob(['down', a.name], 'Putting ' + a.label + ' to sleep'), '', 'moon')
@@ -1099,10 +1322,11 @@ function render (force) {
   const main = document.getElementById('main')
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields
-  if (main.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && main.dataset.page === page) return
+  if (!force && main.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && main.dataset.page === page) return
   const kept = {}
   if (main.dataset.page === page) main.querySelectorAll('[data-keep]').forEach((el) => { kept[el.dataset.keep] = el.value })
-  const fn = !STATE.configured ? pageHome
+  document.body.classList.toggle('in-setup', page === 'setup')
+  const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
     : page.startsWith('agent/') ? () => pageAgent(...page.slice(6).split('/'))
       : { home: pageHome, apps: pageApps, signins: pageSignins, memory: pageMemory, security: pageSecurity, settings: pageSettings }[page]
   const same = main.dataset.page === page

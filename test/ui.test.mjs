@@ -1,7 +1,7 @@
 // Drives cage's web app in a real (headless) browser against a stub msb: the page, its token, a question with a
 // hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one (test/fake-vm.mjs plays
 // its VM), the phone layout, and that nothing works without the token.
-//   node test/ui.test.mjs <base url> <token> <cage home> <the fake VM's work folder>
+//   node test/ui.test.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token> <its home>
 // (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
 import fs from 'node:fs'
 import path from 'node:path'
@@ -9,7 +9,7 @@ import { createRequire } from 'node:module'
 // PLAYWRIGHT_MODULE: where the playwright package is, when it isn't installed next to this file
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const [base, token, home, work] = process.argv.slice(2)
+const [base, token, home, work, base2, token2, home2] = process.argv.slice(2)
 let pass = 0
 const ok = (m) => { pass++; console.log('ok - ' + m) }
 const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
@@ -82,6 +82,20 @@ await page.locator('.usage').getByText('42% used').waitFor({ timeout: 15000 })
 if (!(await page.getByRole('link', { name: '@my_claude_bot' }).count())) fail('no link to the bot in its settings')
 ok("files: what you sent each other, and its work folder to download from; its plan's usage in its settings")
 
+// signing in without a terminal: the link as a button, and a box for the code it gives you
+await page.getByRole('button', { name: 'Sign in again' }).click()
+const signin = page.locator('dialog#job .signin')
+const link = signin.getByRole('link', { name: 'Open sign-in page' })
+await link.waitFor({ timeout: 15000 })
+if (!(await link.getAttribute('href')).startsWith('https://claude.ai/oauth/authorize?code=true&client_id=9d1c')) fail('the sign-in link: ' + await link.getAttribute('href'))
+if (await page.locator('dialog#job .job-term').isVisible()) fail('the terminal shows during a sign-in')
+await signin.getByPlaceholder('Paste the code here').fill('CODE-123')
+await signin.getByRole('button', { name: 'Send' }).click()
+await page.locator('#job-status', { hasText: 'Done' }).waitFor({ timeout: 15000 })
+await page.locator('dialog#job').getByText('claude is signed in').waitFor({ timeout: 5000 })
+await page.locator('dialog#job').getByRole('button', { name: 'Close' }).click()
+ok('signing in: the link as a button and a box for the code, no terminal')
+
 // an asleep agent: sending wakes it up, and the message waits in its folder
 await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
 await page.locator('.chat-banner', { hasText: 'asleep' }).waitFor({ timeout: 10000 })
@@ -146,6 +160,37 @@ await page.keyboard.press('Enter')
 await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 })
 if (await page.locator('dialog#palette[open]').count()) fail('the palette stayed open')
 ok('Ctrl+K jumps to a page by name')
+
+// setting up a fresh computer: checks, picking agents, signing in by device code, about you
+const p2 = await browser.newPage()
+p2.on('pageerror', (e) => errors.push(e.message))
+await p2.goto(base2 + '/#' + token2)
+await p2.getByRole('button', { name: 'Set up cage' }).click()
+await p2.locator('.check-row').first().waitFor({ timeout: 60000 })
+const next = p2.getByRole('button', { name: 'Continue', exact: true })
+if (await next.count()) await next.click(); else await p2.getByRole('button', { name: 'Continue anyway' }).click()
+await p2.locator('.pick', { hasText: 'Codex' }).click()
+await p2.getByRole('button', { name: 'Set up this agent' }).click()
+await p2.getByRole('heading', { name: 'Sign each one in' }).waitFor({ timeout: 30000 })
+if (!/CAGE_AGENTS="codex"/.test(fs.readFileSync(path.join(home2, 'cage.env'), 'utf8'))) fail('codex was not added')
+await p2.locator('.signin-list li', { hasText: 'Codex' }).getByRole('button', { name: 'Sign in' }).click({ timeout: 20000 })
+const s2 = p2.locator('dialog#job .signin')
+await s2.getByText('WXYZ-12345').waitFor({ timeout: 15000 })
+if ((await s2.getByRole('link', { name: 'Open sign-in page' }).getAttribute('href')) !== 'https://auth.openai.com/codex/device') fail('the device sign-in link')
+await p2.locator('#job-status', { hasText: 'Done' }).waitFor({ timeout: 15000 })
+await p2.locator('dialog#job').getByRole('button', { name: 'Close' }).click()
+await p2.locator('.signin-list li', { hasText: 'Codex' }).getByText('Signed in').waitFor({ timeout: 20000 })
+await p2.getByRole('button', { name: 'Continue', exact: true }).click()
+await p2.getByLabel('About you').fill('I am Sam, a contracts lawyer.')
+await p2.getByRole('button', { name: 'Save and continue' }).click()
+await p2.getByRole('heading', { name: 'You’re all set' }).waitFor({ timeout: 10000 })
+if (!fs.readFileSync(path.join(home2, 'brain', 'memory', 'about-me.md'), 'utf8').includes('contracts lawyer')) fail('about you was not saved')
+await p2.locator('.big-check input').uncheck()
+await p2.getByRole('button', { name: 'Start chatting' }).click()
+await p2.locator('.chat textarea').waitFor({ timeout: 10000 })
+if (!p2.url().endsWith('#agent/codex')) fail('setup should end in the chat: ' + p2.url())
+await p2.close()
+ok('setting up: the computer checked, agents picked (no bot), signed in by device code, about you saved, then the chat')
 
 // on a phone: the sidebar is a menu
 await page.setViewportSize({ width: 390, height: 844 })

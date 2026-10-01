@@ -10,7 +10,8 @@ keystrokes go back into the job. Only this computer can connect (127.0.0.1, Host
 API call needs the token in ~/.cage/ui.token, which `cage ui` puts in the address it opens. Standard library only.
 
   GET  /api/state                       `cage _state`
-  POST /api/jobs {"args": [...]}        start `cage <args>`                  -> {"id"}
+  GET  /api/check                       `cage _check`: this computer, for the setup screen
+  POST /api/jobs {"args": [...]}        start `cage <args>` (optional "cols": a wide terminal keeps sign-in links whole)
   GET  /api/jobs/<id>/events?from=N     server-sent events: {"n","t":"event"|"raw"|"exit",…}
   POST /api/jobs/<id>/input             {"text": "a line"} or {"raw": "<base64>"}
   POST /api/jobs/<id>/resize            {"cols", "rows"}
@@ -37,7 +38,7 @@ HOME = os.environ.get("CAGE_HOME") or os.path.expanduser("~/.cage")
 PORT = int(os.environ.get("CAGE_UI_PORT", "7771"))
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TOKEN_FILE = os.path.join(HOME, "ui.token")
-ALLOWED = {"", "onboard", "setup", "add", "approve", "up", "down", "login", "update", "logs", "shell", "chat", "connect", "password",
+ALLOWED = {"", "onboard", "setup", "add", "approve", "fix", "up", "down", "login", "update", "logs", "shell", "chat", "connect", "password",
            "secret", "memory", "autostart", "backup", "restore", "security", "network", "allow", "ask", "ask-all",
            "fallback", "voice", "mask", "destroy", "doctor", "status", "version"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -67,7 +68,7 @@ class Job:
     jobs, lock = {}, threading.Lock()
     MAX_EVENTS = 20000
 
-    def __init__(self, args):
+    def __init__(self, args, cols=100):
         self.id = base64.urlsafe_b64encode(os.urandom(9)).decode()
         self.args, self.events, self.first, self.done = args, [], 0, False
         self.cond = threading.Condition()
@@ -76,8 +77,8 @@ class Job:
         attrs = termios.tcgetattr(slave)
         attrs[3] &= ~termios.ECHO   # answers aren't echoed back (cage shows them itself)
         termios.tcsetattr(slave, termios.TCSANOW, attrs)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-        env = dict(os.environ, CAGE_PROTO="1", TERM="xterm-256color", COLUMNS="100", LINES="30")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, cols, 0, 0))
+        env = dict(os.environ, CAGE_PROTO="1", TERM="xterm-256color", COLUMNS=str(cols), LINES="30")
         env.pop("NO_COLOR", None)
         self.proc = subprocess.Popen([CAGE] + args, stdin=slave, stdout=slave, stderr=slave, env=env,
                                      start_new_session=True, close_fds=True, cwd=os.path.expanduser("~"),
@@ -454,15 +455,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, {"ok": True})
         if len(parts) == 3 and parts[0] == "chat":
             return self.chat(method, parts[1], parts[2], query)
+        if parts == ["check"] and method == "GET":
+            env = dict(os.environ)
+            env.pop("CAGE_PROTO", None)
+            out = subprocess.run([CAGE, "_check"], capture_output=True, env=env, timeout=60).stdout
+            return self.send(200, out or b'{"checks": []}')
         if parts == ["jobs"] and method == "POST":
-            args = self.body().get("args", [])
+            self.last_body = self.body()
+            args = self.last_body.get("args", [])
             if not (isinstance(args, list) and all(isinstance(a, str) and len(a) < 8192 and "\0" not in a for a in args)):
                 raise ValueError("args must be a list of strings")
             if (args[0] if args else "") not in ALLOWED:
                 return self.send(403, {"error": f"the web app can't run cage {args[0]}"})
             Job.sweep()
             State.stale()
-            return self.send(200, {"id": Job(args).id})
+            cols = max(20, min(400, int(self.last_body.get("cols") or 100)))
+            return self.send(200, {"id": Job(args, cols).id})
         if len(parts) == 3 and parts[0] == "jobs":
             job = Job.jobs.get(parts[1])
             if not job:

@@ -32,7 +32,7 @@ jobs:
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/pw/node_modules/playwright" CAGE_TEST_CHROME="$(command -v google-chrome)" test/ui.sh
       - name: Linux installer
         run: test/installer.sh
-      - name: adapter rules (node): WhatsApp, and the app's chat relay
+      - name: "adapter rules (node): WhatsApp, and the app's chat relay"
         run: node --test test/whatsapp.test.mjs test/app.test.mjs
       - name: host + setup tests (bash 5) + real cc-connect config validation
         run: |
@@ -58,7 +58,7 @@ jobs:
           $env:CAGE_CHECK_ONLY = '1'
           $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
           Write-Output $out
-          if ($out -notmatch 'check only: would set up WSL 2|virtualization is turned off|needs Windows 11') { throw 'unexpected installer output' }
+          if ($out -notmatch 'check only: would set up WSL 2|virtualization is turned off|needs Windows 11|GB free on|turned off part of WSL') { throw 'unexpected installer output' }
       - name: PowerShell 7, the way `irm | iex` runs it (must not close the session)
         shell: pwsh
         run: |

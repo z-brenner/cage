@@ -24,13 +24,13 @@ curl -fsSL https://github.com/z-brenner/cage/releases/latest/download/install.sh
 
 That's the whole setup. cage then opens in your browser and walks you through everything in about five minutes. No terminal needed:
 
-1. checks your computer and installs what's missing (on Windows: WSL 2 and its own Ubuntu, restarting once if needed)
-2. asks which subscriptions you have
-3. makes a Telegram bot for each: you make one bot of your own in BotFather, then each agent's bot is **one tap**, with its own face
-4. locks the bots to *your* Telegram account
-5. starts each agent in its own VM and signs it in with your subscription
+1. **This computer:** it checks what your agents need and explains anything in the way in plain words. It fixes what it can. On a work computer it writes a note for your IT department about the rest. On Windows, the installer turns on WSL 2 first (restarting once if needed).
+2. **Your agents:** pick the ones you have a plan for. Each gets its own private computer.
+3. **Sign in:** a button opens each one's sign-in page, and you paste back a code if it asks. No terminal.
+4. **About you** (optional): a few lines every agent reads.
+5. **Chat:** that's it. Your agents start whenever you log in.
 
-After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
+After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to chat with your agents and see how they're doing. Telegram, Slack, Discord and WhatsApp are there for your phone, whenever you want them.
 
 The app does everything, in plain words:
 - **Home** shows what needs you (a sign-in, something cage blocked) and how each agent is doing.

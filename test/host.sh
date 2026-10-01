@@ -447,6 +447,12 @@ ok "asking first: Claude asks before using your apps only, the others before eve
 assert d["codex"]["reachable"] and not d["codex"]["chat_apps"] and not d["antigravity"]["enabled"], d' || fail "state: reachable in the app" )
 ok "cage add: agents you chat with in the app, no bot needed; agents added before are kept"
 
+cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+assert {"msb", "disk", "network"} <= set(c), c
+assert all(x["status"] in ("ok", "warn", "bad") and x["title"] for x in c.values()), c
+assert all(x["it"] for x in c.values() if x["status"] == "bad" and not x["fix"]), c' || fail "the setup screen's check: $(cage _check 2>&1)"
+ok "cage _check: this computer, in words, with a fix or a line for IT for anything in the way"
+
 cage ask-all off </dev/null 2>/dev/null; cage fallback claude off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
 : > "$MSB_LOG"
 cage up claude 2>/dev/null
