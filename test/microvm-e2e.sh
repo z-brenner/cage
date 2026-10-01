@@ -170,6 +170,23 @@ retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx a
 rm -rf "$CAGE_BACKUP_DIR" "$CAGE_BACKUP_DIR.err" "$CAGE_HOME".before-restore-*
 ok "backup + restore bring back the agent's files with their owner and mode, and the agent wakes up"
 
+# strict network: the agent still installs and starts with only its own hosts; anything else is turned away and
+# shows up in `cage security`
+cage network strict </dev/null 2>/dev/null
+cage up "$A"
+retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not provisioned under strict network: $(msb logs "$VM" --source system --grep 'denied' 2>&1 | tail -20)"
+retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not running under strict network"
+ax curl -fsS -m 20 -o /dev/null https://postman-echo.com/get || fail "a host its key is for is unreachable under strict network"
+if ax curl -fsS -m 20 -o /dev/null https://example.com; then fail "example.com is reachable under strict network"; fi
+retry 90 sh -c "'$ROOT/cage' security 2>&1 | grep -q 'reach example.com'" \
+  || fail "the blocked host isn't in cage security: $(cage security 2>&1) / $(msb logs "$VM" --source system --grep 'denied' 2>&1 | tail -5)"
+cage allow example.com "$A" </dev/null 2>/dev/null
+cage up "$A"
+retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after cage allow"
+ax curl -fsS -m 20 -o /dev/null https://example.com || fail "cage allow example.com didn't let it through"
+cage network open </dev/null 2>/dev/null
+ok "strict network: installs and runs with only its own hosts; example.com blocked, reported, then allowed"
+
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi
 ok "destroy removes the VM and its volume"
