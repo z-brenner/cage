@@ -15,6 +15,9 @@ ok() { pass=$((pass + 1)); echo "ok - $*"; }
 cat > "$T/mock.py" <<'PY'
 import http.server, json, re, sys
 log = open(sys.argv[2], "a")
+OWNER = {"id": 4242, "is_bot": False, "first_name": "Zack"}
+MANAGED = [{"update_id": 900 + i, "managed_bot": {"user": OWNER, "bot": {"id": bid, "is_bot": True, "first_name": n, "username": u}}}
+           for i, (bid, n, u) in enumerate([(1001, "Claude", "dot_claude_bot"), (1002, "Codex", "dot_codex_bot")])]
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):  # setMyProfilePhoto: multipart upload
@@ -30,7 +33,17 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
         if method == "getMe":
             name = token.split(":GOOD")[1] or "x"
-            return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot", "username": "dot_" + name + "_bot"}})
+            return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot", "username": "dot_" + name + "_bot",
+                                                           "can_manage_bots": name == "mgr"}})
+        if method == "getUpdates" and "allowed_updates" in self.path:  # the manager bot: one managed_bot update per tap
+            offset = int((re.search(r"offset=(\d+)", self.path) or [0, 0])[1])
+            pending = [u for u in MANAGED if u["update_id"] >= offset]
+            return self.reply(200, {"ok": True, "result": pending[:1]})
+        if method == "getManagedBotToken":
+            uid = re.search(r"user_id=(\d+)", self.path).group(1)
+            return self.reply(200, {"ok": True, "result": {"1001": "1001:GOODclaude", "1002": "1002:GOODcodex"}[uid]})
+        if method == "setManagedBotAccessSettings":
+            return self.reply(200, {"ok": True, "result": True})
         if method in ("setMyDescription", "setMyShortDescription"):
             return self.reply(200, {"ok": True, "result": True})
         if method == "getUpdates":
@@ -158,5 +171,21 @@ out="$(PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage do
 grep -q '✓ WSL distro Ubuntu-24.04 with Windows interop' <<<"$out" || fail "doctor WSL line: $out"
 grep -qE 'KVM is ready|no /dev/kvm in WSL: cage needs WSL 2 on Windows 11|wsl --terminate Ubuntu-24.04' <<<"$out" || fail "doctor WSL KVM hint: $out"
 ok "on WSL, autostart uses the per-user Run key and doctor gives WSL-specific hints"
+
+# --- managed bots: one manager bot, one tap per agent; the creator becomes the allowlist and each bot is locked
+rm -f "$env_file"; : > "$T/requests.log"
+printf '%s\n' '555:GOODmgr' | CAGE_BOTS=managed cage setup claude codex 2>"$T/m.err" || fail "managed setup failed: $(cat "$T/m.err")"
+grep -qx 'CAGE_TELEGRAM_MANAGER_TOKEN="555:GOODmgr"' "$env_file" || fail "manager token not saved"
+grep -qx 'CAGE_TELEGRAM_TOKEN_claude="1001:GOODclaude"' "$env_file" || fail "claude token not fetched: $(cat "$T/m.err")"
+grep -qx 'CAGE_TELEGRAM_TOKEN_codex="1002:GOODcodex"' "$env_file" || fail "codex token not fetched"
+grep -qx 'CAGE_TELEGRAM_ALLOW="4242"' "$env_file" || fail "the bots' creator did not become the allowlist"
+grep -q 't.me/newbot/dot_mgr_bot/dot_mgr_claude_bot?name=Claude' "$T/m.err" || fail "no creation link: $(cat "$T/m.err")"
+for id in 1001 1002; do
+  grep -q "/bot555:GOODmgr/setManagedBotAccessSettings?user_id=$id&is_access_restricted=true" "$T/requests.log" || fail "bot $id not locked to its owner"
+done
+grep -q 'GOODclaude/getUpdates' "$T/requests.log" && fail "waited for a message although the creator is known"
+grep -q '^/bot1001:GOODclaude/setMyProfilePhoto photo-ok$' "$T/requests.log" || fail "managed bot got no avatar"
+grep -q 'locked to Zack' "$T/m.err" || fail "setup didn't say the bots are locked: $(cat "$T/m.err")"
+ok "managed bots: one manager, one tap per agent, tokens fetched, creator allowlisted, bots locked to them"
 
 echo "all $pass setup tests passed"

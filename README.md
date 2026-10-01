@@ -10,22 +10,27 @@ Each one lives in a private microVM and talks to you as a Telegram bot.</p>
 
 ## Get started
 
-On Linux, or on Windows 11 inside [WSL 2](#windows):
+**Windows 11:** open PowerShell and paste
 
-```bash
-git clone https://github.com/z-brenner/cage && cd cage
-./cage
+```powershell
+irm https://raw.githubusercontent.com/z-brenner/cage/main/install.ps1 | iex
 ```
 
-That's the whole setup. `./cage` walks you through it in about five minutes:
+**Linux:** open a terminal and paste
 
-1. checks your computer, and installs [microsandbox](https://github.com/superradcompany/microsandbox) if it's missing
+```bash
+curl -fsSL https://raw.githubusercontent.com/z-brenner/cage/main/install.sh | bash
+```
+
+That's the whole setup. It walks you through everything in about five minutes:
+
+1. checks your computer and installs what's missing (on Windows: WSL 2 and its own Ubuntu, restarting once if needed)
 2. asks which subscriptions you have
-3. helps you make a Telegram bot for each, and gives every bot its own face
-4. lets only *your* Telegram account talk to them
+3. makes a Telegram bot for each: you make one bot of your own in BotFather, then each agent's bot is **one tap**, with its own face
+4. locks the bots to *your* Telegram account
 5. starts each agent in its own VM and signs it in with your subscription
 
-After that, `./cage` shows how everyone's doing. Message your bots on Telegram and they work in their cages.
+After that, type `cage` (on Windows, open **cage** from the Start menu) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
 
 <p align="center"><img src="assets/avatars.png" width="440" alt="The four bot avatars: claude in peach, codex in mint, cursor in sky blue, antigravity in lilac"></p>
 
@@ -36,22 +41,22 @@ Every agent is a little creature in a cage, and its eyes tell you how it is.
 | | |
 |---|---|
 | `[•\|•]` | awake and ready |
-| `[o\|o]` | needs you to sign in: `./cage login <agent>` |
+| `[o\|o]` | needs you to sign in: `cage login <agent>` |
 | `[•\|-]` | busy (it blinks while it installs) |
-| `[-\|-]` | asleep: `./cage up` |
+| `[-\|-]` | asleep: `cage up` |
 | `[ \| ]` | no cage yet |
 
 ## Everyday commands
 
 ```text
-./cage                  set up, or see how your agents are doing
-./cage up [agents]      wake agents up (a fresh VM; logins and files are kept)
-./cage down [agents]    put them to sleep
-./cage login <agent>    sign an agent in to your subscription
-./cage logs <agent>     watch what an agent's VM is doing
-./cage doctor           check this computer, the config and the bots
-./cage autostart on     wake them up whenever you log in
-./cage help             everything else
+cage                  set up, or see how your agents are doing
+cage up [agents]      wake agents up (a fresh VM; logins and files are kept)
+cage down [agents]    put them to sleep
+cage login <agent>    sign an agent in to your subscription
+cage logs <agent>     watch what an agent's VM is doing
+cage doctor           check this computer, the config and the bots
+cage autostart on     wake them up whenever you log in
+cage help             everything else
 ```
 
 In Telegram, each chat is a session: `/new` starts fresh, `/stop` interrupts, `/list` and `/switch` move between sessions, `/model` and `/mode` change how the agent works, `/usage` shows your quota.
@@ -62,25 +67,21 @@ In Telegram, each chat is a session: `/new` starts fresh, `/stop` interrupts, `/
 
 cage runs inside WSL 2 and behaves just as on Linux. It needs **Windows 11** on an x64 PC with virtualization turned on: WSL 2 only runs VMs inside it on Windows 11, and Windows on ARM can't.
 
-```powershell
-wsl --install -d Ubuntu-24.04
-```
+The PowerShell line above does all of this for you: it gives cage its own Ubuntu called **cage** (separate from any Ubuntu you already have), creates your Linux user, and starts the setup. To do it by hand instead: `wsl --install -d Ubuntu-24.04`, open Ubuntu, and run the Linux line. Keep cage in your Linux home (`~/cage`), not under `/mnt/c`.
 
-Open **Ubuntu 24.04** from the Start menu, then run the two lines from [Get started](#get-started). Keep cage in your Linux home (`~/cage`), not under `/mnt/c`.
-
-- **Closing the window is fine.** WSL normally stops Ubuntu about 15 seconds after its last window closes, VMs included. `./cage up` keeps one hidden WSL session open so your agents stay up; `./cage down` lets it go.
-- **Reboots:** `./cage autostart on` wakes your agents at every Windows login (no admin needed; a window flashes for a few seconds).
+- **Closing the window is fine.** WSL normally stops Ubuntu about 15 seconds after its last window closes, VMs included. `cage up` keeps one hidden WSL session open so your agents stay up; `cage down` lets it go.
+- **Reboots:** `cage autostart on` wakes your agents at every Windows login (no admin needed; a window flashes for a few seconds).
 - **Memory:** WSL gets half your RAM, and each agent takes 4 GB of that. With 16 GB or less, put `CAGE_MEMORY=2G` in `~/.cage/cage.env`.
 - **No `/dev/kvm`?** Check that `nestedVirtualization` isn't `false` in `%UserProfile%\.wslconfig`, that `wsl -l -v` shows version 2, and that Task Manager → Performance → CPU says *Virtualization: Enabled*. Then `wsl --shutdown` and reopen Ubuntu.
 
 ## Good to know
 
-- **Sign-ins happen inside each VM**, with each vendor's own CLI, and stay on that agent's volume. They survive `up`, `update`, reboots and `./cage destroy <agent> --keep-login`.
+- **Sign-ins happen inside each VM**, with each vendor's own CLI, and stay on that agent's volume. They survive `up`, `update`, reboots and `cage destroy <agent> --keep-login`.
 - **Codex:** turn on device-code sign-in first (ChatGPT → Settings → Security).
 - **Antigravity** is Google's successor to Gemini CLI for AI Pro/Ultra (since 2026-06-18). Google has suspended accounts over third-party use of its CLI logins, so consider a spare Google account.
-- **After a reboot** your agents sleep until `./cage up` (or `./cage autostart on`, once). Waking reinstalls each CLI in about a minute; logins, sessions and files are kept.
+- **After a reboot** your agents sleep until `cage up` (or `cage autostart on`, once). Waking reinstalls each CLI in about a minute; logins, sessions and files are kept.
 - **Settings** live in `~/.cage/cage.env` (CPU, memory, disk, network rules, `CAGE_MODE=ask` to approve each tool call in chat).
-- **Installer error "Could not determine latest release version"?** That's GitHub rate-limiting your IP. `./cage` falls back to a pinned microsandbox automatically.
+- **Installer error "Could not determine latest release version"?** That's GitHub rate-limiting your IP. `cage` falls back to a pinned microsandbox automatically.
 
 ## Security model
 
@@ -120,7 +121,7 @@ cage is a few hundred lines of shell around two open-source projects: [cc-connec
 
 ```bash
 shellcheck cage guest/*.sh test/*.sh
-test/host.sh                    # ./cage against a stub msb: config rendering, validation, msb arguments, status, guards
+test/host.sh                    # cage against a stub msb: config rendering, validation, msb arguments, status, guards
 test/setup.sh                   # cage setup / doctor / autostart against a mock Telegram API and stubbed launchctl/systemctl
 CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # plus: real cc-connect loads every generated config
 test/guest-smoke.sh claude      # Docker stand-in for the VM: same image, mounts and entry script
