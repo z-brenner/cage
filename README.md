@@ -32,12 +32,15 @@ What cage adds:
 
 Requirements: an Apple-Silicon Mac or a Linux box with KVM, [microsandbox](https://docs.microsandbox.dev), and one Telegram bot per agent.
 
+On Linux, `/dev/kvm` must be readable and writable by you (`sudo usermod -aG kvm $USER`, then log out and back in), and the installer puts `msb` in `~/.local/bin`, which must be on your `PATH`.
+
 ```bash
 curl -fsSL https://install.microsandbox.dev | sh      # macOS: brew install superradcompany/tap/microsandbox
 git clone https://github.com/z-brenner/cage && cd cage
 
 ./cage setup                 # asks for one @BotFather token per agent (checked with Telegram), then learns your
                              # Telegram user id from one message you send the first bot. Writes ~/.cage/cage.env (0600)
+                             # Only some subscriptions? Name them: ./cage setup claude cursor (add more later the same way)
 ./cage doctor                # host, config, and every bot token checked live
 ./cage up                    # one microVM per agent; each installs its CLI + cc-connect in the background (~1 min)
 ./cage login claude          # then: codex, cursor, antigravity

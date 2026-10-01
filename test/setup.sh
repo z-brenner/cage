@@ -64,7 +64,8 @@ grep -q 'rejected' "$T/setup.err" || fail "revoked token not reported"
 grep -q '@dot_claude_bot' "$T/setup.err" || fail "bot username not shown"
 grep -q 'Zack' "$T/setup.err" || fail "sender name not shown for confirmation"
 grep -q '/bot100:GOODclaude/getUpdates?offset=501' "$T/requests.log" || fail "the id-discovery message was not acknowledged"
-ok "setup validates tokens with Telegram, learns the user id, acknowledges the message"
+grep -qx 'CAGE_AGENTS="claude codex"' "$env_file" || fail "CAGE_AGENTS not narrowed to the agents set up: $(grep CAGE_AGENTS "$env_file")"
+ok "setup validates tokens with Telegram, learns the user id, acknowledges the message, narrows CAGE_AGENTS"
 
 # --- re-running keeps working tokens and the allowlist without prompting
 : > "$T/requests.log"
@@ -73,6 +74,15 @@ grep -q 'keeping bot @dot_claude_bot' "$T/setup2.err" || fail "did not keep exis
 grep -q 'allowlist already set: 4242' "$T/setup2.err" || fail "did not keep allowlist"
 grep -q getUpdates "$T/requests.log" && fail "polled for a user id although the allowlist was set"
 ok "re-running setup keeps valid settings"
+
+# --- adding one agent later keeps the earlier ones; doctor then checks exactly those
+printf '%s\n' '300:GOODcursor' | cage setup cursor 2>/dev/null || fail "adding cursor failed"
+grep -qx 'CAGE_AGENTS="claude codex cursor"' "$env_file" || fail "adding an agent dropped others: $(grep CAGE_AGENTS "$env_file")"
+[ "$(grep -c '^CAGE_AGENTS=' "$env_file")" = 1 ] || fail "duplicate CAGE_AGENTS lines"
+out="$(cage doctor 2>&1 || true)"
+grep -q 'agents: claude codex cursor)' <<<"$out" || fail "doctor did not use the narrowed agent list: $out"
+grep -q 'TOKEN_antigravity missing' <<<"$out" && fail "doctor checked an agent that was never set up: $out"
+ok "setup <agent> adds to CAGE_AGENTS; doctor ignores agents without a bot"
 
 # --- declining the sender aborts without saving
 rm -f "$env_file"
