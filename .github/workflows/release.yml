@@ -1,0 +1,44 @@
+name: release
+
+# Push a tag like v0.2.0 on main to publish a release: the tarball the installers download, the installers
+# themselves, SHA256SUMS (which install.sh checks), and a signed build-provenance attestation for each file, so
+# anyone can check a download was built here from that tag:
+#   gh attestation verify cage-v0.2.0.tar.gz --repo z-brenner/cage
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write       # create the release
+  id-token: write       # sign the attestation (Sigstore, via GitHub's OIDC token)
+  attestations: write   # store it
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: the tag is on main
+        run: |
+          git fetch -q origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "tag $GITHUB_REF_NAME isn't on main"; exit 1; }
+      - name: quick checks
+        run: |
+          shellcheck -S warning cage install.sh guest/*.sh test/*.sh scripts/*.sh
+          test/installer.sh
+          test/host.sh
+      - name: build
+        run: scripts/build-release.sh "$GITHUB_REF_NAME" dist
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "cage $GITHUB_REF_NAME" $pre

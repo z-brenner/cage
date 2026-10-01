@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -S warning cage install.sh guest/*.sh test/*.sh
+        run: shellcheck -S warning cage install.sh guest/*.sh test/*.sh scripts/*.sh
       - name: install.ps1 parses and stays ASCII (Windows PowerShell 5.1 reads files in the system code page)
         run: |
           if grep -nP '[^\x00-\x7F]' install.ps1; then echo "non-ASCII in install.ps1"; exit 1; fi
@@ -36,7 +36,7 @@ jobs:
       - name: host + setup tests (bash 3.2, as shipped on macOS)
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2
-          sh -c 'apk add -q python3 curl >/dev/null && bash test/host.sh && bash test/setup.sh'
+          sh -c 'apk add -q python3 curl tar openssl >/dev/null && bash test/host.sh && bash test/setup.sh'
 
   windows-installer:
     name: windows installer (check only)

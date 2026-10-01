@@ -1,5 +1,6 @@
 # cage installer for Windows 11. In PowerShell:
-#   irm https://raw.githubusercontent.com/z-brenner/cage/main/install.ps1 | iex
+#   irm https://github.com/z-brenner/cage/releases/latest/download/install.ps1 | iex
+# (or download Install-cage.cmd from the latest release and double-click it)
 # It turns on WSL 2 with its own Ubuntu 24.04 (named "cage", separate from any Ubuntu you already have),
 # creates your Linux user, installs cage inside it and starts the guided setup. If Windows has to restart
 # to turn WSL on, setup carries on by itself after you log back in.
@@ -9,7 +10,7 @@
 & {
     $ErrorActionPreference = 'Continue'   # native tools (wsl.exe) report through exit codes, checked below
     $Distro = 'cage'
-    $Raw = 'https://raw.githubusercontent.com/z-brenner/cage/main'
+    $Raw = 'https://github.com/z-brenner/cage/releases/latest/download'   # the latest release's installers
     if ($env:CAGE_RAW) { $Raw = $env:CAGE_RAW }
     $tick = [char]0x2713
     $cross = [char]0x2717
@@ -37,7 +38,7 @@
         Write-Host ''
 
         if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
-            Stop-Setup 'this installer is for Windows' 'on Linux: curl -fsSL https://raw.githubusercontent.com/z-brenner/cage/main/install.sh | bash'
+            Stop-Setup 'this installer is for Windows' 'on Linux: curl -fsSL https://github.com/z-brenner/cage/releases/latest/download/install.sh | bash'
         }
         $build = [Environment]::OSVersion.Version.Build
         if ($build -lt 22000) {
