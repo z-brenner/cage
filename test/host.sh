@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null; rm -rf "$T"' EXIT
+trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null || true; rm -rf "$T"' EXIT
 unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
