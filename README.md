@@ -100,6 +100,7 @@ cage connect                                   # what you can connect, and what'
 cage connect add zapier                        # Gmail, Calendar, Drive, Slack, Notion and thousands more
 cage connect add github                        # repositories, issues and pull requests
 cage connect add linear                        # issues and projects
+cage connect add notion                        # Notion: you sign in in the browser
 cage connect add crm https://example.com/mcp   # any other app with an MCP address
 ```
 
@@ -107,7 +108,7 @@ Each one shows you where to get a key, then wires the app into every agent's own
 
 - **Zapier is the shortcut.** You sign in to Gmail, Google Calendar, Slack and the rest on Zapier's site and choose what your agents may do there; one key covers all of it.
 - **Claude** also gets the connectors on your claude.ai account (Settings → Connectors), because it signs in with that account.
-- **Apps that only offer browser sign-in** (Notion's and Google's own MCP servers, for example) can't be connected directly yet. Use them through Zapier.
+- **Apps you sign in to in the browser:** `cage connect add notion` (or `atlassian` for Jira and Confluence, `sentry`, or any MCP address that asks for a sign-in). Your browser opens on the app's own sign-in page. The sign-in stays on your computer, in `~/.cage/oauth`. Its short-lived access token becomes a secret like the keys below, so the VMs hold only a placeholder for it. While your agents are awake, cage renews the token before it expires and swaps the new one in without a restart. This needs `python3`, which Ubuntu has.
 - Adding or removing an app restarts the agents that are awake, which takes a minute or two.
 
 ## Keys your agents can use but never see

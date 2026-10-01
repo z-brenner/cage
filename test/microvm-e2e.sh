@@ -110,6 +110,14 @@ if gx sh -c 'command -v node >/dev/null'; then
 fi
 ok "secrets: placeholder in the VM, real value only at the allowed host, HTTPS still works under interception"
 
+# a new value for a secret reaches the running VM without a restart (msb modify): what renewed sign-ins rely on
+NEW_VALUE="cage-e2e-new-$RANDOM$RANDOM"
+printf '%s\n' "$NEW_VALUE" | cage secret add E2E_KEY postman-echo.com "$A" 2>"$CAGE_HOME/rotate.err" || fail "secret update"
+grep -q 'running agents use the new value now' "$CAGE_HOME/rotate.err" || fail "no live update: $(cat "$CAGE_HOME/rotate.err")"
+resp="$(withenv 'curl -sS -m 30 https://postman-echo.com/headers -H "x-cage-key: $E2E_KEY"' || true)"
+grep -q "$NEW_VALUE" <<<"$resp" || fail "the running VM still sends the old value: $resp"
+ok "secrets: a new value goes into the running VM without a restart"
+
 # connectors: the agent's CLI has the app with only a placeholder in its config, and reaches the MCP server
 # through TLS interception (the CLIs that can check a connection without a login do)
 hx() { msb exec --no-tty -u agent -e HOME=/home/agent "$VM" -- bash -lc "set -a; . /etc/cage/runtime.env; set +a; $1"; }
