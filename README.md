@@ -230,7 +230,7 @@ CI (`.github/workflows/ci.yml`) runs:
 - guest smoke tests for all four agents
 - the real-microVM end-to-end test for all four agents, on KVM-enabled GitHub runners
 
-Releases: push a tag like `v0.2.0` on main. `.github/workflows/release.yml` runs the quick checks, builds the release with `scripts/build-release.sh` (reproducible: the same commit gives the same tarball), attests it, and publishes it. The installers always take the latest release.
+Releases: push a tag like `v0.2.0` on main, or run the release workflow on main with that version. `.github/workflows/release.yml` runs the quick checks, builds the release with `scripts/build-release.sh` (reproducible: the same commit gives the same tarball), attests it, and publishes it. The installers always take the latest release.
 
 Files:
 - `cage`: the host CLI.
