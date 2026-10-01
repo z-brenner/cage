@@ -102,9 +102,15 @@ cage up claude 2>/dev/null
 grep -q '^run | -d | --replace | --name | cage-claude |' "$MSB_LOG" || fail "up should re-create with --replace: $(cat "$MSB_LOG")"
 grep -q '^restart' "$MSB_LOG" && fail "up must not use msb restart"
 : > "$MSB_LOG"
+: > "$MSB_LOG"
 cage update claude 2>/dev/null
 grep -q '^run | -d | --replace | --name | cage-claude |' "$MSB_LOG" || fail "update should re-create"
-ok "up and update re-create the VM with --replace (home volume kept)"
+grep '^run | ' "$MSB_LOG" | grep -q -- '-e | CAGE_REFRESH=1' || fail "update should ask the VM for fresh downloads"
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+grep '^run | ' "$MSB_LOG" | grep -q -- '--mount-named | cage-claude-cache:/var/cache/cage' || fail "no cache volume"
+if grep -q 'CAGE_REFRESH' "$MSB_LOG"; then fail "a plain up shouldn't refresh"; fi
+ok "up and update re-create the VM with --replace (home and cache volumes kept; update downloads afresh)"
 
 # ask mode
 sed -i 's/^CAGE_MODE=yolo/CAGE_MODE=ask/' "$CAGE_HOME/cage.env"
@@ -422,6 +428,21 @@ cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev
 cage up claude 2>/dev/null
 if grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" || [ -e "$CAGE_HOME/agents/claude/mask.on" ] || [ -s "$CAGE_HOME/mask.terms" ]; then fail "mask still on"; fi
 ok "privacy mask: per agent, the CLI runs behind guest/mask.py with your terms; cage mask try previews it"
+
+# --- the web app's side of cage: protocol mode (JSON events, answers on stdin) and the state snapshot
+out="$(printf 'proto-v4lue\n' | CAGE_PROTO=1 "$ROOT/cage" secret add PROTO_KEY api.proto.example claude 2>&1 >/dev/null)"
+grep -q $'^\036{"t":"prompt","text":"value for PROTO_KEY (stays hidden): ","secret":true}$' <<<"$out" || fail "protocol prompt: $(cat -v <<<"$out")"
+grep -q $'^\036{"t":"ok","text":"PROTO_KEY saved on this computer' <<<"$out" || fail "protocol ok: $(cat -v <<<"$out")"
+[ "$(cat "$CAGE_HOME/secrets/PROTO_KEY")" = proto-v4lue ] || fail "protocol answer not used"
+if grep -q 'proto-v4lue' <<<"$out"; then fail "the hidden answer was printed"; fi
+cage secret rm PROTO_KEY 2>/dev/null
+out="$(printf 'n\n' | CAGE_PROTO=1 "$ROOT/cage" ask-all on 2>&1 >/dev/null)"
+grep -q $'^\036{"t":"confirm","text":"Restart .*","default":"y"}$' <<<"$out" || fail "protocol confirm: $(cat -v <<<"$out")"
+cage ask-all off </dev/null 2>/dev/null
+cage _state > "$T/state.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["configured"] and len(d["agents"]) == 4 and d["catalog"], d' "$T/state.json" \
+  || fail "cage _state isn't the JSON the web app expects: $(head -c 400 "$T/state.json")"
+ok "web app side: protocol events (questions, hidden answers, yes/no) and the state snapshot"
 
 # --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
 V="$T/volumes/cage-claude-home"

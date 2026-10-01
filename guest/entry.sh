@@ -26,7 +26,7 @@ chown "$U:$U" "$H"
 chmod 750 "$H"
 
 delay=15
-until bash /cage/provision.sh "$KIND"; do
+until bash /cage/provision.sh "$KIND" ${CAGE_REFRESH:+--refresh}; do   # `cage update` sets CAGE_REFRESH
   log "provisioning failed; retrying in ${delay}s (network down? see output above)"
   sleep "$delay"
   delay=$(( delay < 240 ? delay * 2 : 240 ))

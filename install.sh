@@ -111,7 +111,27 @@ case ":$PATH:" in
 esac
 ok "type ${A}cage${Z} in any new terminal to come back here"
 
+# Linux desktops: "cage" in the app menu opens the web app (on Windows, install.ps1 adds a Start menu shortcut)
+if [ -z "${WSL_DISTRO_NAME:-}" ]; then
+  mkdir -p "$HOME/.local/share/applications"
+  cat > "$HOME/.local/share/applications/cage.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=cage
+Comment=Your AI agents, each in its own little cage
+Exec=$BIN/cage ui
+Icon=$DIR/host/ui/static/logo.svg
+Terminal=false
+Categories=Development;Utility;
+DESKTOP
+fi
+
 if [ -n "${CAGE_NO_START:-}" ]; then exit 0; fi
+# With a desktop (or on Windows) the setup carries on in your browser; CAGE_TERMINAL=1 keeps it here.
+if [ -z "${CAGE_TERMINAL:-}" ] && { [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; } &&
+   command -v python3 >/dev/null 2>&1; then
+  exec "$DIR/cage" ui
+fi
 # Under `curl | bash`, stdin is the download, so the guided setup reads the keyboard from the terminal.
 if [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
   exec "$DIR/cage" </dev/tty
