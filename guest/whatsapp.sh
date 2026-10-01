@@ -39,10 +39,11 @@ done
 delay=5
 while true; do
   install -m 644 -o "$U" -g "$U" /cage/whatsapp.mjs "$APP/adapter.mjs"
+  # Same environment as cc-connect, so it trusts the same CAs (microsandbox's, or a corporate proxy's).
   runuser -u "$U" -- env -i HOME="$H" PATH="/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
     WA_DIR="$DIR" WA_MODE="$MODE" WA_ALLOW="$ALLOW" WA_NAME="$NAME" \
     WA_BRIDGE_URL="ws://127.0.0.1:$PORT/bridge/ws" WA_BRIDGE_TOKEN="$TOKEN" \
-    node "$APP/adapter.mjs"
+    bash -c 'set -a; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a; exec node "$1"' _ "$APP/adapter.mjs"
   rc=$?
   # Logged out (3) means it needs a new link: wait for `cage chat link whatsapp`, which shows a fresh code.
   if [ $rc = 3 ]; then delay=5; else delay=$(( delay < 120 ? delay * 2 : 120 )); fi

@@ -71,6 +71,7 @@ async function main() {
   let sock = null
   let me = {}
   let pairRequested = false
+  let retry = 2000
 
   // --- cc-connect's bridge ------------------------------------------------------------------------------------
   let bridge = null
@@ -128,6 +129,7 @@ async function main() {
         }
       }
       if (u.connection === 'open') {
+        retry = 2000
         me = { pn: jidNormalizedUser(sock.user?.id), lid: sock.user?.lid ? jidNormalizedUser(sock.user.lid) : '' }
         status({ state: 'linked', me: digits(me.pn), mode: MODE })
         log(`linked as +${digits(me.pn)} (${MODE} number)`)
@@ -141,7 +143,10 @@ async function main() {
           fs.rmSync(path.join(DIR, 'pair'), { force: true })
           process.exit(3)
         }
-        setTimeout(connect, code === DisconnectReason.restartRequired ? 0 : 3000)
+        if (code === DisconnectReason.restartRequired) return setTimeout(connect, 0)
+        log(`connection closed (${code ?? 'no code'}: ${u.lastDisconnect?.error?.message || 'unknown'}); retrying in ${retry / 1000}s`)
+        setTimeout(connect, retry)
+        retry = Math.min(retry * 2, 120000)
       }
     })
     sock.ev.on('messages.upsert', ({ messages }) => {
