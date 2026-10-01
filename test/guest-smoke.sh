@@ -24,6 +24,11 @@ cat >> "$CAGE_HOME/cage.env" <<EOF
 CAGE_TELEGRAM_ALLOW="111"
 CAGE_TELEGRAM_TOKEN_$A="123456:FAKE-token-for-smoke-test"
 EOF
+# WhatsApp (claude only, to keep CI quick): the adapter installs, registers with cc-connect's bridge and gets a
+# linking code from WhatsApp. Nobody scans it, so the test stops there.
+if [ "$A" = claude ]; then
+  printf 'CAGE_WHATSAPP_MODE_claude="spare"\nCAGE_WHATSAPP_ALLOW_claude="15552223333"\nCAGE_WHATSAPP_TOKEN_claude="0123456789abcdef0123"\n' >> "$CAGE_HOME/cage.env"
+fi
 # A connector with a key: microsandbox would hand the VM a placeholder for it, so the container gets one too.
 printf 'smoke-key\n' | PATH="$T/bin:$PATH" "$ROOT/cage" connect add demo https://mcp.deepwiki.com/mcp --header X-Cage-Key 2>/dev/null
 PATH="$T/bin:$PATH" "$ROOT/cage" up "$A" 2>/dev/null
@@ -83,6 +88,18 @@ case "$A" in
   antigravity) docker exec "$NAME" jq -e '.mcpServers.demo.serverUrl == "https://mcp.deepwiki.com/mcp"' /home/agent/.gemini/config/mcp_config.json >/dev/null || fail "agy config" ;;
 esac
 ok "connectors: $mcp sees the app; its config holds only the placeholder"
+
+if [ "$A" = claude ]; then
+  wait_for "cage-whatsapp: bridge connected" 300
+  for _ in $(seq 1 30); do
+    st="$(docker exec "$NAME" cat /home/agent/.cage/whatsapp/status.json 2>/dev/null || true)"
+    [[ "$st" == *'"state":"qr"'* ]] && break
+    sleep 2
+  done
+  [[ "$st" == *'"state":"qr"'* ]] || fail "WhatsApp gave no linking code: $st"
+  grep -q 'bridge: adapter registered" platform=whatsapp' <<<"$(docker logs "$NAME" 2>&1)" || fail "cc-connect didn't register the adapter"
+  ok "whatsapp: the adapter installed, registered with cc-connect's bridge and got a linking code from WhatsApp"
+fi
 
 logs="$(docker logs "$NAME" 2>&1)"
 grep -q 'config loaded' <<<"$logs" || fail "cc-connect did not load its config"

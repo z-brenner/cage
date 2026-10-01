@@ -263,4 +263,25 @@ cage chat rm slack claude 2>/dev/null || fail "chat rm"
 grep -q 'CAGE_SLACK_' "$env_file" && fail "Slack settings left behind: $(grep SLACK "$env_file")"
 ok "chat: Slack (prefilled app, Socket Mode) and Discord (intent switched on, invite link) join a VM's bot, owner-only"
 
+# --- WhatsApp: on top of another chat app; a spare number (only the owner's phone) or the owner's own number
+if printf 'spare\n+15552223333\n' | cage chat add whatsapp cursor 2>/dev/null; then fail "WhatsApp was added to an agent nobody can reach otherwise"; fi
+printf '%s\n' 'maybe' 'spare' '12' '+1 (555) 222-3333' | cage chat add whatsapp claude 2>"$T/wa.err" || fail "chat add whatsapp: $(cat "$T/wa.err")"
+grep -qxF 'CAGE_WHATSAPP_MODE_claude="spare"' "$env_file" && grep -qxF 'CAGE_WHATSAPP_ALLOW_claude="15552223333"' "$env_file" \
+  || fail "whatsapp settings: $(grep WHATSAPP "$env_file")"
+grep -qE '^CAGE_WHATSAPP_TOKEN_claude="[a-f0-9]{32}"$' "$env_file" || fail "no bridge token"
+grep -q 'banned numbers' "$T/wa.err" || fail "no warning about WhatsApp's rules"
+grep -q 'cage chat link whatsapp claude' "$T/wa.err" || fail "no next step without a terminal"
+printf '%s\n' 'mine' 'y' | cage chat add whatsapp codex 2>/dev/null || fail "own-number whatsapp"
+PATH="$T/msbbin:$PATH" cage up claude codex 2>/dev/null
+grep -qx '\[bridge\]' "$cl" && grep -qx 'enabled = true' "$cl" || fail "no bridge in claude's config: $(cat "$cl")"
+grep -qx 'admin_from = "4242,15552223333"' "$cl" || fail "whatsapp owner isn't an admin: $(grep admin_from "$cl")"
+w="$CAGE_HOME/agents/claude/whatsapp.env"
+[ "$(stat -c %a "$w")" = 600 ] && grep -qx 'WA_MODE=spare' "$w" && grep -qx 'WA_ALLOW=15552223333' "$w" && grep -qx 'WA_NAME=Claude' "$w" || fail "whatsapp.env: $(cat "$w")"
+grep -qx 'WA_MODE=own' "$CAGE_HOME/agents/codex/whatsapp.env" && grep -q 'admin_from = "4242,me"' "$cx" || fail "own-number mode: $(grep admin_from "$cx")"
+grep -q 'cage-claude .*--tls-bypass \*.whatsapp.net' "$T/msb.log" || fail "WhatsApp traffic would be intercepted"
+out="$(cage chat 2>&1)"; grep -q 'codex .*WhatsApp (your own number)' <<<"$out" || fail "chat list: $out"
+cage chat rm whatsapp codex 2>/dev/null && PATH="$T/msbbin:$PATH" cage up codex 2>/dev/null
+[ ! -e "$CAGE_HOME/agents/codex/whatsapp.env" ] && ! grep -qx '\[bridge\]' "$cx" || fail "whatsapp not removed"
+ok "whatsapp: spare or own number, owner-only, bridge and adapter settings for the VM, removable"
+
 echo "all $pass setup tests passed"

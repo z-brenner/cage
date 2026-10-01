@@ -53,6 +53,9 @@ chmod 644 /etc/cage/runtime.env
 bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
 bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing without them)"
 
+# WhatsApp, if it's on for this agent: an adapter that talks to cc-connect's bridge (guest/whatsapp.sh)
+if [ -r /cage-config/whatsapp.env ]; then bash /cage/whatsapp.sh "$KIND" & fi
+
 log "starting cc-connect as $U"
 while true; do
   runuser -u "$U" -- env -i HOME="$H" USER="$U" LOGNAME="$U" SHELL=/bin/bash LANG=C.UTF-8 \
