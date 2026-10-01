@@ -18,14 +18,52 @@ log = open(sys.argv[2], "a")
 OWNER = {"id": 4242, "is_bot": False, "first_name": "Zack"}
 MANAGED = [{"update_id": 900 + i, "managed_bot": {"user": OWNER, "bot": {"id": bid, "is_bot": True, "first_name": n, "username": u}}}
            for i, (bid, n, u) in enumerate([(1001, "Claude", "dot_claude_bot"), (1002, "Codex", "dot_codex_bot")])]
+DISCORD_APP = {"id": "777", "name": "Codex", "flags": 0, "owner": {"id": "4242", "username": "zack"}, "bot_public": True}
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def auth(self): return self.headers.get("Authorization", "")
+    def slack(self, body):  # Slack Web API: xoxb-GOOD… / xapp-GOOD… work; two people have emails
+        method = self.path.split("/")[2].split("?")[0]
+        log.write("slack " + method + " " + self.auth() + "\n"); log.flush()
+        if method == "auth.test":
+            ok = self.auth().startswith("Bearer xoxb-GOOD")
+            return self.reply(200, {"ok": True, "team": "Acme", "user_id": "UBOT"} if ok else {"ok": False, "error": "invalid_auth"})
+        if method == "apps.connections.open":
+            ok = self.auth().startswith("Bearer xapp-GOOD")
+            return self.reply(200, {"ok": True, "url": "wss://x"} if ok else {"ok": False, "error": "invalid_auth"})
+        if method == "users.lookupByEmail":
+            uid = {"zack%40acme.com": "U0ZACK", "amy%40acme.com": "U0AMY"}.get(self.path.split("email=")[-1])
+            return self.reply(200, {"ok": True, "user": {"id": uid, "name": "x"}} if uid else {"ok": False, "error": "users_not_found"})
+        self.reply(404, {"ok": False})
+    def discord(self, body):  # Discord REST: tokens with GOOD in them work; replies spaced like Discord's
+        path = self.path[len("/discord"):]
+        log.write("discord " + self.command + " " + path + " " + body.decode()[:40] + "\n"); log.flush()
+        if "GOOD" not in self.auth():
+            return self.reply(401, {"message": "401: Unauthorized", "code": 0}, spaced=True)
+        if path == "/applications/@me" and self.command == "PATCH":
+            DISCORD_APP["flags"] = json.loads(body)["flags"]
+        if path == "/applications/@me":
+            return self.reply(200, DISCORD_APP, spaced=True)
+        if path == "/users/@me/guilds":
+            return self.reply(200, [{"id": "55", "name": "Zack's server"}], spaced=True)
+        if path == "/users/@me":
+            return self.reply(200, {"id": "777", "username": "Codex"}, spaced=True)
+        self.reply(404, {"message": "404"}, spaced=True)
+    def do_PATCH(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/discord/users/@me":
+            log.write("discord avatar " + ("ok" if b'"data:image/jpeg;base64,/9j/' in body else "bad") + "\n"); log.flush()
+            return self.reply(200, {"id": "777"}, spaced=True)
+        return self.discord(body)
     def do_POST(self):  # setMyProfilePhoto: multipart upload
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path.startswith("/slack/"): return self.slack(body)
         ok = b'attach://avatar' in body and b'name="avatar"' in body and b'\xff\xd8' in body
         log.write(self.path + (" photo-ok\n" if ok else " photo-bad\n")); log.flush()
         self.reply(200 if ok else 400, {"ok": ok})
     def do_GET(self):
+        if self.path.startswith("/slack/"): return self.slack(b"")
+        if self.path.startswith("/discord/"): return self.discord(b"")
         log.write(self.path + "\n"); log.flush()
         m = re.match(r"^/bot([^/]+)/(\w+)", self.path)
         token, method = m.group(1), m.group(2)
@@ -53,8 +91,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 "from": {"id": 4242, "is_bot": False, "first_name": "Zack", "username": "zack"},
                 "chat": {"id": 4242, "type": "private"}, "date": 0, "text": "hi"}}]})
         self.reply(404, {"ok": False})
-    def reply(self, code, body):
-        data = json.dumps(body, separators=(",", ":")).encode()
+    def reply(self, code, body, spaced=False):
+        data = json.dumps(body, separators=(", ", ": ") if spaced else (",", ":")).encode()
         self.send_response(code); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
 s = http.server.HTTPServer(("127.0.0.1", 0), H)
@@ -67,6 +105,7 @@ for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
 [ -s "$T/port" ] || fail "mock server did not start"
 port="$(cat "$T/port")"
 export CAGE_TELEGRAM_API="http://127.0.0.1:$port" CAGE_HOME="$T/home" HOME="$T/userhome"
+export CAGE_SLACK_API="http://127.0.0.1:$port/slack" CAGE_DISCORD_API="http://127.0.0.1:$port/discord"
 unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
 unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 mkdir -p "$HOME"
@@ -187,5 +226,41 @@ grep -q 'GOODclaude/getUpdates' "$T/requests.log" && fail "waited for a message 
 grep -q '^/bot1001:GOODclaude/setMyProfilePhoto photo-ok$' "$T/requests.log" || fail "managed bot got no avatar"
 grep -q 'locked to Zack' "$T/m.err" || fail "setup didn't say the bots are locked: $(cat "$T/m.err")"
 ok "managed bots: one manager, one tap per agent, tokens fetched, creator allowlisted, bots locked to them"
+
+# --- Slack and Discord: the same agent, reachable from more places; owner-only unless the user opens it up
+printf '%s\n' 'not-a-token' 'xoxb-REVOKED-1234567890' 'xoxb-GOOD-1234567890' 'xapp-GOOD-1234567890' 'nobody@acme.com' 'zack@acme.com' \
+  | cage chat add slack claude 2>"$T/slack.err" || fail "chat add slack failed: $(cat "$T/slack.err")"
+grep -q 'api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information' "$T/slack.err" || fail "no prefilled Slack app link: $(cat "$T/slack.err")"
+grep -q 'socket_mode_enabled%22%3Atrue' "$T/slack.err" || fail "the Slack app doesn't use Socket Mode"
+grep -q 'messages_tab_enabled%22%3Atrue' "$T/slack.err" || fail "people couldn't DM the Slack app"
+for want in 'CAGE_SLACK_BOT_TOKEN_claude="xoxb-GOOD-1234567890"' 'CAGE_SLACK_APP_TOKEN_claude="xapp-GOOD-1234567890"' \
+            'CAGE_SLACK_OWNER_claude="U0ZACK"' 'CAGE_SLACK_ALLOW_claude="U0ZACK"' 'CAGE_SLACK_TEAM_claude="Acme"'; do
+  grep -qxF "$want" "$env_file" || fail "missing $want: $(grep SLACK "$env_file")"
+done
+grep -q "not a bot token" "$T/slack.err" && grep -q "invalid_auth" "$T/slack.err" && grep -q "no one in Acme" "$T/slack.err" \
+  || fail "bad tokens or an unknown email weren't explained: $(cat "$T/slack.err")"
+grep -q 'xoxb-GOOD' "$T/slack.err" && fail "a token was echoed"
+printf '%s\n' 'nope' 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.REVOKEDxxxxxxxxxxxxxxxxxxxxxxx' 'MTAwMDAwMDAwMDAwMDAwMDAw.GOODxx.cccccccccccccccccccccccccccc' \
+  | cage chat add discord codex 2>"$T/discord.err" || fail "chat add discord failed: $(cat "$T/discord.err")"
+grep -q 'discord PATCH /applications/@me {"flags": 524288}' "$T/requests.log" || fail "Message Content intent not switched on: $(grep discord "$T/requests.log")"
+grep -q 'discord avatar ok' "$T/requests.log" || fail "the Discord bot got no face"
+grep -q 'discord.com/oauth2/authorize?client_id=777&scope=bot&permissions=' "$T/discord.err" || fail "no invite link: $(cat "$T/discord.err")"
+grep -q "joined Zack's server" "$T/discord.err" || fail "didn't notice it joined a server"
+grep -qxF 'CAGE_DISCORD_OWNER_codex="4242"' "$env_file" && grep -qxF 'CAGE_DISCORD_ALLOW_codex="4242"' "$env_file" || fail "discord owner/allowlist"
+out="$(cage chat 2>&1)"
+grep -q 'claude .*Telegram @dot_claude_bot · Slack (Acme)' <<<"$out" && grep -q 'codex .*Discord' <<<"$out" || fail "chat list: $out"
+mkdir -p "$T/msbbin"; printf '#!/bin/sh\necho "$*" >> "%s/msb.log"\n[ "$1" = inspect ] && exit 1\nexit 0\n' "$T" > "$T/msbbin/msb"; chmod +x "$T/msbbin/msb"
+printf 'k\n' | cage secret add MY_KEY api.example.com claude codex 2>/dev/null
+PATH="$T/msbbin:$PATH" cage up claude codex 2>/dev/null
+cl="$CAGE_HOME/agents/claude/cc-connect.toml" cx="$CAGE_HOME/agents/codex/cc-connect.toml"
+grep -q '^type = "slack"$' "$cl" && grep -q '^type = "telegram"$' "$cl" || fail "claude config lacks a platform: $(cat "$cl")"
+grep -qx 'allow_from = "U0ZACK"' "$cl" && grep -qx 'admin_from = "4242,U0ZACK"' "$cl" || fail "claude slack allowlist/admins: $(cat "$cl")"
+grep -q '^type = "discord"$' "$cx" && grep -qx 'allow_from = "4242"' "$cx" || fail "codex discord: $(cat "$cx")"
+grep -q 'type = "slack"' "$cx" && fail "codex got claude's Slack"
+grep -q 'cage-claude .*--tls-bypass \*.slack.com' "$T/msb.log" || fail "Slack traffic would be intercepted: $(cat "$T/msb.log")"
+grep -q 'cage-codex .*--tls-bypass gateway.discord.gg\|cage-codex .*--tls-bypass \*.discord.gg' "$T/msb.log" || fail "Discord traffic would be intercepted"
+cage chat rm slack claude 2>/dev/null || fail "chat rm"
+grep -q 'CAGE_SLACK_' "$env_file" && fail "Slack settings left behind: $(grep SLACK "$env_file")"
+ok "chat: Slack (prefilled app, Socket Mode) and Discord (intent switched on, invite link) join a VM's bot, owner-only"
 
 echo "all $pass setup tests passed"

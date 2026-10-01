@@ -275,6 +275,17 @@ unset WSL_DISTRO_NAME
 ok "without Windows interop, up warns that WSL will stop the VMs"
 
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
+  cat >> "$CAGE_HOME/cage.env" <<'EOF'
+CAGE_SLACK_BOT_TOKEN_claude="xoxb-1111-2222-fakefakefake"
+CAGE_SLACK_APP_TOKEN_claude="xapp-1-A111-2222-fakefake"
+CAGE_SLACK_OWNER_claude="U0ZACK"
+CAGE_SLACK_ALLOW_claude="U0ZACK"
+CAGE_DISCORD_TOKEN_claude="MTAwMDAwMDAwMDAwMDAwMDAw.GOODxx.cccccccccccccccccccccccccccc"
+CAGE_DISCORD_OWNER_claude="4242"
+CAGE_DISCORD_ALLOW_claude="4242"
+EOF
+  cage up claude 2>"$T/cc-up.err" || fail "up with Slack and Discord: $(cat "$T/cc-up.err")"
+  grep -q '^type = "discord"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude has no Discord block to validate"
   for a in claude codex cursor antigravity; do
     out="$(HOME="$T/cc-$a" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$CAGE_HOME/agents/$a/cc-connect.toml" 2>&1 || true)"
     # Loading must succeed. Creating the agent may still fail here (no /home/agent/work on this host).

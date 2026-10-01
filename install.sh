@@ -22,8 +22,11 @@ missing=()
 for c in git curl; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
 if [ ${#missing[@]} -gt 0 ]; then
   command -v apt-get >/dev/null 2>&1 || die "please install ${missing[*]} first"
+  command -v qrencode >/dev/null 2>&1 || missing+=(qrencode)   # QR codes for links you open on your phone
   ok "installing ${missing[*]} (needs your password)"
   sudo apt-get update -qq && sudo apt-get install -y -qq "${missing[@]}" >/dev/null
+elif ! command -v qrencode >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  sudo apt-get install -y -qq qrencode >/dev/null 2>&1 || true   # optional; only when sudo needs no password
 fi
 
 if [ -d "$DIR/.git" ]; then
