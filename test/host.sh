@@ -167,6 +167,51 @@ cage secret rm GITHUB_TOKEN 2>/dev/null || fail "secret rm failed"
 [ ! -e "$CAGE_HOME/secrets/GITHUB_TOKEN" ] || fail "secret not removed"
 ok "secrets: kept on the host, passed to msb by environment, interception only where needed, VMs learn names only"
 
+# connectors: a built-in app or any MCP address. The key becomes a secret only that app's hosts get; each VM learns
+# addresses and secret names, never the key; removing a connector deletes its key
+out="$(cage connect 2>&1)"
+for c in zapier github linear; do grep -q "$c" <<<"$out" || fail "connect list lacks $c: $out"; done
+printf 'zap_s3cret\n' | cage connect add zapier 2>/dev/null || fail "connect add zapier failed"
+grep -qx 'connector=zapier' "$CAGE_HOME/secrets/ZAPIER_MCP_TOKEN.conf" || fail "zapier's key isn't saved as its secret"
+grep -qx 'hosts=mcp.zapier.com' "$CAGE_HOME/secrets/ZAPIER_MCP_TOKEN.conf" || fail "zapier's key may go to the wrong hosts"
+printf '\n' | cage connect add notes https://notes.example.com/mcp 2>/dev/null || fail "connect add without a key failed"
+printf 'crm_s3cret\n' | cage connect add crm https://crm.example.com:8443/v1/mcp --header X-API-Key codex 2>/dev/null \
+  || fail "connect add --header failed"
+out="$(cage connect 2>&1)"
+grep -q '✓ zapier.*all agents' <<<"$out" && grep -q '✓ crm.*crm.example.com.*codex' <<<"$out" || fail "connect list: $out"
+: > "$MSB_LOG"; : > "$T/env.log"
+MSB_ENV_LOG="$T/env.log" cage up claude codex 2>/dev/null
+cl="$(grep -- '--name | cage-claude |' "$MSB_LOG")" cx="$(grep -- '--name | cage-codex |' "$MSB_LOG")"
+[[ "$cl" == *"--secret | ZAPIER_MCP_TOKEN@mcp.zapier.com"* ]] || fail "claude's VM lacks zapier's key: $cl"
+[[ "$cl" == *CRM_MCP_TOKEN* ]] && fail "claude got codex's crm key: $cl"
+[[ "$cx" == *"--secret | CRM_MCP_TOKEN@crm.example.com"* ]] || fail "codex's VM lacks the crm key: $cx"
+grep -qx 'ZAPIER_MCP_TOKEN=zap_s3cret' "$T/env.log" || fail "msb didn't get zapier's key in its environment"
+cage up cursor 2>/dev/null
+grep -q '^cmd = "cursor-agent --approve-mcps"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor won't use its apps headless"
+L="$CAGE_HOME/agents/claude/connectors.list"
+grep -qx 'zapier|https://mcp.zapier.com/api/v1/connect|Authorization|ZAPIER_MCP_TOKEN' "$L" || fail "claude's connectors: $(cat "$L")"
+grep -qx 'notes|https://notes.example.com/mcp|Authorization|' "$L" || fail "keyless connector: $(cat "$L")"
+grep -q '^crm|' "$L" && fail "claude was given codex's connector"
+grep -qx 'crm|https://crm.example.com:8443/v1/mcp|X-API-Key|CRM_MCP_TOKEN' "$CAGE_HOME/agents/codex/connectors.list" || fail "codex's connectors"
+grep -q '^- zapier: Gmail' "$CAGE_HOME/agents/claude/connectors.md" || fail "the agent isn't told what zapier is"
+grep -rqE 'zap_s3cret|crm_s3cret' "$CAGE_HOME/agents" "$MSB_LOG" "$CAGE_HOME/connectors" && fail "a key leaked out of ~/.cage/secrets"
+# shellcheck disable=SC2089  # the quote in the last address is the point: it must be rejected
+for bad in "nope" "Bad https://x.example.com/mcp" "evil http://x.example.com/mcp" "evil https://api.anthropic.com/mcp claude" \
+           "evil https://x.example.com/mcp nobody" "zapier https://evil.example.com/mcp" "evil https://x.example.com/a\"b" \
+           "evil https://x.example.com/\$HOME" "leaky https://x.example.com/mcp?Token=abc"; do
+  # shellcheck disable=SC2086,SC2090
+  if printf 'x\n' | cage connect add $bad 2>/dev/null; then fail "accepted: connect add $bad"; fi
+done
+if printf '\n' | cage connect add linear 2>/dev/null; then fail "a built-in connector was added without its key"; fi
+if cage secret rm ZAPIER_MCP_TOKEN 2>/dev/null; then fail "secret rm removed a connector's key"; fi
+cage connect rm zapier 2>/dev/null || fail "connect rm failed"
+[ ! -e "$CAGE_HOME/connectors/zapier.conf" ] && [ ! -e "$CAGE_HOME/secrets/ZAPIER_MCP_TOKEN" ] || fail "connect rm left zapier or its key"
+cage connect rm crm 2>/dev/null && cage connect rm notes 2>/dev/null || fail "connect rm failed"
+cage up claude cursor 2>/dev/null
+[ ! -s "$CAGE_HOME/agents/claude/connectors.list" ] || fail "a removed connector is still handed to the VM"
+grep -q '^cmd = "cursor-agent"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor approves MCP servers with no apps connected"
+ok "connectors: built-in or any address, key kept as a secret for that app's hosts, VMs get addresses and names only"
+
 # on a real terminal: colour, the pixel mascot on the home screen; NO_COLOR turns colour off
 if script --version 2>&1 | grep -q util-linux; then
   tty_run() { TERM=xterm-256color script -qfec "$*" /dev/null </dev/null 2>&1; }

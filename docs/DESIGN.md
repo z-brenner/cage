@@ -7,6 +7,8 @@ cage builds almost nothing itself. It is a few hundred lines of shell that wire 
 | Chat bot + drivers for the official agent CLIs: sessions, `/stop`, permission prompts, streaming progress, file send-back, cron, voice | **[cc-connect](https://github.com/chenhg5/cc-connect)** (MIT, Go, ~15.7k★, releases weekly) | The only project found that drives all four official CLIs headlessly on your own logins **and** speaks Telegram |
 | One VM per agent, persistent volumes, egress policy that blocks host/LAN/cloud-metadata | **[microsandbox](https://github.com/superradcompany/microsandbox)** (Apache-2.0, ~8.5k★, released today) | The only open-source microVM runtime found that covers both Apple-Silicon Macs and Linux/KVM with a simple CLI |
 | The agents themselves | the vendors' **unmodified official CLIs** | Terms of service (see the README) |
+| Keys the agents can use but never see | **microsandbox secrets** | The VM holds a placeholder; the real key is swapped in outside the VM, only for hosts you allow |
+| Apps (Gmail, Calendar, Slack, GitHub…) | **remote MCP servers**, wired into each CLI's own config; **[Zapier MCP](https://mcp.zapier.com)** for most apps | Every CLI speaks MCP. Zapier handles the browser sign-ins for thousands of apps and gives back one key, which a microsandbox secret protects |
 
 What cage adds:
 - one cc-connect config per agent, generated from a single env file
@@ -53,4 +55,5 @@ Compared with the first, hand-built version (branch `claude/cage-agent-vms`):
 - **Pre-send PII redaction.** cc-connect has no message hook. The right fix is a small upstream PR adding a `message_filter` command hook, which is also where a Sonomos masker would plug in. I'd rather propose that upstream than maintain a fork.
 - **A single `/all` command.** Replaced by group @mentions (above).
 - **Lima/Firecracker/local backends.** Replaced by microsandbox.
+- **Apps that only offer browser sign-in (OAuth) as MCP servers**, like Notion's and Google's own. Their tokens would have to live in the VM, which is what secrets avoid. The way to support them is a gateway on the host that signs in once and hands each VM a key-protected address. [IBM ContextForge](https://github.com/IBM/mcp-context-forge) and [mcp-proxy](https://github.com/TBXark/mcp-proxy) are candidates. Until then, Zapier covers most of these apps.
 

@@ -24,6 +24,8 @@ cat >> "$CAGE_HOME/cage.env" <<EOF
 CAGE_TELEGRAM_ALLOW="111"
 CAGE_TELEGRAM_TOKEN_$A="123456:FAKE-token-for-smoke-test"
 EOF
+# A connector with a key: microsandbox would hand the VM a placeholder for it, so the container gets one too.
+printf 'smoke-key\n' | PATH="$T/bin:$PATH" "$ROOT/cage" connect add demo https://mcp.deepwiki.com/mcp --header X-Cage-Key 2>/dev/null
 PATH="$T/bin:$PATH" "$ROOT/cage" up "$A" 2>/dev/null
 sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md"
 
@@ -31,7 +33,7 @@ sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md
 docker run -d --name "$NAME" \
   -v "$ROOT/guest:/cage:ro" -v "$CAGE_HOME/agents/$A:/cage-config:ro" -v "$VOL:/home/agent" \
   -v "$CAGE_HOME/brain/memory:/memory:ro" -v "$CAGE_HOME/brain/inbox/$A:/memory-inbox" \
-  -e CC_CONNECT_VERSION=v1.5.0 ${CAGE_TEST_DOCKER_ARGS:-} \
+  -e CC_CONNECT_VERSION=v1.5.0 -e 'DEMO_MCP_TOKEN=$MSB_DEMO_MCP_TOKEN' ${CAGE_TEST_DOCKER_ARGS:-} \
   ubuntu:24.04 /bin/bash /cage/entry.sh "$A" >/dev/null
 
 wait_for() { # wait_for <pattern> <seconds>
@@ -62,6 +64,25 @@ docker exec -u agent "$NAME" sh -c 'echo "# Remember" > /memory-inbox/smoke.md' 
 [ -f "$CAGE_HOME/brain/inbox/$A/smoke.md" ] || fail "inbox note didn't reach the host"
 if docker exec -u agent "$NAME" sh -c 'echo x > /memory/x.md' 2>/dev/null; then fail "/memory is writable"; fi
 ok "memory: about-me.md wired into AGENTS.md (and CLAUDE.md), inbox writable, /memory read-only"
+
+# connectors: the agent's own CLI has the app, with the placeholder (never the key) in the header
+hx() { docker exec -u agent -e HOME=/home/agent "$NAME" bash -lc "set -a; . /etc/cage/runtime.env; set +a; $1"; }
+docker exec "$NAME" grep -qx 'MSB_DEMO_MCP_TOKEN=\\$MSB_DEMO_MCP_TOKEN' /etc/cage/runtime.env || fail "placeholder not set to itself"
+docker exec "$NAME" grep -rqF 'smoke-key' /home/agent /etc/cage && fail "the key reached the VM"
+docker exec "$NAME" grep -q '^- demo: mcp.deepwiki.com' /home/agent/work/AGENTS.md || fail "AGENTS.md doesn't list the connector"
+case "$A" in
+  claude) mcp="claude mcp list" ;; codex) mcp="codex mcp get demo" ;;
+  cursor) mcp="cursor-agent mcp list" ;; antigravity) mcp="agy mcp list" ;;
+esac
+for _ in 1 2 3 4 5 6; do out="$(hx "$mcp" 2>&1 || true)"; grep -qE 'demo.*(Connected|ready)|transport: streamable_http|demo +http' <<<"$out" && break; sleep 10; done
+grep -qE 'demo.*(Connected|ready)|transport: streamable_http|demo +http' <<<"$out" || fail "$mcp doesn't show the demo connector: $out"
+case "$A" in
+  claude) grep -qF 'X-Cage-Key: $MSB_DEMO_MCP_TOKEN' <<<"$(hx 'claude mcp get demo' 2>&1)" || fail "claude's header isn't the placeholder" ;;
+  codex) docker exec "$NAME" grep -qF '"X-Cage-Key" = "$MSB_DEMO_MCP_TOKEN"' /home/agent/.codex/config.toml || fail "codex header" ;;
+  cursor) docker exec "$NAME" jq -e '.mcpServers.demo.headers["X-Cage-Key"] == "$MSB_DEMO_MCP_TOKEN"' /home/agent/.cursor/mcp.json >/dev/null || fail "cursor header" ;;
+  antigravity) docker exec "$NAME" jq -e '.mcpServers.demo.serverUrl == "https://mcp.deepwiki.com/mcp"' /home/agent/.gemini/config/mcp_config.json >/dev/null || fail "agy config" ;;
+esac
+ok "connectors: $mcp sees the app; its config holds only the placeholder"
 
 logs="$(docker logs "$NAME" 2>&1)"
 grep -q 'config loaded' <<<"$logs" || fail "cc-connect did not load its config"

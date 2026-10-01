@@ -55,6 +55,7 @@ cage down [agents]    put them to sleep
 cage login <agent>    sign an agent in to your subscription
 cage logs <agent>     watch what an agent's VM is doing
 cage memory           review what your agents want to remember
+cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
 cage secret add …     give agents a key they can use but never see
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
@@ -72,6 +73,23 @@ Your agents share one memory, and it's yours: a folder of plain notes on your co
 - **`about-me.md`** is read by every agent before every conversation. Setup asks three quick questions to start it.
 - **Agents suggest; you decide.** When an agent learns something worth keeping, it drops a note in its own inbox. `cage memory` shows you each one: keep it and every agent knows it, or forget it. The home screen tells you when there's something to review.
 - **Why the extra step:** a note one agent writes can't quietly become instructions for the others. Agents can read your approved notes but never change them, and they can't see each other's inboxes.
+
+## Connect your apps
+
+```bash
+cage connect                                   # what you can connect, and what's connected
+cage connect add zapier                        # Gmail, Calendar, Drive, Slack, Notion and thousands more
+cage connect add github                        # repositories, issues and pull requests
+cage connect add linear                        # issues and projects
+cage connect add crm https://example.com/mcp   # any other app with an MCP address
+```
+
+Each one shows you where to get a key, then wires the app into every agent's own CLI as an MCP server. The key is kept like the ones [below](#keys-your-agents-can-use-but-never-see): it stays on your computer, and only that app's own servers ever see it.
+
+- **Zapier is the shortcut.** You sign in to Gmail, Google Calendar, Slack and the rest on Zapier's site and choose what your agents may do there; one key covers all of it.
+- **Claude** also gets the connectors on your claude.ai account (Settings → Connectors), because it signs in with that account.
+- **Apps that only offer browser sign-in** (Notion's and Google's own MCP servers, for example) can't be connected directly yet. Use them through Zapier.
+- Adding or removing an app restarts the agents that are awake, which takes a minute or two.
 
 ## Keys your agents can use but never see
 
@@ -108,7 +126,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 - **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
 - **Network:** microsandbox's default policy. The public internet is allowed; your host, LAN, loopback and cloud-metadata endpoints are blocked. You can tighten this to a domain allowlist via `CAGE_MSB_EXTRA_ARGS` (`--net-rule`; see the [microsandbox networking docs](https://docs.microsandbox.dev/networking/overview.md)).
 - **Only the allowlisted Telegram user ids** in `CAGE_TELEGRAM_ALLOW` can talk to the bots. They are also the only admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
-- **Mounts:** the only host paths a VM sees, both read-only, are `guest/` (the provisioning scripts) and its own generated config.
+- **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox.
 - **Known gap: each bot's Telegram token lives inside that agent's VM.** An agent that gets prompt-injected could read it and impersonate its bot.
   - microsandbox's secret substitution can't cover this, because Telegram puts the token in the URL path.
   - cc-connect's `run_as_user` split could, but it supports only Claude Code today.
@@ -123,15 +141,6 @@ The rule is the same across vendors: **the official CLI with your own login is f
 - **OpenAI** supports ChatGPT sign-in with `codex exec`; its docs still call API keys the default for automation.
 - **Google** retired Gemini CLI for AI Pro/Ultra subscribers on **2026-06-18** ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)); Antigravity CLI replaced it. Google has suspended accounts for using its CLI OAuth from third-party software. cc-connect runs the official `agy` binary, but if losing that Google account would hurt, use a separate one.
 - **Cursor:** headless mode is documented. How API-key billing works is unclear; cage uses the normal login.
-
-## Terms of service
-
-**The official CLI with your own login is fine. Extracting its tokens or sharing your subscription is not.** cage never reads or moves tokens: each vendor's own CLI signs in and runs inside your VM.
-
-- **Anthropic** allows "an end user signing in to the unmodified Claude Code binary with their own Claude subscription", and bars routing other people's requests through Pro/Max. **Personal use only.**
-- **OpenAI** supports ChatGPT sign-in with `codex exec`; its docs still call API keys the default for automation.
-- **Google:** see the Antigravity note above.
-- **Cursor:** headless mode is documented; cage uses the normal login.
 
 ## How it's built
 

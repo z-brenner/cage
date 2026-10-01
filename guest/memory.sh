@@ -50,6 +50,15 @@ render() {
     cat /cage-config/secrets.md
     echo
   fi
+  if [ -s /cage-config/connectors.md ]; then
+    echo "## Apps you're connected to"
+    echo
+    echo "Your user connected these apps for you. Their tools are in your MCP tool list; use them when a task"
+    echo "involves the app. Ask before sending, deleting or buying anything on your user's behalf."
+    echo
+    head -c 4000 /cage-config/connectors.md
+    echo
+  fi
   echo "## Remembering something new"
   echo
   echo "When you learn something about your user worth keeping (a preference, a person, a project, a decision),"
