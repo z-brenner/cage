@@ -31,6 +31,8 @@ jobs:
           curl -fsSL https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz | tar -xz -C "$RUNNER_TEMP"
           CAGE_TEST_CC_CONNECT="$RUNNER_TEMP/cc-connect-v1.5.0-linux-amd64" test/host.sh
           test/setup.sh
+      - name: browser sign-in (OAuth) against a mock MCP server
+        run: test/oauth.sh
       - name: host + setup tests (bash 3.2, as shipped on macOS)
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2

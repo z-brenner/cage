@@ -645,9 +645,17 @@ secret_add() { # secret_add NAME HOST[,HOST...] [agent...]
   [ -z "$(conf_get "$SECRETS/$name.conf" connector)" ] || die "$name belongs to the $(conf_get "$SECRETS/$name.conf" connector) connector: cage connect add $(conf_get "$SECRETS/$name.conf" connector)"
   prompt "$(brand) value for $name (stays hidden): " value secret
   [ -n "$value" ] || die "empty value; nothing saved"
+  local existed=0
+  [ -f "$SECRETS/$name.conf" ] && [ "$(conf_get "$SECRETS/$name.conf" hosts)" = "$hosts" ] && existed=1
   secret_save "$name" "$hosts" "$agents" "$value"
   ok "$name saved on this computer; agents only ever see a placeholder"
-  hint "it works only for requests to $hosts, by $(agents_label "$agents"). Apply it: cage up"
+  local rc=1
+  if [ $existed = 1 ]; then secret_rotate "$name" && rc=0 || rc=$?; fi
+  case $rc in
+    0) hint "running agents use the new value now" ;;
+    2) hint "your agents use it from the next time they wake up" ;;
+    *) hint "it works only for requests to $hosts, by $(agents_label "$agents"). Apply it: cage up" ;;
+  esac
 }
 
 secret_list() {
@@ -830,11 +838,15 @@ cmd_password() {
 # (guest/connectors.sh). A connector's key is saved as a secret (above), so the VM only ever holds a placeholder,
 # which microsandbox swaps for the real key on its way to that app's own servers.
 CONNECTORS="$CAGE_HOME/connectors"
-# name | what your agents get | MCP server | hosts its key may go to | where to get a key | steps there (";"-separated)
+# name | what your agents get | MCP server | hosts its key may go to | where to get a key ("oauth": you sign in in
+# the browser instead) | steps there (";"-separated)
 CATALOG=(
   "zapier|Gmail, Calendar, Drive, Slack, Notion and thousands more apps, through Zapier|https://mcp.zapier.com/api/v1/connect|mcp.zapier.com|https://mcp.zapier.com|sign in (a free Zapier account works), create a server and choose \"Other\" as the client;add the apps and actions you want your agents to have;on the Connect tab, generate a token and copy it"
   "github|GitHub: repositories, issues and pull requests|https://api.githubcopilot.com/mcp/|api.githubcopilot.com,api.github.com|https://github.com/settings/personal-access-tokens/new|pick the repositories and what it may do (Contents, Issues, Pull requests);generate the token and copy it"
   "linear|Linear: issues, projects and cycles|https://mcp.linear.app/mcp|mcp.linear.app,api.linear.app|https://linear.app/settings/account/security|under Personal API keys, create a key and copy it"
+  "notion|Notion: pages, databases and comments|https://mcp.notion.com/mcp|mcp.notion.com|oauth|"
+  "atlassian|Jira and Confluence|https://mcp.atlassian.com/v1/mcp|mcp.atlassian.com|oauth|"
+  "sentry|Sentry: errors and issues|https://mcp.sentry.dev/mcp|mcp.sentry.dev|oauth|"
   "browser|A web browser of its own (Chromium), for websites and the sign-ins you save with cage password|local:browser|||"
 )
 catalog_names() { local e out=""; for e in "${CATALOG[@]}"; do out="$out${out:+|}${e%%|*}"; done; echo "$out"; }
@@ -852,7 +864,7 @@ connector_secret() { printf '%s_MCP_TOKEN' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_
 url_host() { local h="${1#https://}"; h="${h%%[/?#]*}"; h="${h%%:*}"; printf '%s' "$h" | tr 'A-Z' 'a-z'; }
 
 connect_add() { # connect_add <name> [https://url [--header NAME]] [agent...]
-  local name="${1:-}" url hosts header=Authorization agents value="" secret title="" keyurl="" steps=() s i=2 a
+  local name="${1:-}" url hosts header=Authorization agents value="" secret title="" keyurl="" steps=() s i=2 a oauth=""
   local url_re='^https://[A-Za-z0-9._~:/?#@&+,;=%-]+$' key_re='[?&](token|key|apikey|api_key|access_token|secret)='
   [ -n "$name" ] || die "usage: cage connect add <$(catalog_names)> [agents]   or, for any other app: cage connect add NAME https://…/mcp"
   connector_name_ok "$name" || die "name it in lowercase letters, like notes or my-crm"
@@ -887,24 +899,29 @@ connect_add() { # connect_add <name> [https://url [--header NAME]] [agent...]
   printf '\n%s%s %s%s%s  %s%s%s\n' "$IND" "$(brand)" "$C_B" "$name" "$C_0" "$C_DIM" "${title:-$url}" "$C_0" >&2
   if [[ "$url" == local:* ]]; then
     :   # runs inside the VM; nothing to sign in to
+  elif [ "$keyurl" = oauth ]; then
+    oauth=1
   elif [ -n "$title" ]; then
     printf '%s  1. open %s\n' "$IND" "$(link "$keyurl")" >&2
     for s in ${steps[@]+"${steps[@]}"}; do printf '%s  %s. %s\n' "$IND" "$i" "$s" >&2; i=$((i + 1)); done
     prompt "paste it here (stays hidden): " value secret
     [ -n "$value" ] || die "no key; nothing saved"
   else
-    prompt "its key or token, if it needs one (stays hidden; Enter if none): " value secret
+    prompt "its key or token, if it needs one (stays hidden; Enter if none, or if you sign in in the browser): " value secret
+    [ -n "$value" ] || oauth=maybe
   fi
 
   mkdir -p "$CONNECTORS" && chmod 700 "$CONNECTORS"
-  if [ -n "$value" ]; then
+  if [ -n "$oauth" ] && oauth_login "$name" "$url" "$secret" "$hosts" "$agents" "$oauth"; then
+    value="(signed in)"
+  elif [ -n "$value" ]; then
     secret_save "$secret" "$hosts" "$agents" "$value" "$name"
   else
     rm -f "$SECRETS/$secret" "$SECRETS/$secret.conf"
     secret=""
   fi
   ( umask 077; printf 'url=%s\nheader=%s\nsecret=%s\nagents=%s\ntitle=%s\n' "$url" "$header" "$secret" "$agents" "$title" > "$CONNECTORS/$name.conf" )
-  ok "$name connected for $(agents_label "$agents")${secret:+; the key stays on this computer}"
+  ok "$name connected for $(agents_label "$agents")${secret:+; $( [ -n "$oauth" ] && echo "your sign-in" || echo "the key") stays on this computer}"
   connect_apply "$agents"
 }
 
@@ -919,6 +936,72 @@ browser_enable() { # browser_enable <agents|all>: gives these agents the browser
   ( umask 077; printf 'url=local:browser\nheader=Authorization\nsecret=\nagents=%s\ntitle=%s\n' "$merged" "$CT_TITLE" > "$f" )
   ok "they get a web browser to sign in with"
 }
+
+# --- apps you sign in to in the browser (OAuth) ------------------------------------------------------------------
+# host/mcp_oauth.py signs in on this computer, the way Claude or ChatGPT connect to an MCP server: it finds the
+# app's sign-in server, registers cage with it and opens your browser. The refresh token stays in ~/.cage/oauth;
+# the short-lived access token becomes the connector's secret, so the VMs only see a placeholder for it. While
+# agents are up, `cage _refresh` renews it before it expires and swaps the new one into running VMs (msb modify).
+OAUTH="$CAGE_HOME/oauth"
+oauth_login() { # oauth_login <name> <url> <secret> <hosts> <agents> <1|maybe>: false if no sign-in was needed
+  local name="$1" url="$2" secret="$3" hosts="$4" agents="$5" tmp rc=0
+  command -v python3 >/dev/null 2>&1 || die "signing in to $name needs python3 (sudo apt-get install python3)"
+  mkdir -p "$OAUTH" "$SECRETS" && chmod 700 "$OAUTH" "$SECRETS"
+  tmp="$(mktemp "$SECRETS/.oauth.XXXXXX")"
+  CAGE_OPEN="${CAGE_OPEN:-$CAGE_ROOT/cage _open}" python3 "$CAGE_ROOT/host/mcp_oauth.py" login "$OAUTH/$name.json" "$url" "$tmp" || rc=$?
+  if [ $rc = 4 ] && [ "$6" = maybe ]; then rm -f "$tmp"; return 1; fi   # it didn't need one after all
+  if [ $rc = 5 ] && [ "$6" = maybe ]; then
+    rm -f "$tmp"; warn "couldn't check whether $name needs a sign-in; saved without one"; return 1
+  fi
+  [ $rc = 0 ] || { rm -f "$tmp"; die "couldn't sign in to $name"; }
+  secret_save "$secret" "$hosts" "$agents" "$(cat "$tmp")" "$name"
+  printf 'oauth=%s\n' "$name" >> "$SECRETS/$secret.conf"
+  rm -f "$tmp" "$OAUTH/$name.broken"
+}
+
+secret_rotate() { # secret_rotate <NAME>: puts its new value into the running VMs that have it, without a restart
+  local name="$1" f="$SECRETS/$1.conf" a failed=0 done=0   # returns 0 updated, 1 a VM refused, 2 none running
+  find_msb || return 2
+  refresh_running
+  for a in $CAGE_AGENTS; do
+    for_agent "$(conf_get "$f" agents)" "$a" || continue
+    [ "$RUNNING" != "?" ] && [[ "$RUNNING" == *" $(vm "$a") "* ]] || continue
+    if env "$name=$(cat "$SECRETS/$name")" "$MSB" modify "$(vm "$a")" --secret "$name@$(conf_get "$f" hosts)" >/dev/null 2>&1; then
+      done=$((done + 1))
+    else
+      failed=1
+    fi
+  done
+  [ $failed = 0 ] || return 1
+  [ $done -gt 0 ] || return 2
+  return 0
+}
+
+oauth_refresh_all() { # oauth_refresh_all <seconds>: renews the sign-ins that expire within that time
+  local f name secret rc
+  for f in "$SECRETS"/*.conf; do
+    [ -f "$f" ] || continue
+    name="$(conf_get "$f" oauth)"
+    [ -n "$name" ] && [ -f "$OAUTH/$name.json" ] || continue
+    secret="$(basename "$f" .conf)" rc=0
+    python3 "$CAGE_ROOT/host/mcp_oauth.py" refresh "$OAUTH/$name.json" "$SECRETS/$secret" "$1" 2>>"$CAGE_HOME/refresh.log" || rc=$?
+    case $rc in
+      0) rm -f "$OAUTH/$name.broken"
+         secret_rotate "$secret" || [ $? = 2 ] || echo "$(date -u +%FT%TZ) $name: renewed, but a running VM didn't take it" >> "$CAGE_HOME/refresh.log" ;;
+      3) ;;
+      *) : > "$OAUTH/$name.broken"; echo "$(date -u +%FT%TZ) $name: couldn't renew the sign-in" >> "$CAGE_HOME/refresh.log" ;;
+    esac
+  done
+}
+oauth_any() { compgen -G "$OAUTH/*.json" >/dev/null 2>&1; }
+refresher_pattern() { echo "$CAGE_ROOT/cage _refresh"; }
+refresher_start() {
+  oauth_any || return 0
+  pgrep -f -- "$(refresher_pattern)" >/dev/null 2>&1 && return 0
+  if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
+  else nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
+}
+refresher_stop() { pkill -f -- "$(refresher_pattern)" 2>/dev/null || true; }
 
 connect_apply() { # connect_apply <agents|all>: offers to restart the ones that are awake, so they pick up the change
   local a awake=()
@@ -965,7 +1048,7 @@ connect_rm() {
   { connector_name_ok "$name" && [ -f "$f" ]; } || die "no connector called \"$name\" (see: cage connect)"
   s="$(conf_get "$f" secret)" ag="$(conf_get "$f" agents)"
   if [ -n "$s" ]; then rm -f "$SECRETS/$s" "$SECRETS/$s.conf"; fi
-  rm -f "$f"
+  rm -f "$f" "$OAUTH/$name.json" "$OAUTH/$name.broken"
   ok "$name disconnected${s:+, and its key deleted from this computer}"
   if [ -n "$s" ]; then hint "if you won't use that key again, revoke it on the app's website too"; fi
   connect_apply "$ag"
@@ -1754,6 +1837,7 @@ cmd_up() {
   resolve_agents "$@"
   find_msb || die "microsandbox isn't installed; run cage to set it up"
   brain_init "${AGENTS[@]}"
+  if oauth_any; then oauth_refresh_all 1800; fi
   local quiet=()
   [ "$UI" = 1 ] && quiet=(-q)
   for a in "${AGENTS[@]}"; do
@@ -1782,6 +1866,7 @@ cmd_up() {
     if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
   done
   if is_wsl; then wsl_keepalive_start; fi
+  refresher_start
   if [ "$UI" = 1 ] && [ -t 0 ]; then
     wait_ready "${AGENTS[@]}"
     [ "${ONBOARDING:-0}" = 1 ] || next_steps
@@ -1870,6 +1955,7 @@ cmd_down() {
     if "$MSB" stop "$(vm "$a")" >/dev/null 2>&1; then printf '  %s  %s is asleep\n' "$(face "$a" asleep)" "$a" >&2; fi
   done
   if [ $# -eq 0 ] && is_wsl; then wsl_keepalive_stop; fi
+  if [ $# -eq 0 ]; then refresher_stop; fi
 }
 
 cmd_destroy() {
@@ -1983,6 +2069,8 @@ cmd_home() {
   local n
   n="$(inbox_count)"
   if [ "$n" -gt 0 ]; then hint "your agents want to remember $n new thing$([ "$n" = 1 ] || echo s): cage memory"; fi
+  local b
+  for b in "$OAUTH"/*.broken; do [ -e "$b" ] && hint "$(basename "$b" .broken) needs you to sign in again: cage connect add $(basename "$b" .broken)"; done
   # Once everyone's awake and signed in, point at the next good thing: their apps.
   if [[ "$STATES" != *:none* && "$STATES" != *:asleep* && "$STATES" != *:login* && "$STATES" != *:installing* ]] &&
      [ -z "$(ls -A "$CONNECTORS" 2>/dev/null)" ]; then
@@ -2043,6 +2131,8 @@ main() {
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
+    _open) UI=1 open_url "${1:-}" ;;
+    _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT; while :; do oauth_refresh_all 900; sleep 300 & wait "$!"; done ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

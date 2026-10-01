@@ -179,7 +179,7 @@ for c in zapier github linear; do grep -q "$c" <<<"$out" || fail "connect list l
 printf 'zap_s3cret\n' | cage connect add zapier 2>/dev/null || fail "connect add zapier failed"
 grep -qx 'connector=zapier' "$CAGE_HOME/secrets/ZAPIER_MCP_TOKEN.conf" || fail "zapier's key isn't saved as its secret"
 grep -qx 'hosts=mcp.zapier.com' "$CAGE_HOME/secrets/ZAPIER_MCP_TOKEN.conf" || fail "zapier's key may go to the wrong hosts"
-printf '\n' | cage connect add notes https://notes.example.com/mcp 2>/dev/null || fail "connect add without a key failed"
+printf '\n' | cage connect add notes https://notes.example.invalid/mcp 2>/dev/null || fail "connect add without a key failed"
 printf 'crm_s3cret\n' | cage connect add crm https://crm.example.com:8443/v1/mcp --header X-API-Key codex 2>/dev/null \
   || fail "connect add --header failed"
 out="$(cage connect 2>&1)"
@@ -195,7 +195,7 @@ cage up cursor 2>/dev/null
 grep -q '^cmd = "cursor-agent --approve-mcps"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor won't use its apps headless"
 L="$CAGE_HOME/agents/claude/connectors.list"
 grep -qx 'zapier|https://mcp.zapier.com/api/v1/connect|Authorization|ZAPIER_MCP_TOKEN' "$L" || fail "claude's connectors: $(cat "$L")"
-grep -qx 'notes|https://notes.example.com/mcp|Authorization|' "$L" || fail "keyless connector: $(cat "$L")"
+grep -qx 'notes|https://notes.example.invalid/mcp|Authorization|' "$L" || fail "keyless connector: $(cat "$L")"
 grep -q '^crm|' "$L" && fail "claude was given codex's connector"
 grep -qx 'crm|https://crm.example.com:8443/v1/mcp|X-API-Key|CRM_MCP_TOKEN' "$CAGE_HOME/agents/codex/connectors.list" || fail "codex's connectors"
 grep -q '^- zapier: Gmail' "$CAGE_HOME/agents/claude/connectors.md" || fail "the agent isn't told what zapier is"

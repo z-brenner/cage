@@ -9,6 +9,7 @@ cage builds almost nothing itself. It is a few hundred lines of shell that wire 
 | The agents themselves | the vendors' **unmodified official CLIs** | Terms of service (see the README) |
 | Keys the agents can use but never see | **microsandbox secrets** | The VM holds a placeholder; the real key is swapped in outside the VM, only for hosts you allow |
 | Website sign-ins | **microsandbox secrets** with a custom placeholder and request-body substitution, plus **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** as the agents' browser | The agent types a placeholder; the real password is swapped in only on the way to that site |
+| Apps you sign in to in the browser (Notion, Jira, Sentry…) | the standard MCP sign-in (OAuth 2.1: RFC 9728 discovery, dynamic client registration, PKCE), done **on the host** by host/mcp_oauth.py | The refresh token never leaves your computer; the access token is a microsandbox secret, renewed by `cage _refresh` and swapped into running VMs with `msb modify` |
 | Apps (Gmail, Calendar, Slack, GitHub…) | **remote MCP servers**, wired into each CLI's own config; **[Zapier MCP](https://mcp.zapier.com)** for most apps | Every CLI speaks MCP. Zapier handles the browser sign-ins for thousands of apps and gives back one key, which a microsandbox secret protects |
 
 What cage adds:
@@ -56,5 +57,4 @@ Compared with the first, hand-built version (branch `claude/cage-agent-vms`):
 - **Pre-send PII redaction.** cc-connect has no message hook. The right fix is a small upstream PR adding a `message_filter` command hook, which is also where a Sonomos masker would plug in. I'd rather propose that upstream than maintain a fork.
 - **A single `/all` command.** Replaced by group @mentions (above).
 - **Lima/Firecracker/local backends.** Replaced by microsandbox.
-- **Apps that only offer browser sign-in (OAuth) as MCP servers**, like Notion's and Google's own. Their tokens would have to live in the VM, which is what secrets avoid. The way to support them is a gateway on the host that signs in once and hands each VM a key-protected address. [IBM ContextForge](https://github.com/IBM/mcp-context-forge) and [mcp-proxy](https://github.com/TBXark/mcp-proxy) are candidates. Until then, Zapier covers most of these apps.
 
