@@ -122,6 +122,16 @@ grep '^run | ' "$MSB_LOG" | grep -q -- '--mount-named | cage-claude-cache:/var/c
 if grep -q 'CAGE_REFRESH' "$MSB_LOG"; then fail "a plain up shouldn't refresh"; fi
 ok "up and update re-create the VM with --replace (home and cache volumes kept; update downloads afresh)"
 
+# your time zone goes into the VM (scheduled tasks run at your 8am); anything odd-looking is left out
+: > "$MSB_LOG"
+TZ=Europe/Berlin cage up claude 2>/dev/null
+grep '^run | ' "$MSB_LOG" | grep -q -- '-e | TZ=Europe/Berlin |' || fail "no TZ for the VM: $(cat "$MSB_LOG")"
+: > "$MSB_LOG"
+TZ='../../etc/passwd' cage up claude 2>/dev/null
+if grep '^run | ' "$MSB_LOG" | grep -q -- 'TZ='; then fail "an odd TZ went into the VM"; fi
+TZ=America/New_York cage _state | python3 -c 'import json,sys; assert json.load(sys.stdin)["settings"]["tz"] == "America/New_York"' || fail "time zone not in the state"
+ok "the VM runs in your time zone (TZ, checked), and the app shows it"
+
 # ask mode
 sed -i 's/^CAGE_MODE=yolo/CAGE_MODE=ask/' "$CAGE_HOME/cage.env"
 cage up claude cursor 2>/dev/null

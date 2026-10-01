@@ -419,6 +419,15 @@ yes_no() { # yes_no <question> <default y|n>: true for yes
   fi
 }
 
+host_tz() { # this computer's time zone, like Europe/Berlin (the VMs use it), or nothing if unknown
+  local z="${TZ:-}"
+  [ -n "$z" ] || z="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+  [ -n "$z" ] || z="$(cat /etc/timezone 2>/dev/null || true)"
+  [ -n "$z" ] || z="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  z="${z#:}"
+  if [[ "$z" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$ ]]; then printf '%s' "$z"; fi
+}
+
 app_token() { # app_token <agent>: the secret its in-VM adapters use with cc-connect (made once, kept)
   local f="$CAGE_HOME/agents/$1/app.token"
   mkdir -p "$CAGE_HOME/agents/$1"
@@ -2044,6 +2053,9 @@ cmd_up() {
     # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
     # Secret values reach msb only through its environment (never its arguments, which `ps` shows).
     # shellcheck disable=SC2086
+    local tzarg=() tz
+    tz="$(host_tz)"
+    [ -z "$tz" ] || tzarg=(-e "TZ=$tz")
     ( for kv in ${SECRET_ENV[@]+"${SECRET_ENV[@]}"}; do export "${kv?}"; done
     exec "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
       -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
@@ -2052,7 +2064,7 @@ cmd_up() {
       --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
       --mount-dir "$BRAIN/memory:/memory:ro" \
       --mount-dir "$BRAIN/inbox/$a:/memory-inbox" --mount-dir "$APPDIR/$a:/cage-app" ${outbox[@]+"${outbox[@]}"} \
-      -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} \
+      -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} ${tzarg[@]+"${tzarg[@]}"} \
       ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
     if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
@@ -2769,7 +2781,7 @@ state_json() { # everything the web app shows, as one JSON object
   done
   printf ']'
   # settings
-  printf ',"settings":{"network":%s,"allow":%s,"ask_all":%s,"voice":%s,"voice_model":%s,"mode":%s,"autostart":%s,"group_reply_all":%s}' \
+  printf ',"settings":{"tz":%s,"network":%s,"allow":%s,"ask_all":%s,"voice":%s,"voice_model":%s,"mode":%s,"autostart":%s,"group_reply_all":%s}' "$(jstr "$(host_tz)")" \
     "$(jstr "${CAGE_NETWORK:-open}")" "$(jstr "${CAGE_ALLOW_HOSTS:-}")" "$(jstr "${CAGE_ASK_ALL:-off}")" "$(jstr "${CAGE_VOICE:-off}")" \
     "$(jstr "${CAGE_VOICE_MODEL:-base}")" "$(jstr "${CAGE_MODE:-yolo}")" "$(jbool test -e "$CAGE_HOME/autostart")" \
     "$(jstr "${CAGE_TELEGRAM_GROUP_REPLY_ALL:-false}")"

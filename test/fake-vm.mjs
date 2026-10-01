@@ -1,6 +1,7 @@
 // Plays an agent's VM for the web app's tests: what guest/app.mjs and cc-connect would write to its chat folder.
 //   node test/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
-// A message gets a streamed reply; "email" asks before acting; "/usage" answers with a card; files come back.
+// A message gets a streamed reply; "email" asks before acting; "/usage" answers with a card; files come back; scheduled
+// tasks live in cron.json, and running one answers in the chat.
 import fs from 'node:fs'
 import path from 'node:path'
 const [dir, work] = process.argv.slice(2)
@@ -43,7 +44,18 @@ async function handle (r) {
     fs.copyFileSync(path.join(dir, r.from), path.join(work, r.dir || '', r.name))
     out(r.id, { ok: true, path: path.join(r.dir || '', r.name) })
   } else if (r.type === 'api') {
-    out(r.id, { ok: true, data: { jobs: [] } })
+    const f = path.join(dir, '..', 'cron.' + path.basename(dir) + '.json')
+    const jobs = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : []
+    const save = () => fs.writeFileSync(f, JSON.stringify(jobs))
+    const m = r.path.match(/^\/api\/v1\/cron(?:\/([\w-]+)(\/exec)?)?/)
+    if (!m) return out(r.id, { ok: false, error: 'not found' })
+    if (r.method === 'GET') return out(r.id, { ok: true, data: { jobs } })
+    if (r.method === 'POST' && !m[1]) { jobs.push({ id: 'cron_' + jobs.length + Date.now(), enabled: true, created_at: new Date().toISOString(), ...r.body }); save(); return out(r.id, { ok: true, data: jobs.at(-1) }) }
+    const j = jobs.find((x) => x.id === m[1])
+    if (!j) return out(r.id, { ok: false, error: 'no such job' })
+    if (r.method === 'DELETE') { jobs.splice(jobs.indexOf(j), 1); save(); return out(r.id, { ok: true, data: { message: 'cron job deleted' } }) }
+    if (m[2]) { j.last_run = new Date().toISOString(); save(); log({ t: 'reply', session: 'you', text: 'Scheduled: ' + j.prompt + ' (done)' }); return out(r.id, { ok: true, data: { id: j.id, status: 'triggered' } }) }
+    out(r.id, { ok: false, error: 'not allowed' })
   }
 }
 setInterval(async () => {

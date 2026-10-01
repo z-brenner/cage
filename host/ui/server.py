@@ -22,7 +22,9 @@ API call needs the token in ~/.cage/ui.token, which `cage ui` puts in the addres
 The chat with an agent goes through ~/.cage/app/<agent>, a folder its VM shares (guest/app.mjs relays it to
 cc-connect). The VM writes there, so nothing in it is trusted: no links are followed, only regular files are read,
 and only pictures are shown in the page (everything else downloads).
-  GET  /api/chat/<a>/log?from=N|tail=N   server-sent events: {"o": offset, "e": entry} per line of log.jsonl
+  GET  /api/chat/<a>/history?tail=N     the end of log.jsonl: {"o": offset at its end, "entries": [...]}
+  GET  /api/chat/stream?from=a:N,b:M    server-sent events for all your agents' chats at once (a browser allows only a
+                                        few connections per site): {"a", "o", "e"} per new line, {"a", "reset"}
   POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
   POST /api/chat/<a>/action             {"action", "label"?}  (a button in the chat)
@@ -42,7 +44,8 @@ ALLOWED = {"", "onboard", "setup", "add", "approve", "fix", "up", "down", "login
            "secret", "memory", "autostart", "backup", "restore", "security", "network", "allow", "ask", "ask-all",
            "fallback", "voice", "mask", "destroy", "doctor", "status", "version"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-         ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2"}
+         ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2",
+         ".webmanifest": "application/manifest+json"}
 APPDIR = os.path.join(HOME, "app")
 AGENTS = ("claude", "codex", "cursor", "antigravity")
 MAX_FILE = 25 << 20
@@ -453,6 +456,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     fh.write(text)
                 os.replace(tmp, f)
                 return self.send(200, {"ok": True})
+        if parts == ["chat", "stream"] and method == "GET":
+            return self.multi(query)
         if len(parts) == 3 and parts[0] == "chat":
             return self.chat(method, parts[1], parts[2], query)
         if parts == ["check"] and method == "GET":
@@ -495,8 +500,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def chat(self, method, agent, what, query):
         with Chat(agent) as c:
-            if what == "log" and method == "GET":
-                return self.tail(c, query)
+            if what == "history" and method == "GET":
+                size, _ = c.size()
+                tail = query.get("tail", [""])[0]
+                start = max(0, size - (int(tail) if tail.isdigit() else 600000))
+                if start:
+                    start = self.line_start(c, start)
+                entries, end = c.read_log(start, 8 << 20)
+                return self.send(200, {"o": end, "entries": [e for _, e in entries]})
             if what == "file" and method == "GET":
                 return self.file(c, query.get("p", [""])[0], query.get("dl", [""])[0] == "1")
             if method != "POST":
@@ -560,35 +571,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(504, {"error": "the agent didn't answer; is it awake?"})
         return self.send(404, {"error": "no such endpoint"})
 
-    def tail(self, c, query):
-        size, ino = c.size()
-        if "tail" in query:   # the last part of the chat, from a line's start
-            start = max(0, size - int(query["tail"][0]))
-            if start:
-                start = self.line_start(c, start)
-        else:
-            start = int(query.get("from", ["0"])[0])
-            if start > size:
-                start = 0
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-        self.close_connection = True
-        pos, quiet = start, 0.0
+    def multi(self, query):
+        """New lines in each agent's chat log, as they're written."""
+        chats, pos, ino = {}, {}, {}
         try:
-            self.wfile.write(b"data: " + json.dumps({"o": pos, "start": True}).encode() + b"\n\n")
+            for item in query.get("from", [""])[0].split(","):
+                a, _, o = item.partition(":")
+                if a in AGENTS and a not in chats:
+                    chats[a] = Chat(a)
+                    size, ino[a] = chats[a].size()
+                    pos[a] = int(o) if o.isdigit() and int(o) <= size else size
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.close_connection = True
+            self.wfile.write(b": hello\n\n")
             self.wfile.flush()
+            quiet = 0.0
             while True:
-                size, now = c.size()
-                if now != ino or size < pos:   # the VM started a new log: the page starts over
-                    ino, pos = now, 0
-                    self.wfile.write(b'data: {"reset": true, "o": 0}\n\n')
-                entries, pos = c.read_log(pos)
-                for o, e in entries:
-                    self.wfile.write(b"data: " + json.dumps({"o": o, "e": e}).encode() + b"\n\n")
-                if entries:
+                sent = False
+                for a, c in chats.items():
+                    size, now = c.size()
+                    if now != ino[a] or size < pos[a]:   # the VM started a new log
+                        ino[a], pos[a] = now, 0
+                        self.wfile.write(b"data: " + json.dumps({"a": a, "reset": True, "o": 0}).encode() + b"\n\n")
+                        sent = True
+                    entries, pos[a] = c.read_log(pos[a])
+                    for o, e in entries:
+                        self.wfile.write(b"data: " + json.dumps({"a": a, "o": o, "e": e}).encode() + b"\n\n")
+                        sent = True
+                if sent:
                     self.wfile.flush()
                     quiet = 0.0
                 else:
@@ -600,6 +614,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     time.sleep(0.3)
         except (BrokenPipeError, ConnectionResetError):
             return
+        finally:
+            for c in chats.values():
+                c.close()
 
     @staticmethod
     def line_start(c, start):
@@ -673,7 +690,7 @@ def restart_when_updated():
     except OSError:
         return
     while True:
-        time.sleep(20)
+        time.sleep(3)
         try:
             changed = os.stat(me).st_mtime != born
         except OSError:

@@ -104,12 +104,20 @@ Answers from `/all` and stand-ins are read-only and don't use your connected app
 ## Chat in the app
 
 Every agent has a chat in cage's app, on its page: no bot or phone needed.
+
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/chat-dark.png"><img src="assets/chat.png" width="760" alt="Chatting with Claude Code in cage's app: you send an NDA, it flags three issues and sends back a redline, then asks before emailing it, with Allow and Deny buttons"></picture></p>
+
 - **Files go both ways.** Attach files with the paperclip, drop them on the chat, or paste a picture. Files the agent makes for you show up in the chat, and the **Files** tab lists them, along with the agent's own work folder: download anything from it, or upload files for it to use.
 - **Answers stream in** as the agent writes them, and **starters** on an empty chat show what to ask.
 - **Asking first:** with **Ask before acting in your apps** on (`cage approve claude on`), Claude Code asks before it sends an email, books a meeting or changes anything in an app you connected, with Allow and Deny buttons; work on its own computer goes ahead. Codex, Cursor and Antigravity can only ask before every action.
 - **Plan usage:** each agent's settings show how much of your plan is left (Claude Code and Codex report it).
 - **An asleep agent wakes up** when you message it; your message waits for it.
 - **New conversation** (the pencil, or `/new`) starts fresh. cc-connect's other commands work too: `/stop`, `/model`, `/usage`.
+- **Scheduled tasks:** the **Schedule** tab lists what the agent does on its own (“every weekday at 8:00 AM, summarize my inbox”), with **Run now** and **Delete**, and adds new ones in plain words. Asking in the chat works too. They run in your time zone, while the agent is awake (so turn on **Start at login**), and what they say lands in the chat.
+- **Notifications:** turn on **Desktop notifications** in Settings to hear about replies, files and requests to go ahead while you're looking elsewhere; the sidebar marks agents with unread messages either way.
+- **An app of its own:** in Chrome or Edge, **Install as an app** (in the sidebar, or the install icon in the address bar) gives it its own window and taskbar icon. It still runs only on your computer: nothing is cached or sent anywhere.
+
+**Ask all your agents in the app:** the question box on Home asks every awake agent at once and shows their answers side by side. **Where do they disagree?** has one agent compare the answers (where they agree, where they don't, what to double-check). A follow-up goes to all of them with the answers so far, so they can build on or push back on each other. Earlier questions are kept in this browser only.
 
 How it works: the app and each agent's VM share a folder, `~/.cage/app/<agent>`. A small relay in the VM ([guest/app.mjs](guest/app.mjs)) passes your messages to cc-connect through its [bridge](https://github.com/chenhg5/cc-connect/blob/main/docs/bridge-protocol.md), and writes the replies to a log the app reads. So the chat is still there when you reopen the app, including what scheduled tasks said meanwhile.
 
@@ -232,6 +240,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 - **Codex:** turn on device-code sign-in first (ChatGPT → Settings → Security).
 - **Antigravity** is Google's successor to Gemini CLI for AI Pro/Ultra (since 2026-06-18). Google has suspended accounts over third-party use of its CLI logins, so consider a spare Google account.
 - **After a reboot** your agents sleep until you wake them (or turn on autostart, once). Each VM's system disk is new every time, but everything it downloaded (Ubuntu packages, Node.js, its CLI, cc-connect) is kept in a cache of its own. So waking reinstalls from there in seconds, without any vendor's servers, and logins, sessions and files are kept. `cage update` (the **Update** button) gets the newest of everything.
+- **Time zone:** each VM runs in your computer's time zone (from `TZ`, or the system's), so a task set for 8am runs at your 8am. After changing time zones, `cage up` the agents.
 - **Settings** live in `~/.cage/cage.env` (CPU, memory, disk, network rules, `CAGE_MODE=ask` to approve each tool call in chat).
 - **Updates:** `cage update` installs the newest cage release, then rebuilds the agents with the newest CLIs. Each release's download is checked against its `SHA256SUMS` before anything is replaced, and every file carries a signed build-provenance attestation: `gh attestation verify cage-v0.1.0.tar.gz --repo z-brenner/cage` shows it was built by this repo's release workflow from that tag. `cage --version` says which one you have. To follow the development version instead, install with `CAGE_REF=main`.
 - **Installer error "Could not determine latest release version"?** That's GitHub rate-limiting your IP. `cage` falls back to a pinned microsandbox automatically.

@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
 SERVER=""
 VM="" SERVER2=""
-trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$SERVER2" ] || kill "$SERVER2" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
+trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$SERVER2" ] || kill "$SERVER2" 2>/dev/null; [ -z "$SERVER3" ] || kill "$SERVER3" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -18,10 +18,11 @@ cat > "$T/bin/msb" <<'STUB'
 cmd="$1"; shift
 case "$cmd" in
   inspect) exit 0 ;;
-  ps) echo cage-claude ;;
+  ps) echo cage-claude; if [ -e "${STUB_AWAKE:-/nonexistent}" ]; then echo cage-codex; fi ;;
   exec) case "$*" in
     *cage:ready*) echo cage:ready ;;
     *strict-mcp-config*) echo 'Paris, says **the stub**' ;;
+    *skip-git-repo-check*) echo 'Lyon, says *the other* stub (snake_case_ok)' ;;
     *"auth login"*) printf 'Browser didn'"'"'t open? Use the url below to sign in (c to copy)\n\n\033[1mhttps://claude.ai/oauth/authorize?code=true&client_id=9d1c&state=xyz\033[0m\n\nPaste code here if prompted > '
       read -r c; [ "$c" = "CODE-123" ] && echo "Login successful." ;;
   esac ;;
@@ -30,7 +31,7 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/msb"
-export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1
+export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake"
 "$ROOT/cage" init 2>/dev/null
 printf 'CAGE_AGENTS="claude codex"\nCAGE_TELEGRAM_ALLOW="111"\nCAGE_TELEGRAM_TOKEN_claude="123:AAA-claude"\nCAGE_TELEGRAM_BOT_claude="my_claude_bot"\n' >> "$CAGE_HOME/cage.env"
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
@@ -67,9 +68,12 @@ H=(-H "X-Cage-Token: $TOK")
 curl -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-page.html" | grep -qi '^content-disposition: attachment' || fail "an agent's page shown in the app"
 curl -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^content-type: image/png' || fail "pictures are shown"
 [ "$(code "${H[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
-[ "$(code "${H[@]}" "$B/api/chat/evil/log")" = 400 ] || fail "not an agent"
+[ "$(code "${H[@]}" "$B/api/chat/evil/history")" = 400 ] || fail "not an agent"
 rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
 ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
+curl -sI "$B/manifest.webmanifest" | grep -qi '^content-type: application/manifest+json' && curl -s "$B/manifest.webmanifest" | python3 -c 'import json,sys; m=json.load(sys.stdin); assert m["name"] == "cage" and m["display"] == "standalone"' \
+  && [ "$(code "$B/sw.js")" = 200 ] && [ "$(code "$B/icon-maskable.png")" = 200 ] || fail "installable as an app"
+ok "installable as an app: a manifest, icons and a service worker"
 
 mkdir -p "$T/work/reports" && printf 'Q3: up 12%%\n' > "$T/work/reports/q3.txt" && printf '# Notes\n' > "$T/work/notes.md"
 
@@ -97,8 +101,15 @@ B2="http://127.0.0.1:$PORT2"
 TOK2="$(cat "$T/fresh/ui.token")"
 node "$ROOT/test/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
 
+# An installed release (a VERSION file), for updating while the app is open: the server restarts itself with the new
+# code once nothing is running, and the page reloads to get the new page
+mkdir -p "$T/inst" && tar --exclude=.git --exclude=node_modules -C "$ROOT" -cf - . | tar -C "$T/inst" -xf - && echo v1.0.0 > "$T/inst/VERSION"
+PORT3="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+CAGE_UI_PORT="$PORT3" "$T/inst/cage" ui --no-open 2>/dev/null || fail "the installed cage ui"
+SERVER3="$(pgrep -f "$T/inst/host/ui/server.py" -n || true)"
+
 if command -v node >/dev/null 2>&1; then
-  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" \
+  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" STUB_AWAKE="$T/codex-awake" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" "http://127.0.0.1:$PORT3" "$T/inst" \
     || fail "the web app in a browser (above)"
   ok "the web app in a real browser"
 fi

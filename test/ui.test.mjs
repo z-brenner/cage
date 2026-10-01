@@ -2,6 +2,7 @@
 // hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one (test/fake-vm.mjs plays
 // its VM), the phone layout, and that nothing works without the token.
 //   node test/ui.test.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token> <its home>
+//     <an installed release's url> <its folder>
 // (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
 import fs from 'node:fs'
 import path from 'node:path'
@@ -9,7 +10,7 @@ import { createRequire } from 'node:module'
 // PLAYWRIGHT_MODULE: where the playwright package is, when it isn't installed next to this file
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const [base, token, home, work, base2, token2, home2] = process.argv.slice(2)
+const [base, token, home, work, base2, token2, home2, base3, inst] = process.argv.slice(2)
 let pass = 0
 const ok = (m) => { pass++; console.log('ok - ' + m) }
 const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
@@ -41,6 +42,35 @@ await page.getByLabel('Question for your agents').press('Enter')
 await page.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris').waitFor({ timeout: 15000 })
 if (!(await page.locator('.answer-card strong', { hasText: 'the stub' }).count())) fail('the answer is not formatted')
 ok('ask your agents: the awake ones answer side by side, formatted')
+
+// ask v2: with two awake, where they disagree; a follow-up that sees the answers; earlier questions are kept
+fs.writeFileSync(process.env.STUB_AWAKE, '')
+await page.reload()
+await page.locator('.composer input[value=codex]:not([disabled])').waitFor({ state: 'attached', timeout: 15000 })
+await page.getByLabel('Question for your agents').fill('capital of France?')
+await page.getByLabel('Question for your agents').press('Enter')
+const round1 = page.locator('.round').first()
+await round1.locator('.answer-card', { hasText: 'Codex' }).getByText('Lyon').waitFor({ timeout: 15000 })
+await round1.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris').waitFor({ timeout: 15000 })
+if (!(await round1.locator('.answer-card em', { hasText: 'the other' }).count()) || !(await round1.getByText('snake_case_ok').count())) fail('*italic* is not shown as italic, or snake_case lost its underscores')
+await page.getByRole('button', { name: 'Where do they disagree?' }).click()
+await page.locator('.compare-card', { hasText: 'Where they agree and differ' }).getByText('Paris').waitFor({ timeout: 15000 })
+await page.getByLabel('Follow-up question').fill('and the second city?')
+await page.getByLabel('Follow-up question').press('Enter')
+const round2 = page.locator('.round').nth(1)
+await round2.getByText('and the second city?').waitFor({ timeout: 10000 })
+await round2.locator('.answer-card', { hasText: 'Codex' }).getByText('Lyon').waitFor({ timeout: 15000 })
+if (await page.locator('.compare-card').count()) fail('the comparison of the last round stayed after a follow-up')
+await page.reload()
+const earlier = page.locator('details.history')
+await earlier.locator('summary', { hasText: 'Earlier questions (2)' }).click({ timeout: 15000 })
+await earlier.locator('li', { hasText: 'capital of France?' }).filter({ hasText: '1 follow-up' }).getByRole('button', { name: 'Open' }).click()
+await page.locator('.round').nth(1).getByText('and the second city?').waitFor({ timeout: 10000 })
+fs.rmSync(process.env.STUB_AWAKE)
+await page.getByRole('button', { name: 'Clear' }).click()
+await page.reload()
+await page.locator('.composer input[value=codex][disabled]').waitFor({ state: 'attached', timeout: 15000 })
+ok('ask v2: where they disagree, a follow-up with the earlier answers, earlier questions kept in this browser')
 
 // chat with an agent in the app: a starter, a file, a streamed answer, a file back, asking before acting
 await card.getByRole('link', { name: 'Chat', exact: true }).click()
@@ -95,6 +125,26 @@ await page.locator('#job-status', { hasText: 'Done' }).waitFor({ timeout: 15000 
 await page.locator('dialog#job').getByText('claude is signed in').waitFor({ timeout: 5000 })
 await page.locator('dialog#job').getByRole('button', { name: 'Close' }).click()
 ok('signing in: the link as a button and a box for the code, no terminal')
+
+// scheduled tasks: add one in plain words, run it now (it answers in the chat), delete it
+await page.locator('.tabs').getByRole('link', { name: 'Schedule' }).click()
+await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
+await page.getByLabel('What should it do?').fill('Summarize my inbox')
+await page.getByLabel('How often').selectOption('weekdays')
+await page.getByLabel('Time').fill('08:00')
+await page.getByRole('button', { name: 'Add', exact: true }).click()
+const task = page.locator('.card li', { hasText: 'Summarize my inbox' })
+await task.getByText(/Every weekday at 8:00\sAM/).waitFor({ timeout: 15000 })
+const cronJobs = JSON.parse(fs.readFileSync(path.join(home, 'app', 'cron.claude.json'), 'utf8'))
+if (cronJobs.length !== 1 || cronJobs[0].cron_expr !== '0 8 * * 1-5' || cronJobs[0].session_key !== 'app:you:you' || cronJobs[0].project !== 'claude') fail('the task: ' + JSON.stringify(cronJobs))
+await task.getByRole('button', { name: 'Run now' }).click()
+await page.locator('.chat .msg-agent', { hasText: 'Scheduled: Summarize my inbox (done)' }).waitFor({ timeout: 15000 })
+await page.locator('.tabs').getByRole('link', { name: 'Schedule' }).click()
+await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByText(/last ran/).waitFor({ timeout: 15000 })
+page.once('dialog', (d) => d.accept())
+await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByRole('button', { name: 'Delete' }).click()
+await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
+ok('scheduled tasks: added in plain words (weekdays at 8), run now answers in the chat, deleted')
 
 // an asleep agent: sending wakes it up, and the message waits in its folder
 await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
@@ -191,6 +241,49 @@ await p2.locator('.chat textarea').waitFor({ timeout: 10000 })
 if (!p2.url().endsWith('#agent/codex')) fail('setup should end in the chat: ' + p2.url())
 await p2.close()
 ok('setting up: the computer checked, agents picked (no bot), signed in by device code, about you saved, then the chat')
+
+// desktop notifications: on in Settings; a reply while you're elsewhere notifies and marks the agent unread
+await page.context().grantPermissions(['notifications'], { origin: base })
+await page.addInitScript(() => {
+  window.__notes = []
+  const note = (title, o) => window.__notes.push({ title, body: (o && o.body) || '' })
+  window.Notification = class { constructor (t, o) { note(t, o) } static get permission () { return 'granted' } static requestPermission () { return Promise.resolve('granted') } close () {} }
+  if (window.ServiceWorkerRegistration) window.ServiceWorkerRegistration.prototype.showNotification = function (t, o) { note(t, o); return Promise.resolve() }
+})
+await page.goto(base + '/#settings')
+await page.reload()   // the stub above runs on a load, not on a change of #
+const notify = page.getByRole('checkbox', { name: 'Desktop notifications' })
+await notify.waitFor({ state: 'attached', timeout: 15000 })
+await notify.click({ force: true })
+await page.waitForFunction(() => localStorage.getItem('cage-notify') === 'on', null, { timeout: 10000 })
+await page.goto(base + '/#home')
+await page.waitForTimeout(1000)   // the live stream is connected
+fs.appendFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'Your **report** is ready' }) + '\n')
+await page.waitForFunction(() => window.__notes.some((n) => n.title === 'Claude Code' && n.body === 'Your report is ready'), null, { timeout: 15000 })
+const badge = page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.badge.unread')
+await badge.getByText('1').waitFor({ timeout: 10000 })
+if (!(await page.title()).startsWith('(')) fail('the tab title does not count the unread message')
+await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
+await page.locator('.chat .msg-agent', { hasText: 'is ready' }).waitFor({ timeout: 10000 })
+if (await badge.count()) fail('the unread mark stayed after opening the chat')
+ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
+
+// updating while the app is open: the server restarts with the new code, and the page reloads with the new page
+const p3 = await browser.newPage()
+p3.on('pageerror', (e) => errors.push(e.message))
+await p3.goto(base3 + '/#' + token)
+await p3.locator('#version', { hasText: 'cage v1.0.0' }).waitFor({ timeout: 15000 })
+await p3.evaluate(() => { window.__oldPage = true })
+const srv = path.join(inst, 'host', 'ui', 'server.py')
+fs.writeFileSync(srv, fs.readFileSync(srv, 'utf8').replace('return self.send(200, "ok", "text/plain")', 'return self.send(200, "ok, updated", "text/plain")'))
+fs.writeFileSync(path.join(inst, 'VERSION'), 'v1.0.1\n')
+const healthz = async () => { try { return await (await fetch(base3 + '/healthz')).text() } catch (e) { return '' } }
+for (let i = 0; i < 50 && (await healthz()) !== 'ok, updated'; i++) await p3.waitForTimeout(200)
+if ((await healthz()) !== 'ok, updated') fail('the server did not restart with its new code')
+await p3.waitForFunction(() => !window.__oldPage, null, { timeout: 20000 })   // a new page, not just a redraw
+await p3.locator('#version', { hasText: 'cage v1.0.1' }).waitFor({ timeout: 20000 })
+await p3.close()
+ok('updating while the app is open: the server restarts with its new code, and the page reloads')
 
 // on a phone: the sidebar is a menu
 await page.setViewportSize({ width: 390, height: 844 })

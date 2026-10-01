@@ -61,15 +61,16 @@ function icon (name, cls) { // a Lucide icon (vendor/icons.js)
   }
   return svg
 }
-const LINK_RE = /(\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|`[^`\n]+`|\*\*[^*\n]+\*\*|https?:\/\/[^\s<>"')\]]+)/g
-function inline (text, plain) { // links (and, in answers, `code`, **bold**, [text](url)) made real
+const LINK_RE = /(\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|`[^`\n]+`|\*\*[^*\n]+\*\*|(?<![\w*])\*(?![\s*])[^*\n]+?(?<![\s*])\*(?![\w*])|(?<!\w)_(?![\s_])[^_\n]+?(?<![\s_])_(?!\w)|https?:\/\/[^\s<>"')\]]+)/g
+function inline (text, plain) { // links (and, in answers, `code`, **bold**, *italic*, [text](url)) made real
   const out = []
   let last = 0
   for (const m of text.matchAll(plain ? /(https?:\/\/[^\s<>"')\]]+)/g : LINK_RE)) {
     const t = m[0]
     if (m.index > last) out.push(text.slice(last, m.index))
     if (t[0] === '`') out.push(h('code', {}, t.slice(1, -1)))
-    else if (t[0] === '*') out.push(h('strong', {}, t.slice(2, -2)))
+    else if (t.startsWith('**')) out.push(h('strong', {}, t.slice(2, -2)))
+    else if (t[0] === '*' || t[0] === '_') out.push(h('em', {}, t.slice(1, -1)))   // *italic* or _italic_
     else if (t[0] === '[') {
       const [, label, url] = /^\[([^\]]+)\]\((.+)\)$/.exec(t)
       out.push(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, label))
@@ -146,11 +147,18 @@ async function api (path, opts = {}) {
   if (!res.ok) throw new Error(data.error || res.statusText)
   return data
 }
+let BOOTED = ''   // the cage version this page came with; after an update, the page reloads to get the new one
 async function refresh () {
   try {
     STATE = await api('/api/state')
+    BOOTED = BOOTED || STATE.version
+    if (STATE.version !== BOOTED && !job && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) {
+      BOOTED = STATE.version   // once: the server restarts itself within seconds of an update (host/ui/server.py)
+      setTimeout(() => location.reload(), 4000)
+    }
     render()
     if (CHAT) drawChatState(CHAT)
+    liveConnect()
   } catch (e) { if (e.message !== 'locked') console.warn(e) }
 }
 function locked () {
@@ -471,7 +479,7 @@ function composer () {
   const submit = () => {
     const q = ta.value.trim()
     const who = [...form.querySelectorAll('input[name=ask-who]:checked')].map((i) => i.value)
-    if (!q || !who.length || (ASK && !ASK.done)) return
+    if (!q || !who.length || (ASK && !ASK.rounds.every((r) => r.done))) return
     ta.value = ''
     ask(q, who)
   }
@@ -480,43 +488,106 @@ function composer () {
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 240) + 'px' })
   return form
 }
-async function ask (q, who) { // cage ask, its answers side by side as each comes in
-  ASK = { q, who, at: Date.now() / 1000, agents: who, answers: {}, notes: [], error: '', done: false }
+async function ask (q, who) { // a new question: the answers come in side by side
+  ASK = { id: Date.now(), agents: who, rounds: [], compare: null }
+  askRound(q, q)
+}
+// One round of cage ask. `prompt` is what the agents get (with the earlier rounds for a follow-up), `q` what you typed.
+async function askRound (q, prompt) {
+  const thread = ASK
+  const r = { q, agents: thread.agents.slice(), answers: {}, notes: [], error: '', done: false }
+  thread.rounds.push(r)
+  thread.compare = null
   drawAnswers()
   try {
-    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', q, ...who] } })
-    const mine = ASK
+    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', prompt, ...thread.agents] } })
     watch(id, (ev) => {
-      if (ASK !== mine) return
-      if (ev.t === 'exit') { mine.done = true; if (ev.code && !mine.error) mine.error = 'Your agents couldn’t be asked.' } else if (ev.t === 'event') {
+      if (ev.t === 'exit') { r.done = true; if (ev.code && !r.error) r.error = 'Your agents couldn’t be asked.'; askSave(thread) } else if (ev.t === 'event') {
         const e = ev.event
-        if (e.t === 'asking') mine.agents = e.agents
-        else if (e.t === 'answer') mine.answers[e.agent] = e.text || ''
-        else if (e.t === 'warn' || e.t === 'hint') mine.notes.push(e.text)
-        else if (e.t === 'bad') mine.error = e.text
+        if (e.t === 'asking') r.agents = e.agents
+        else if (e.t === 'answer') r.answers[e.agent] = e.text || ''
+        else if (e.t === 'warn' || e.t === 'hint') r.notes.push(e.text)
+        else if (e.t === 'bad') r.error = e.text
       }
-      drawAnswers()
+      if (ASK === thread) drawAnswers()
     })
-  } catch (e) { ASK.error = e.message; ASK.done = true; drawAnswers() }
+  } catch (e) { r.error = e.message; r.done = true; drawAnswers() }
 }
-function answers () {
-  if (!ASK) return h('div', { id: 'answers' })
-  const cards = ASK.agents.map((a) => {
-    const has = a in ASK.answers
-    const text = ASK.answers[a] || ''
+const MAX_PROMPT = 90000
+function transcript (thread) { // the rounds so far, for a follow-up or a comparison
+  return thread.rounds.map((r, i) => `Question ${i + 1}: ${r.q}\n\n` + r.agents.map((a) => `${nameOf(a)} answered:\n${r.answers[a] || '(no answer)'}`).join('\n\n')).join('\n\n---\n\n').slice(-MAX_PROMPT)
+}
+function followUp (text) {
+  const prompt = `You and other AI assistants were asked the questions below. Their answers are included, so you can build on them or disagree.\n\n${transcript(ASK)}\n\n---\n\nFollow-up question: ${text}`
+  askRound(text, prompt)
+}
+async function compare () { // one agent reads all the answers: where they agree, where they don't
+  const thread = ASK
+  const r = thread.rounds[thread.rounds.length - 1]
+  const by = (STATE.agents.find((a) => a.name === 'claude' && a.state === 'ready') || agentsOn().find((a) => a.state === 'ready') || {}).name
+  if (!by) return
+  thread.compare = { by, text: '', done: false, error: '' }
+  drawAnswers()
+  const prompt = `Several AI assistants answered the same question. Compare their answers for the person who asked: in a few short bullets, where they agree, where they disagree (and who is more likely right), and anything worth double-checking. Don't repeat the answers.\n\n${transcript({ rounds: [r] })}`
+  try {
+    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', prompt, by] } })
+    watch(id, (ev) => {
+      const c = thread.compare
+      if (!c) return
+      if (ev.t === 'exit') { c.done = true; if (!c.text) c.error = c.error || 'No comparison came back.' } else if (ev.t === 'event' && ev.event.t === 'answer') c.text = ev.event.text || ''
+      else if (ev.t === 'event' && ev.event.t === 'bad') c.error = ev.event.text
+      if (ASK === thread) drawAnswers()
+    })
+  } catch (e) { thread.compare.error = e.message; thread.compare.done = true; drawAnswers() }
+}
+// Earlier questions, kept in this browser only (they never leave this computer)
+function askHistory () { try { return JSON.parse(localStorage.getItem('cage-asks') || '[]') } catch (e) { return [] } }
+function askSave (thread) {
+  if (!thread.rounds.every((r) => r.done)) return
+  const keep = askHistory().filter((t) => t.id !== thread.id)
+  keep.unshift({ id: thread.id, agents: thread.agents, rounds: thread.rounds.map(({ q, agents, answers }) => ({ q, agents, answers, done: true, notes: [], error: '' })) })
+  try { localStorage.setItem('cage-asks', JSON.stringify(keep.slice(0, 20))) } catch (e) {}
+}
+function roundView (r, i) {
+  const cards = r.agents.map((a) => {
+    const has = a in r.answers
+    const text = r.answers[a] || ''
     const body = has ? (text ? md(text) : h('p', { class: 'muted' }, 'No answer. It may be signed out, busy, or out of quota.'))
-      : ASK.done ? h('p', { class: 'muted' }, 'No answer.') : h('div', { class: 'skeleton' }, h('span'), h('span'), h('span'))
+      : r.done ? h('p', { class: 'muted' }, 'No answer.') : h('div', { class: 'skeleton' }, h('span'), h('span'), h('span'))
     return h('article', { class: 'answer-card' + (has ? '' : ' waiting'), style: { '--c': AGENT[a] && AGENT[a].color } },
-      h('header', {}, avatar(a, 20), h('b', {}, nameOf(a)), h('span', { class: 'answer-state' }, has ? (text ? 'Answered' : 'No answer') : ASK.done ? '' : 'Thinking…'),
+      h('header', {}, avatar(a, 20), h('b', {}, nameOf(a)), h('span', { class: 'answer-state' }, has ? (text ? 'Answered' : 'No answer') : r.done ? '' : 'Thinking…'),
         has && text ? h('button', { type: 'button', class: 'icon-btn', title: 'Copy', 'aria-label': 'Copy ' + nameOf(a) + '’s answer', onclick: (e) => { navigator.clipboard.writeText(text).then(() => { e.currentTarget.replaceChildren(icon('check')) }).catch(() => {}) } }, icon('copy')) : null),
       body)
   })
-  return h('div', { id: 'answers', class: 'answers' },
-    h('div', { class: 'answers-q' }, h('span', { class: 'you' }, 'You asked'), h('p', {}, ASK.q),
-      ASK.done ? btn('Clear', () => { ASK = null; drawAnswers() }, 'sm ghost') : h('span', { class: 'muted small' }, 'Up to 5 minutes')),
-    ASK.error ? h('p', { class: 'note bad' }, icon('circle-alert'), ASK.error) : null,
+  return h('div', { class: 'round' },
+    h('div', { class: 'answers-q' }, h('span', { class: 'you' }, i ? 'Follow-up' : 'You asked'), h('p', {}, r.q), r.done ? null : h('span', { class: 'muted small' }, 'Up to 5 minutes')),
+    r.error ? h('p', { class: 'note bad' }, icon('circle-alert'), r.error) : null,
     cards.length ? h('div', { class: 'answers-grid', style: { '--n': Math.min(cards.length, 3) } }, cards) : null,
-    ASK.notes.map((n) => h('p', { class: 'note' }, icon('info'), n)))
+    r.notes.map((n) => h('p', { class: 'note' }, icon('info'), n)))
+}
+function answers () {
+  const past = askHistory().filter((t) => !ASK || t.id !== ASK.id)
+  const history = past.length ? h('details', { class: 'disclosure history' }, h('summary', {}, icon('rotate-ccw'), `Earlier questions (${past.length})`),
+    h('ul', { class: 'list' }, past.map((t) => h('li', {}, h('span', { class: 'grow' }, h('b', {}, t.rounds[0].q), h('span', { class: 'sub' }, `${t.rounds.length > 1 ? plural(t.rounds.length - 1, 'follow-up') + ' · ' : ''}${t.agents.map(nameOf).join(', ')} · ${ago(t.id / 1000)}`)),
+      btn('Open', () => { ASK = { ...t, compare: null }; drawAnswers() }, 'sm ghost')))),
+    h('button', { type: 'button', class: 'linkish small muted', onclick: () => { try { localStorage.removeItem('cage-asks') } catch (e) {} drawAnswers() } }, 'Forget these')) : null
+  if (!ASK) return h('div', { id: 'answers', class: 'answers' }, history)
+  const last = ASK.rounds[ASK.rounds.length - 1]
+  const done = ASK.rounds.every((r) => r.done)
+  const answered = Object.values(last.answers).filter(Boolean).length
+  const C = ASK.compare
+  const fu = h('input', { type: 'text', placeholder: 'Ask a follow-up… (they see the answers so far)', 'aria-label': 'Follow-up question', 'data-keep': 'follow-up' })
+  const fuForm = h('form', { class: 'add-row tight follow-up' }, fu, h('button', { type: 'submit', class: 'btn' }, icon('send'), 'Ask'))
+  fuForm.addEventListener('submit', (e) => { e.preventDefault(); if (fu.value.trim()) followUp(fu.value.trim()) })
+  return h('div', { id: 'answers', class: 'answers' },
+    ASK.rounds.map(roundView),
+    C ? h('article', { class: 'compare-card' }, h('header', {}, icon('split'), h('b', {}, 'Where they agree and differ'), h('span', { class: 'answer-state' }, avatar(C.by, 16), nameOf(C.by))),
+      C.text ? md(C.text) : C.error ? h('p', { class: 'note bad' }, icon('circle-alert'), C.error) : h('div', { class: 'skeleton' }, h('span'), h('span'))) : null,
+    done ? h('div', { class: 'answers-actions' },
+      answered > 1 && !C ? btn('Where do they disagree?', compare, 'sm', 'split') : null,
+      btn('Clear', () => { ASK = null; drawAnswers() }, 'sm ghost')) : null,
+    done && answered ? fuForm : null,
+    history)
 }
 function drawAnswers () { const el = document.getElementById('answers'); if (el) el.replaceWith(answers()) }
 
@@ -757,39 +828,38 @@ function chatOpen (a) {
   C.el.addEventListener('dragleave', (e) => { if (!C.el.contains(e.relatedTarget)) C.el.classList.remove('drop') })
   C.el.addEventListener('drop', (e) => { e.preventDefault(); C.el.classList.remove('drop'); attach(C, e.dataTransfer.files) })
   CHAT = C
-  chatConnect(C, true)
+  chatLoad(C)
   return C
 }
 function chatClose () {
   if (!CHAT) return
-  if (CHAT.es) CHAT.es.close()
   clearTimeout(CHAT.retry)
   CHAT = null
 }
 function grow (ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 260) + 'px' }
-function chatConnect (C, first) {
-  const q = first ? 'tail=600000' : 'from=' + C.offset
-  const es = new EventSource(`/api/chat/${C.agent}/log?${q}&token=${encodeURIComponent(TOKEN)}`)
-  C.es = es
-  let loading = first
-  es.onmessage = (m) => {
-    if (CHAT !== C) return es.close()
-    const d = JSON.parse(m.data)
-    if (d.reset) { C.list.replaceChildren(); C.previews.clear(); C.shared = []; C.lastWho = '' }
-    if (d.start) { if (loading) setTimeout(() => { loading = false; C.loaded = true; scrollEnd(true); drawChatState(C) }, 120); return }
-    if (typeof d.o === 'number') C.offset = d.o
-    if (!d.e) return
-    const near = nearEnd()
-    chatAdd(C, d.e, loading)
-    drawChatState(C)
-    if (!loading && (near || d.e.t === 'you')) scrollEnd()
-    if (!loading && document.hidden && ['reply', 'buttons', 'card', 'file'].includes(d.e.t) && (d.e.session || 'you') === 'you') notify(C.agent, d.e)
-  }
-  es.onerror = () => { es.close(); if (CHAT === C) C.retry = setTimeout(() => chatConnect(C, false), 2000) }
+async function chatLoad (C) { // the end of the conversation; what comes next arrives on the live stream
+  try {
+    const d = await api(`/api/chat/${C.agent}/history?tail=600000`)
+    if (CHAT !== C) return
+    for (const e of d.entries) chatAdd(C, e, true)
+    C.offset = d.o
+    LIVE.offsets[C.agent] = Math.max(LIVE.offsets[C.agent] ?? -1, d.o)
+  } catch (e) { if (CHAT === C) C.retry = setTimeout(() => chatLoad(C), 3000); return }
+  C.loaded = true
+  drawChatState(C)
+  scrollEnd(true)
+  liveConnect()
+}
+function chatLive (C, d) { // a new line in the open chat
+  if (!C.loaded || d.o <= C.offset) return
+  C.offset = d.o
+  const near = nearEnd()
+  chatAdd(C, d.e, false)
+  drawChatState(C)
+  if (near || d.e.t === 'you') scrollEnd()
 }
 function nearEnd () { return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160 }
 function scrollEnd (instant) { requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: instant ? 'auto' : 'smooth' })) }
-function notify () {}   // desktop notifications come with the notification settings
 
 function chatAdd (C, e, history) {
   if ((e.session || 'you') !== 'you') return
@@ -959,7 +1029,7 @@ function pageAgent (name, tab) {
   if (!a) return h('div', { class: 'page' }, pageHead('No such agent', ''), btn('Back to Home', () => go('home')))
   const s = statusOf(a)
   const st = STATUS[s]
-  const tabs = [['', 'Chat', 'message-circle'], ['files', 'Files', 'folder'], ['settings', 'Settings', 'settings']]
+  const tabs = [['', 'Chat', 'message-circle'], ['files', 'Files', 'folder'], ['schedule', 'Schedule', 'calendar-clock'], ['settings', 'Settings', 'settings']]
   const head = h('header', { class: 'agent-bar' },
     h('div', { class: 'agent-head', style: { '--c': AGENT[a.name].color } }, avatar(a.name, 40),
       h('div', {}, h('h1', {}, a.label), h('p', { class: 'status ' + st.tone }, dot(st.tone), st.label, h('span', { class: 'muted' }, ' · uses ' + a.plan)))),
@@ -973,10 +1043,87 @@ function pageAgent (name, tab) {
         btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'primary')))
   }
   if (tab === 'files') return h('div', { class: 'page agent-page' }, head, pageFiles(a))
+  if (tab === 'schedule') return h('div', { class: 'page agent-page' }, head, pageSchedule(a))
   if (tab === 'settings') return h('div', { class: 'page agent-page' }, head, agentSettings(a))
   const C = chatOpen(a.name)
   drawChatState(C)
   return h('div', { class: 'page agent-page chat-page' }, head, C.el)
+}
+
+// Scheduled tasks: cc-connect runs them in the agent's VM, in your time zone, while the agent is awake; what they say
+// arrives in its chat here. The app reads and changes them through cc-connect's management API (guest/app.mjs).
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+function cronOf (kind, time, day) {
+  const [hh, mm] = String(time || '09:00').split(':').map((x) => parseInt(x, 10) || 0)
+  if (kind === 'hourly') return `${mm} * * * *`
+  if (kind === 'weekdays') return `${mm} ${hh} * * 1-5`
+  if (kind === 'weekly') return `${mm} ${hh} * * ${day}`
+  return `${mm} ${hh} * * *`
+}
+function cronText (expr) { // "0 8 * * 1-5" → "Every weekday at 8:00 AM"; anything unusual stays as it is
+  const f = String(expr || '').trim().split(/\s+/)
+  if (f.length === 6) f.shift()
+  if (f.length !== 5) return expr
+  const [m, hr, dom, mon, dow] = f
+  if (dom !== '*' || mon !== '*' || !/^\d+$/.test(m)) return expr
+  if (hr === '*' && dow === '*') return m === '0' ? 'Every hour, on the hour' : `Every hour at :${m.padStart(2, '0')}`
+  if (!/^\d+$/.test(hr)) return expr
+  const at = ' at ' + new Date(2000, 0, 1, +hr, +m).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (dow === '*') return 'Every day' + at
+  if (dow === '1-5') return 'Every weekday' + at
+  if (dow === '0,6' || dow === '6,0') return 'Weekends' + at
+  if (/^[0-7]$/.test(dow)) return 'Every ' + DAYS[+dow % 7] + at
+  return expr
+}
+let SCHED = {}
+async function cronApi (a, method, p, body) {
+  const d = await api(`/api/chat/${a}/request`, { method: 'POST', body: { type: 'api', method, path: p, body } })
+  if (d && d.ok === false) throw new Error(d.error || 'cc-connect said no')
+  return (d && d.data) || {}
+}
+function pageSchedule (a) {
+  const awake = ['ready', 'login', 'installing'].includes(a.state)
+  const S = SCHED[a.name] || (SCHED[a.name] = { jobs: null, error: '', loading: false })
+  const load = async () => {
+    S.loading = true
+    try { S.jobs = ((await cronApi(a.name, 'GET', '/api/v1/cron?project=' + a.name)).jobs || []).filter((j) => !j.project || j.project === a.name); S.error = '' } catch (e) { S.error = e.message }
+    S.loading = false
+    render(true)
+  }
+  if (awake && !S.loading && ((S.jobs === null && !S.error) || ARRIVED)) load()
+  const what = h('textarea', { rows: 3, placeholder: 'e.g. Summarize what came into my inbox overnight, most important first.', 'aria-label': 'What should it do?', 'data-keep': 'sched-what' })
+  const kind = h('select', { 'aria-label': 'How often', onchange: () => { day.hidden = kind.value !== 'weekly'; time.hidden = kind.value === 'hourly' } },
+    [['weekdays', 'Every weekday'], ['daily', 'Every day'], ['weekly', 'Every week on'], ['hourly', 'Every hour']].map(([v, t]) => h('option', { value: v }, t)))
+  const day = h('select', { 'aria-label': 'Day', hidden: true }, DAYS.map((d, i) => h('option', { value: String(i), selected: i === 1 }, d)))
+  const time = h('input', { type: 'time', value: '08:00', 'aria-label': 'Time', class: 'time' })
+  const form = h('form', { class: 'stack sched-form' }, field('What should it do?', what),
+    h('div', { class: 'row' }, kind, day, h('span', { class: 'muted' }, 'at'), time, h('span', { class: 'grow' }), h('button', { type: 'submit', class: 'btn primary' }, icon('plus'), 'Add')))
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const prompt = what.value.trim()
+    if (!prompt) return what.focus()
+    try {
+      await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: prompt.split('\n')[0].slice(0, 80) })
+      what.value = ''
+      await load()
+    } catch (err) { alert('Couldn’t add it: ' + err.message) }
+  })
+  const rowsOf = (S.jobs || []).map((j) => h('li', {}, h('span', { class: 'chat-mark' }, icon('calendar-clock')),
+    h('span', { class: 'grow' }, h('b', {}, j.description || j.prompt || j.exec || 'A task'),
+      h('span', { class: 'sub' }, [cronText(j.cron_expr), j.last_run && !/^0001/.test(j.last_run) ? 'last ran ' + ago(Date.parse(j.last_run) / 1000) : 'hasn’t run yet', j.enabled === false ? 'paused' : ''].filter(Boolean).join(' · ')),
+      j.last_error ? h('span', { class: 'sub bad' }, j.last_error) : null),
+    btn('Run now', async () => { try { await cronApi(a.name, 'POST', `/api/v1/cron/${j.id}/exec`); go('agent/' + a.name) } catch (e) { alert(e.message) } }, 'sm ghost', 'play'),
+    btn('Delete', async () => { if (!confirm('Delete this scheduled task?')) return; try { await cronApi(a.name, 'DELETE', '/api/v1/cron/' + j.id); await load() } catch (e) { alert(e.message) } }, 'sm ghost danger')))
+  const tz = STATE.settings.tz
+  return [
+    section('Scheduled tasks', `Things ${a.label} does on its own, on a schedule. What it says shows up in the chat. They run while it’s awake${STATE.settings.autostart ? '' : ' (turn on Start at login so it is)'}${tz ? `, at your time (${tz.replace(/_/g, ' ')})` : ''}.`,
+      h('div', { class: 'card flush' },
+        !awake ? h('p', { class: 'empty' }, `${a.label} is asleep; wake it up to see and change its schedule.`)
+          : S.error ? h('p', { class: 'empty' }, 'Couldn’t read its schedule: ' + S.error)
+            : S.jobs === null ? h('p', { class: 'empty' }, 'Opening…')
+              : rows(rowsOf, 'Nothing scheduled yet.'))),
+    awake ? section('Add a task', 'Or just ask in the chat, like “every weekday at 8am, summarize my inbox”.', h('div', { class: 'card sched-card' }, form)) : null
+  ]
 }
 
 // Files: what you and the agent sent each other, and its work folder (the agent's own computer)
@@ -1031,7 +1178,7 @@ function pageFiles (a) {
               f.dir ? null : h('button', { type: 'button', class: 'btn sm ghost', onclick: (e) => download(p, e.currentTarget) }, icon('download'), 'Download'))
           }), 'This folder is empty.'))
   }
-  if (awake) { drawWork(); if (FILES.list === null) load(FILES.path) } else work.append(h('p', { class: 'empty' }, `${a.label} is asleep; wake it up to see its work folder.`))
+  if (awake) { drawWork(); if (FILES.list === null || ARRIVED) load(FILES.path) } else work.append(h('p', { class: 'empty' }, `${a.label} is asleep; wake it up to see its work folder.`))
   return [
     section('In this chat', 'Files you sent each other.', h('div', { class: 'card flush' }, rows(shared.map((f) => h('li', {}, fileChip(a.name, f),
       h('span', { class: 'muted small' }, f.from === 'you' ? 'You sent' : nameOf(a.name) + ' sent'))), 'Nothing yet. Attach files to a message, or ask it to send you one.'))),
@@ -1235,6 +1382,11 @@ function pageSettings () {
       setting('When an agent hits its usage limit', 'Another agent answers in its chat instead.', fallbacks, true))),
     section('This computer', '', h('div', { class: 'card' },
       setting('Start at login', 'Your agents wake up when you log in.', toggle(st.autostart, (on) => runJob(['autostart', on ? 'on' : 'off'], 'Start at login'), 'Start at login')),
+      setting('Desktop notifications', 'When an agent answers, sends a file or wants your OK while you’re looking elsewhere. Only on this computer.',
+        toggle(notifyOn(), (on) => setNotify(on), 'Desktop notifications')),
+      setting('An app of its own', installed() ? 'cage is installed: it has its own window and taskbar icon.' : 'Its own window and taskbar icon, instead of a browser tab.',
+        installed() ? h('span', { class: 'status ok' }, icon('circle-check'), 'Installed')
+          : INSTALL ? btn('Install', installApp, '', 'app-window') : h('span', { class: 'muted small' }, 'In Chrome or Edge: the install icon in the address bar')),
       setting('Updates', `You have cage ${S.version}${newer(LATEST, S.version) ? '; ' + LATEST + ' is available' : ''}. Updating also gets each agent’s newest version.`, btn('Update', () => runJob(['update'], 'Updating cage'), '', 'download')),
       setting('Check everything', 'This computer, your settings and the chat bots.', btn('Run a check-up', () => runJob(['doctor'], 'Checking everything'), '', 'stethoscope')))),
     section('Backups', `One encrypted file with your settings, keys, sign-ins, and each agent’s login and files. Saved to ${S.backups.dir}.`, h('div', { class: 'card flush' },
@@ -1292,6 +1444,73 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && document.body.classList.contains('nav-open')) document.body.classList.remove('nav-open')
 })
 
+// --- notifications: replies and questions from agents you're not looking at ----------------------------------------
+// One stream per agent, from now on; what arrives while you're elsewhere marks the agent unread in the sidebar and,
+// if you turned them on, shows a desktop notification (through the service worker, so it works installed too).
+const NOTES = { unread: {} }
+let INSTALL = null   // the browser's "install this app" prompt, when it offers one
+function notifyOn () { try { return localStorage.getItem('cage-notify') === 'on' && 'Notification' in window && Notification.permission === 'granted' } catch (e) { return false } }
+// Every agent's chat on one stream (a browser allows only a few connections to a site): the open chat's new lines,
+// and the others' for unread marks and notifications. offsets: how far each log has been seen.
+const LIVE = { es: null, key: '', offsets: {} }
+function liveConnect (force) {
+  if (!STATE) return
+  const names = agentsOn().map((a) => a.name)
+  const key = names.join(',')
+  if (!force && LIVE.es && key === LIVE.key) return
+  if (LIVE.es) LIVE.es.close()
+  LIVE.es = null
+  LIVE.key = key
+  if (!names.length) return
+  const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? -1)).join(',')
+  const es = new EventSource(`/api/chat/stream?from=${encodeURIComponent(from)}&token=${encodeURIComponent(TOKEN)}`)
+  LIVE.es = es
+  es.onmessage = (m) => {
+    const d = JSON.parse(m.data)
+    if (d.reset) {
+      LIVE.offsets[d.a] = 0
+      if (CHAT && CHAT.agent === d.a) { CHAT.list.replaceChildren(); CHAT.previews.clear(); CHAT.shared = []; CHAT.lastWho = ''; CHAT.offset = 0 }
+      return
+    }
+    if (!d.e || d.o <= (LIVE.offsets[d.a] ?? -1)) return
+    LIVE.offsets[d.a] = d.o
+    if (CHAT && CHAT.agent === d.a) chatLive(CHAT, d)
+    heard(d.a, d.e)
+  }
+  es.onerror = () => { es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
+}
+function heard (agent, e) {
+  if ((e.session || 'you') !== 'you' || !['reply', 'buttons', 'card', 'file'].includes(e.t)) return
+  if (page === 'agent/' + agent && document.visibilityState === 'visible') return
+  if (page !== 'agent/' + agent) { NOTES.unread[agent] = (NOTES.unread[agent] || 0) + 1; drawNav() }
+  if (!notifyOn()) return
+  const perm = e.t === 'buttons' && (e.buttons || []).flat().some((b) => /^perm:/.test(b.data))
+  const text = perm ? 'wants to go ahead: ' + (e.text || '') : e.t === 'file' ? 'sent you ' + (e.name || 'a file') : (e.text || (e.card && e.card.header && e.card.header.title) || '')
+  const opts = { body: text.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180), icon: 'icon-192.png', badge: 'icon-192.png', tag: 'cage-' + agent, data: { url: '/#agent/' + agent }, requireInteraction: perm }
+  const title = nameOf(agent)
+  const fallback = () => { const n = new Notification(title, opts); n.onclick = () => { window.focus(); go('agent/' + agent); n.close() } }
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.ready.then((r) => r.showNotification(title, opts)).catch(fallback)
+  else fallback()
+}
+async function setNotify (on) {
+  if (on && 'Notification' in window && Notification.permission !== 'granted') {
+    const p = await Notification.requestPermission()
+    if (p !== 'granted') { alert('Your browser blocked notifications for cage. You can allow them in its site settings.'); on = false }
+  }
+  try { localStorage.setItem('cage-notify', on ? 'on' : 'off') } catch (e) {}
+  render(true)
+}
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); INSTALL = e; if (STATE) drawNav() })
+window.addEventListener('appinstalled', () => { INSTALL = null; if (STATE) render(true) })
+async function installApp () {
+  if (!INSTALL) return
+  INSTALL.prompt()
+  await INSTALL.userChoice.catch(() => {})
+  INSTALL = null
+  render(true)
+}
+const installed = () => window.matchMedia && window.matchMedia('(display-mode: standalone)').matches
+
 // --- the frame: sidebar, routing ---------------------------------------------------------------------------------
 function go (p) { location.hash = p }
 function drawNav () {
@@ -1300,7 +1519,8 @@ function drawNav () {
   list.replaceChildren(...S.agents.slice().sort((a, b) => b.enabled - a.enabled).map((a) => {
     const st = STATUS[statusOf(a)]
     return h('a', { href: '#agent/' + a.name, 'data-nav': 'agent/' + a.name, class: a.enabled ? '' : 'off', title: a.label + ': ' + st.label },
-      avatar(a.name, 18), h('span', { class: 'label' }, a.label), a.enabled ? dot(st.tone) : h('span', { class: 'nav-add' }, icon('plus')))
+      avatar(a.name, 18), h('span', { class: 'label' }, a.label), NOTES.unread[a.name] ? h('span', { class: 'badge unread', 'aria-label': plural(NOTES.unread[a.name], 'new message') }, String(NOTES.unread[a.name])) : null,
+      a.enabled ? dot(st.tone) : h('span', { class: 'nav-add' }, icon('plus')))
   }))
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === page.split('/').slice(0, 2).join('/')))
   const badge = (id, n) => { const b = document.getElementById(id); b.hidden = !n; b.textContent = n || '' }
@@ -1309,10 +1529,13 @@ function drawNav () {
   const ver = document.getElementById('version')
   ver.replaceChildren(h('span', {}, 'cage ' + S.version))
   if (newer(LATEST, S.version)) ver.append(h('button', { type: 'button', class: 'update', onclick: () => runJob(['update'], 'Updating cage') }, icon('download'), 'Update to ' + LATEST))
+  if (INSTALL && !installed()) ver.append(h('button', { type: 'button', class: 'update', onclick: installApp }, icon('app-window'), 'Install as an app'))
   const todo = agentsOn().filter((a) => ['login', 'stuck'].includes(statusOf(a))).length + S.connectors.filter((c) => c.broken).length + (S.events.unseen ? 1 : 0)
-  document.title = todo ? `(${todo}) cage` : 'cage'
+  const unread = Object.values(NOTES.unread).reduce((x, y) => x + y, 0)
+  document.title = todo + unread ? `(${todo + unread}) cage` : 'cage'
   document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
+let ARRIVED = false   // true while a page is drawn on arriving at it (not on a redraw): the time to reload what it shows
 function render (force) {
   if (!STATE) return
   document.body.classList.remove('is-locked')
@@ -1331,7 +1554,9 @@ function render (force) {
       : { home: pageHome, apps: pageApps, signins: pageSignins, memory: pageMemory, security: pageSecurity, settings: pageSettings }[page]
   const same = main.dataset.page === page
   main.dataset.page = page
+  ARRIVED = !same
   main.replaceChildren(fn())
+  ARRIVED = false
   main.querySelectorAll('[data-keep]').forEach((el) => { if (kept[el.dataset.keep]) el.value = kept[el.dataset.keep] })
   if (!same) window.scrollTo(0, 0)
   SEEN = key
@@ -1344,7 +1569,8 @@ function route () {
     history.replaceState(null, '', location.pathname + '#home')
   }
   const p = location.hash.slice(1)
-  page = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|settings))?$/.test(p) ? p : 'home'
+  page = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|schedule|settings))?$/.test(p) ? p : 'home'
+  if (/^agent\/[a-z]+$/.test(page)) delete NOTES.unread[page.slice(6)]
   document.body.classList.remove('nav-open')
   if (TOKEN) start()
   render()
@@ -1355,6 +1581,7 @@ function start () {
   started = true
   refresh()
   api('/api/update').then((d) => { LATEST = d.latest || ''; render() }).catch(() => {})
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {})
   setInterval(() => { if (!job && document.visibilityState === 'visible') refresh() }, 6000)
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !job) refresh() })
 }

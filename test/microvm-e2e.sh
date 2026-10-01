@@ -32,7 +32,7 @@ CAGE_TELEGRAM_ALLOW="111"
 CAGE_TELEGRAM_TOKEN_$A="123456:FAKE-token-for-e2e"
 EOF
 
-cage up "$A"
+TZ=Asia/Kolkata cage up "$A"   # the VM takes this computer's time zone (no daylight saving there: always +0530)
 msb inspect "$VM" >/dev/null || fail "VM not created"
 ok "cage up created $VM"
 
@@ -42,6 +42,9 @@ ok "first boot provisioned $A + cc-connect inside the microVM"
 retry 120 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect is not running as agent"
 [ "$(gx stat -c '%U %a' /home/agent/.cc-connect/config.toml)" = "agent 600" ] || fail "config ownership"
 ok "cc-connect runs as the unprivileged agent user with a 0600 config"
+# without TZ, as cc-connect runs (env -i): the system clock's zone itself
+[ "$(gx env -u TZ date +%z)" = "+0530" ] || fail "the VM is not in the host's time zone: $(gx env -u TZ date) / $(gx readlink /etc/localtime)"
+ok "the VM runs in this computer's time zone (scheduled tasks run at your time)"
 
 case "$A" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$A" ;; esac
 ax "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"

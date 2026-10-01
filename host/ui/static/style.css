@@ -809,3 +809,24 @@ body.in-setup .shell { grid-template-columns: minmax(0, 1fr); background: none; 
   .pick-grid { grid-template-columns: minmax(0, 1fr); }
   .setup-rail li { font-size: 0; gap: 0; }
 }
+
+/* --- ask: rounds, a comparison, follow-ups, earlier questions ------------------------------------------------------ */
+.round { display: flex; flex-direction: column; gap: 12px; }
+.round + .round { padding-top: 14px; border-top: 1px dashed var(--line); }
+.compare-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 6px; border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--info) 6%, var(--card)); border: 1px solid color-mix(in srgb, var(--info) 22%, var(--line)); }
+.compare-card header { display: flex; align-items: center; gap: 8px; }
+.compare-card header > .i { color: var(--info-fg); }
+.compare-card header b { color: var(--ink); font-weight: 600; font-size: 13.5px; }
+.compare-card .answer-state { display: inline-flex; align-items: center; gap: 6px; }
+.answers-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.follow-up { margin-top: 2px; }
+.history { margin-top: 4px; }
+.history .list > li { padding-left: 0; padding-right: 0; }
+.history > button { margin-top: 6px; }
+
+/* --- schedule ------------------------------------------------------------------------------------------------------ */
+.sched-card { padding: 18px 20px; }
+.sched-form .row select, .sched-form .row input.time { width: auto; }
+input[type=time] { height: 36px; padding: 0 10px; border: 1px solid var(--input); border-radius: var(--r); background: var(--card); color: var(--ink); font: inherit; }
+.badge.unread { background: var(--primary); color: var(--primary-fg); }
