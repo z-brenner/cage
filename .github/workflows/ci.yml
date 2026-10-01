@@ -32,7 +32,7 @@ jobs:
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/pw/node_modules/playwright" CAGE_TEST_CHROME="$(command -v google-chrome)" test/ui.sh
       - name: Linux installer
         run: test/installer.sh
-      - name: adapter rules (node): WhatsApp, and the app's chat relay
+      - name: "adapter rules (node): WhatsApp, and the app's chat relay"
         run: node --test test/whatsapp.test.mjs test/app.test.mjs
       - name: host + setup tests (bash 5) + real cc-connect config validation
         run: |
