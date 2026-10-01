@@ -196,7 +196,7 @@ cmd_doctor() {
     local t u
     for a in $CAGE_AGENTS; do
       t="$(token_for "$a")"
-      if ! valid_token "$t"; then echo "✗ CAGE_TELEGRAM_TOKEN_$a missing (cage setup)"; ok=0
+      if ! valid_token "$t"; then echo "✗ CAGE_TELEGRAM_TOKEN_$a missing (cage setup $a, or drop $a from CAGE_AGENTS)"; ok=0
       elif u="$(bot_username "$t")"; then echo "✓ $a bot: @$u"
       else echo "✗ Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"; ok=0
       fi
@@ -230,6 +230,18 @@ cmd_setup() {
     fi
     if [ -z "$first" ]; then first="$token"; first_bot="$user"; fi
   done
+  # `cage setup claude codex` means "these are my agents": keep CAGE_AGENTS to the agents that have a bot, so
+  # `cage up`, `doctor` and autostart don't trip over the example's other agents. Earlier setups are kept.
+  if [ $# -gt 0 ]; then
+    local keep=() k
+    for k in $KINDS; do
+      if [[ " ${AGENTS[*]} " == *" $k "* ]] || { [[ " $CAGE_AGENTS " == *" $k "* ]] && valid_token "$(token_for "$k")"; }; then
+        keep+=("$k")
+      fi
+    done
+    set_env CAGE_AGENTS "${keep[*]}"
+    say "agents: ${keep[*]}"
+  fi
 
   if [[ "$CAGE_TELEGRAM_ALLOW" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     say "allowlist already set: $CAGE_TELEGRAM_ALLOW"
