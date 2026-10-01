@@ -406,6 +406,23 @@ cage up claude 2>/dev/null
 if grep -q 'hooks\|^\[speech\]' "$t" || grep -q 'cage-outbox' "$MSB_LOG" || [ -e "$CAGE_HOME/agents/claude/voice.env" ]; then fail "still on after turning it off"; fi
 unset MSB_RUNNING MSB_SENT
 
+# --- privacy mask: per agent, the CLI runs behind guest/mask.py
+cage mask add "Acme Corp" </dev/null 2>/dev/null
+cage mask on claude cursor </dev/null 2>/dev/null
+grep -q '^CAGE_MASK="claude cursor"$' "$CAGE_HOME/cage.env" || fail "mask on not saved: $(grep CAGE_MASK "$CAGE_HOME/cage.env")"
+cage up claude cursor codex 2>/dev/null
+grep -q '^cmd = "python3 /cage/mask.py claude"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude doesn't run behind the mask"
+grep -q '^cmd = "python3 /cage/mask.py cursor-agent' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor doesn't run behind the mask"
+grep -q '^cmd' "$CAGE_HOME/agents/codex/cc-connect.toml" && fail "codex got the mask"
+grep -qx 'Acme Corp' "$CAGE_HOME/agents/claude/mask.terms" && [ -e "$CAGE_HOME/agents/claude/mask.on" ] || fail "mask terms not passed to the VM"
+[ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "codex marked as masked"
+out="$(cage mask try "write to bob@example.com about Acme Corp" 2>&1)"
+grep -qF "write to [EMAIL_1] about [TERM_1]" <<<"$out" || fail "cage mask try: $out"
+cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
+cage up claude 2>/dev/null
+if grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" || [ -e "$CAGE_HOME/agents/claude/mask.on" ] || [ -s "$CAGE_HOME/mask.terms" ]; then fail "mask still on"; fi
+ok "privacy mask: per agent, the CLI runs behind guest/mask.py with your terms; cage mask try previews it"
+
 # --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
 V="$T/volumes/cage-claude-home"
 mkdir -p "$V/.claude" "$V/work" "$V/.cache/ms-playwright/chromium" "$T/volumes/cage-codex-home/.codex"

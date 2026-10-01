@@ -64,6 +64,7 @@ cage security         what was blocked: keys sent to the wrong place, hosts (str
 cage ask "…"          every awake agent answers (cage ask-all on: /all in chat too)
 cage fallback a b     when agent a is out of quota, b answers in its chat
 cage voice on         voice notes, turned into text on each agent's own VM
+cage mask on          emails, numbers and keys reach the AI vendor as tokens
 cage network strict   each agent reaches only what it needs (cage allow <host> for more)
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
@@ -101,6 +102,25 @@ cage chat                       # who's where
 - **Only you can talk to it** unless you say otherwise: cage finds your Slack account from your email, and your Discord account from the app's owner.
 - **Letting coworkers use it** is possible (`everyone`, or a list of emails in Slack), but think twice. Each agent runs on *your* personal subscription. Those plans are for one person, so sharing one with a team likely breaks their terms (see below). Everyone you let in can also reach what you connected it to: your email, files and keys. For a team bot, use the vendor's team plan or API key instead.
 - **WhatsApp:** your agent links as a device of a WhatsApp number, through [Baileys](https://github.com/WhiskeySockets/Baileys) (an open-source, unofficial WhatsApp Web client) plugged into cc-connect's bridge. WhatsApp doesn't allow unofficial clients and has banned numbers for it, so **use a spare number** if you can (a prepaid SIM, or a second number in the WhatsApp Business app), then message it from your own phone. Linking your own number works too: the agent then answers only in your "Message yourself" chat, but its VM holds a key to your whole WhatsApp. It comes on top of Telegram, Slack or Discord. If the link drops: `cage chat link whatsapp <agent>`.
+
+## Privacy mask
+
+```bash
+cage mask on [agents]          # on for all agents, or the ones you name
+cage mask add "Acme Corp"      # your own sensitive terms: clients, projects, people
+cage mask try "mail bob@acme.com about Acme Corp"   # see what the model would get
+cage mask off
+```
+
+With the mask on, sensitive values in your messages become tokens like `[EMAIL_1]` before they reach the AI vendor, and turn back into the real values in the replies you read. Covered:
+- email addresses and phone numbers;
+- card numbers (Luhn-checked), IBANs (checksum-verified) and US social security numbers;
+- API keys and tokens;
+- your own terms.
+
+It runs inside each agent's VM, between the chat bot and the agent's CLI, so it covers Telegram, Slack, Discord and WhatsApp alike. The same value always gets the same token, so the agent can still tell them apart.
+
+The trade-off is that the agent can't use a masked value itself. It knows this, and asks when a task needs one.
 
 ## Memory
 

@@ -209,6 +209,19 @@ if [ "$A" = claude ]; then
 fi
 cage ask-all off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
 
+# the privacy mask: cc-connect runs the real CLI behind guest/mask.py
+cage mask add "Acme Corp" </dev/null 2>/dev/null
+cage mask on "$A" </dev/null 2>/dev/null
+cage up "$A"
+retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned with the mask on"
+retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not running behind the mask"
+ax python3 /cage/mask.py "$BIN" --version >/dev/null || fail "$BIN doesn't run behind the mask"
+[ "$(ax sh -c 'printf "ask acme corp at bob@example.com" | python3 /cage/mask.py --mask')" = "ask [TERM_1] at [EMAIL_1]" ] \
+  || fail "the mask in the VM: $(ax sh -c 'printf "ask acme corp at bob@example.com" | python3 /cage/mask.py --mask')"
+gx grep -q 'Masked values' /home/agent/work/AGENTS.md || fail "the agent wasn't told about masked values"
+cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
+ok "privacy mask: the real CLI runs behind it, your terms and emails become tokens, the agent is told"
+
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi
 ok "destroy removes the VM and its volume"

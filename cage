@@ -452,6 +452,12 @@ token = \"$(cvar WHATSAPP_TOKEN "$a")\"
   # Cursor asks before it uses an MCP server, and headless nobody can answer: once you've connected apps for it
   # (connector_plan runs first), approve them.
   if [ "$a" = cursor ] && [ -s "$dir/connectors.list" ]; then cmd="$cmd --approve-mcps"; fi
+  if mask_on "$a"; then   # the privacy mask runs the CLI (guest/mask.py)
+    cmd="python3 /cage/mask.py ${cmd:-$a}"
+    ( umask 077; cat "$MASK_TERMS" 2>/dev/null > "$dir/mask.terms" || true; : > "$dir/mask.on" )
+  else
+    rm -f "$dir/mask.terms" "$dir/mask.on"
+  fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
   # /all and stand-ins: cc-connect's hooks only notify, so guest/hook.sh leaves requests for cage (see outbox_process)
   local features extras=""
@@ -2068,9 +2074,12 @@ ask_script() { # the agent's CLI answering one question ($1): read-only, no apps
 }
 
 ask_agent() { # ask_agent <agent> <question>: its answer on stdout (empty if it couldn't)
+  local script
+  script="$(ask_script "$1")"
+  if mask_on "$1"; then script="exec python3 /cage/mask.py ${script#exec }"; fi   # its privacy mask applies here too
   timeout "$ASK_TIMEOUT" "$MSB" exec --no-tty -u agent -e HOME=/home/agent -w /home/agent/work "$(vm "$1")" -- \
     bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
-      PATH="/usr/local/bin:/usr/bin:/bin"; '"$(ask_script "$1")" _ "$2" 2>/dev/null | head -c 12000
+      PATH="/usr/local/bin:/usr/bin:/bin"; '"$script" _ "$2" 2>/dev/null | head -c 12000
 }
 
 deliver() { # deliver <agent> <session key> <text>: a message into that chat, from the agent's own bot
@@ -2136,7 +2145,7 @@ outbox_process() { # handle what the agents' hooks left; everything in an outbox
       key="$(outbox_read "$base/$id/session" 256 || true)"
       text="$(outbox_read "$base/$id/text" 16000 || true)"
       rm -rf "${base:?}/$id"
-      [[ "$key" =~ ^[A-Za-z0-9:_@.+=-]{1,256}$ ]] && [ -n "$text" ] || continue
+      [[ "$key" =~ ^[A-Za-z0-9:_@.+=-]{1,255}$ ]] && [ -n "$text" ] || continue
       # at most one request per agent every 5 seconds, and the same question once (several bots in one group)
       last="$(cat "$OUTBOX/.last-$a" 2>/dev/null || echo 0)"
       [ $((now - ${last:-0})) -ge 5 ] || continue
@@ -2279,6 +2288,61 @@ voice_config() { # voice_config <agent>: its [speech] block, and the settings fo
   else
     printf 'provider = "groq"\n\n[speech.groq]\napi_key = "$MSB_VOICE_GROQ_KEY"\nmodel = "whisper-large-v3-turbo"\n'
   fi
+}
+
+# --- privacy mask -------------------------------------------------------------------------------------------------
+# Optional, per agent (`cage mask on`): guest/mask.py sits between cc-connect and the agent's CLI and swaps
+# sensitive values in your messages (emails, phone and card numbers, IBANs, keys, your own terms) for tokens like
+# [EMAIL_1] before they reach the model, and back again in what the agent says to you.
+MASK_TERMS="$CAGE_HOME/mask.terms"
+mask_on() { [[ " ${CAGE_MASK:-} " == *" $1 "* ]]; }
+
+cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>"]
+  load_env
+  local sub="${1:-}" a cur new t
+  shift || true
+  case "$sub" in
+    "")
+      say "privacy mask: ${C_B}${CAGE_MASK:-off}${C_0}"
+      hint "cage mask on [agents] · cage mask add \"Client name\" · cage mask try \"text\" · cage mask off"
+      return 0 ;;
+    on|off)
+      local who=("$@")
+      [ $# -gt 0 ] || read -r -a who <<<"$CAGE_AGENTS"
+      cur="${CAGE_MASK:-}"
+      for a in "${who[@]}"; do
+        check_agent "$a"
+        new=""; for t in $cur; do [ "$t" = "$a" ] || new="$new${new:+ }$t"; done
+        [ "$sub" = off ] || new="$new${new:+ }$a"
+        cur="$new"
+      done
+      set_env CAGE_MASK "$cur"; CAGE_MASK="$cur"
+      if [ "$sub" = on ]; then
+        ok "privacy mask on for ${who[*]}: emails, phone and card numbers, IBANs, keys and your terms reach the model as tokens"
+        hint "the agent can't use a masked value itself (it only sees [EMAIL_1]); add your own terms: cage mask add \"…\""
+      else
+        ok "privacy mask off for ${who[*]}"
+      fi
+      features_apply ;;
+    add|rm)
+      t="${*:-}"
+      [ -n "$t" ] && [ "${#t}" -le 200 ] && [[ "$t" != *$'\n'* ]] || die "usage: cage mask $sub \"<term>\""
+      touch "$MASK_TERMS" && chmod 600 "$MASK_TERMS"
+      { grep -vixF -- "$t" "$MASK_TERMS" || true; } > "$MASK_TERMS.tmp"
+      [ "$sub" = rm ] || printf '%s\n' "$t" >> "$MASK_TERMS.tmp"
+      mv "$MASK_TERMS.tmp" "$MASK_TERMS"
+      if [ "$sub" = add ]; then ok "\"$t\" will be masked"; else ok "\"$t\" is no longer masked"; fi
+      [ -z "${CAGE_MASK:-}" ] || features_apply ;;
+    list) if [ -s "$MASK_TERMS" ]; then sed 's/^/  /' "$MASK_TERMS" >&2; else say "no terms of your own yet: cage mask add \"…\""; fi ;;
+    try)
+      [ -n "${1:-}" ] || die "usage: cage mask try \"<text>\""
+      command -v python3 >/dev/null 2>&1 || die "this needs python3 on this computer"
+      t="$(mktemp -d)"
+      printf '%s' "$*" | CAGE_MASK_MAP="$t/map.json" CAGE_MASK_TERMS="$MASK_TERMS" python3 "$CAGE_ROOT/guest/mask.py" --mask >&2
+      printf '\n' >&2
+      rm -rf "$t" ;;
+    *) die "usage: cage mask [on|off [agents] | add|rm <term> | list | try \"<text>\"]" ;;
+  esac
 }
 
 # --- network rules and security events --------------------------------------------------------------------------
@@ -2766,6 +2830,7 @@ usage() {
   row "  ask-all on|off" "/all <question> in chat: all of them answer"
   row "  fallback <a> <b>" "when a is out of quota, b answers instead"
   row "  voice on|off" "voice notes, turned into text on each VM"
+  row "  mask on|off|add|try" "emails, numbers, keys reach the model as tokens"
   row "  connect [add|rm]" "apps your agents can use: Gmail, GitHub, …"
   row "  password add|list|rm" "website sign-ins they use but never see"
   row "  secret add|list|rm" "keys agents can use but never see"
@@ -2815,6 +2880,7 @@ main() {
     ask-all) cmd_ask_all "$@" ;;
     fallback) cmd_fallback "$@" ;;
     voice) cmd_voice "$@" ;;
+    mask) cmd_mask "$@" ;;
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
