@@ -339,6 +339,8 @@ make_managed_bot() { # make_managed_bot <agent>: one tap creates the agent's bot
   return 0
 }
 
+conf_get() { sed -n "/^$2=/{s/^$2=//p;q;}" "$1" 2>/dev/null || true; }   # conf_get <file> <key>: its first value
+
 # Upserts KEY="VALUE" in the env file. Callers validate VALUE, so it never needs escaping.
 set_env() {
   local tmp="$CAGE_ENV.tmp.$$"
@@ -379,6 +381,9 @@ render_config() {
   mkdir -p "$dir"
   chmod 700 "$CAGE_HOME" "$CAGE_HOME/agents" "$dir"
   cmd="$(cc_cmd "$a")"
+  # Cursor asks before it uses an MCP server, and headless nobody can answer: once you've connected apps for it
+  # (connector_plan runs first), approve them.
+  if [ "$a" = cursor ] && [ -s "$dir/connectors.list" ]; then cmd="$cmd --approve-mcps"; fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
   (
     umask 077
@@ -540,44 +545,63 @@ tls_bypass_for() { # hosts that must not be intercepted: Telegram, and the agent
   esac
 }
 
-secret_add() { # secret_add NAME HOST[,HOST...] [agent...]
-  local name="${1:-}" hosts="${2:-}" agents value h a b
-  [ -n "$name" ] && [ -n "$hosts" ] || die "usage: cage secret add NAME HOST[,HOST...] [agent...]   e.g. cage secret add GITHUB_TOKEN api.github.com"
-  shift 2
-  secret_name_ok "$name" || die "name it in capitals, like GITHUB_TOKEN (not a system variable)"
-  agents="${*:-$CAGE_AGENTS}"
-  for a in $agents; do check_agent "$a"; done
-  for h in ${hosts//,/ }; do
+agents_for() { if [ "$1" = all ]; then echo "$CAGE_AGENTS"; else echo "$1"; fi; }   # "all": every agent, later ones too
+agents_label() { if [ "$1" = all ]; then echo "all agents"; else echo "${1// /, }"; fi; }
+for_agent() { [ "$1" = all ] || [[ " $1 " == *" $2 "* ]]; }   # for_agent <agents|all> <agent>
+
+hosts_check() { # hosts_check HOST[,HOST...] <agents|all>: dies on a bad host, or on an agent's own service
+  local h a b
+  for h in ${1//,/ }; do
     host_ok "$h" || die "\"$h\" isn't a host name (like api.github.com, or *.example.com)"
-    for a in $agents; do
+    for a in $(agents_for "$2"); do
       for b in $(tls_bypass_for "$a"); do
-        host_matches "${h#\*.}" "$b" && die "$h is $a's own service; cage doesn't intercept it, so a key can't be protected there"
+        host_matches "${h#\*.}" "$b" && die "$h is $a's own service; cage doesn't intercept it, so a key can't be protected there for $a (name the agents that should get it)"
       done
     done
   done
-  prompt "$(brand) value for $name (stays hidden): " value secret
-  [ -n "$value" ] || die "empty value; nothing saved"
+  return 0
+}
+
+secret_save() { # secret_save NAME HOSTS <agents|all> VALUE [connector]
   mkdir -p "$SECRETS" && chmod 700 "$SECRETS"
   ( umask 077
-    printf '%s' "$value" > "$SECRETS/$name"
-    printf 'hosts=%s\nagents=%s\n' "$hosts" "$agents" > "$SECRETS/$name.conf" )
+    printf '%s' "$4" > "$SECRETS/$1"
+    printf 'hosts=%s\nagents=%s\n' "$2" "$3" > "$SECRETS/$1.conf"
+    if [ -n "${5:-}" ]; then printf 'connector=%s\n' "$5" >> "$SECRETS/$1.conf"; fi )
+}
+
+secret_add() { # secret_add NAME HOST[,HOST...] [agent...]
+  local name="${1:-}" hosts="${2:-}" agents value a
+  [ -n "$name" ] && [ -n "$hosts" ] || die "usage: cage secret add NAME HOST[,HOST...] [agent...]   e.g. cage secret add GITHUB_TOKEN api.github.com"
+  shift 2
+  secret_name_ok "$name" || die "name it in capitals, like GITHUB_TOKEN (not a system variable)"
+  agents="${*:-all}"
+  [ "$agents" = all ] || for a in $agents; do check_agent "$a"; done
+  hosts_check "$hosts" "$agents"
+  [ -z "$(conf_get "$SECRETS/$name.conf" connector)" ] || die "$name belongs to the $(conf_get "$SECRETS/$name.conf" connector) connector: cage connect add $(conf_get "$SECRETS/$name.conf" connector)"
+  prompt "$(brand) value for $name (stays hidden): " value secret
+  [ -n "$value" ] || die "empty value; nothing saved"
+  secret_save "$name" "$hosts" "$agents" "$value"
   ok "$name saved on this computer; agents only ever see a placeholder"
-  hint "it works only for requests to $hosts, by: $agents. Apply it: cage up $agents"
+  hint "it works only for requests to $hosts, by $(agents_label "$agents"). Apply it: cage up"
 }
 
 secret_list() {
-  local f n=0 name
+  local f n=0 name c
   for f in "$SECRETS"/*.conf; do
     [ -f "$f" ] || continue
-    n=$((n + 1)) name="$(basename "$f" .conf)"
-    printf '  %s%-24s%s %s  %s(%s)%s\n' "$C_B" "$name" "$C_0" "$(sed -n 's/^hosts=//p' "$f")" "$C_DIM" "$(sed -n 's/^agents=//p' "$f")" "$C_0"
+    n=$((n + 1)) name="$(basename "$f" .conf)" c="$(conf_get "$f" connector)"
+    printf '  %s%-24s%s %s  %s(%s%s)%s\n' "$C_B" "$name" "$C_0" "$(conf_get "$f" hosts)" "$C_DIM" \
+      "$(agents_label "$(conf_get "$f" agents)")" "${c:+; for the $c connector}" "$C_0"
   done
   [ $n -gt 0 ] || { say "no secrets yet"; hint "cage secret add GITHUB_TOKEN api.github.com"; }
 }
 
 secret_rm() {
-  local name="${1:-}"
+  local name="${1:-}" c
   { secret_name_ok "$name" && [ -f "$SECRETS/$name.conf" ]; } || die "no secret called \"$name\" (see: cage secret list)"
+  c="$(conf_get "$SECRETS/$name.conf" connector)"
+  [ -z "$c" ] || die "$name belongs to the $c connector; remove that instead: cage connect rm $c"
   rm -f "$SECRETS/$name" "$SECRETS/$name.conf"
   ok "$name removed from this computer"
   hint "running agents keep it until they restart: cage up"
@@ -600,8 +624,8 @@ secret_plan() { # secret_plan <agent>: msb flags and values for its secrets; wri
   for f in "$SECRETS"/*.conf; do
     [ -f "$f" ] || continue
     name="$(basename "$f" .conf)"
-    hosts="$(sed -n 's/^hosts=//p' "$f")" agents="$(sed -n 's/^agents=//p' "$f")"
-    { [[ " $agents " == *" $a "* ]] && [ -r "$SECRETS/$name" ]; } || continue
+    hosts="$(conf_get "$f" hosts)" agents="$(conf_get "$f" agents)"
+    { for_agent "$agents" "$a" && [ -r "$SECRETS/$name" ]; } || continue
     SECRET_ARGS+=(--secret "$name@$hosts")
     SECRET_ENV+=("$name=$(cat "$SECRETS/$name")")
     names="$names$name"$'\n' info="$info- \$$name: ${hosts//,/, }"$'\n'
@@ -611,6 +635,160 @@ secret_plan() { # secret_plan <agent>: msb flags and values for its secrets; wri
   fi
   # Names and hosts only (never values): the VM passes the placeholders on and tells the agent what it has.
   ( umask 077; printf '%s' "$names" > "$CAGE_HOME/agents/$a/secrets.names"; printf '%s' "$info" > "$CAGE_HOME/agents/$a/secrets.md" )
+}
+
+# --- connectors ------------------------------------------------------------------------------------------------
+# Apps your agents can use, as remote MCP servers that each VM wires into its agent's own CLI at boot
+# (guest/connectors.sh). A connector's key is saved as a secret (above), so the VM only ever holds a placeholder,
+# which microsandbox swaps for the real key on its way to that app's own servers.
+CONNECTORS="$CAGE_HOME/connectors"
+# name | what your agents get | MCP server | hosts its key may go to | where to get a key | steps there (";"-separated)
+CATALOG=(
+  "zapier|Gmail, Calendar, Drive, Slack, Notion and thousands more apps, through Zapier|https://mcp.zapier.com/api/v1/connect|mcp.zapier.com|https://mcp.zapier.com|sign in (a free Zapier account works), create a server and choose \"Other\" as the client;add the apps and actions you want your agents to have;on the Connect tab, generate a token and copy it"
+  "github|GitHub: repositories, issues and pull requests|https://api.githubcopilot.com/mcp/|api.githubcopilot.com,api.github.com|https://github.com/settings/personal-access-tokens/new|pick the repositories and what it may do (Contents, Issues, Pull requests);generate the token and copy it"
+  "linear|Linear: issues, projects and cycles|https://mcp.linear.app/mcp|mcp.linear.app,api.linear.app|https://linear.app/settings/account/security|under Personal API keys, create a key and copy it"
+)
+catalog_names() { local e out=""; for e in "${CATALOG[@]}"; do out="$out${out:+|}${e%%|*}"; done; echo "$out"; }
+catalog_get() { # catalog_get <name>: sets CT_TITLE CT_URL CT_HOSTS CT_KEYURL CT_STEPS; false if cage doesn't know it
+  local e _n
+  for e in "${CATALOG[@]}"; do
+    [ "${e%%|*}" = "$1" ] || continue
+    IFS='|' read -r _n CT_TITLE CT_URL CT_HOSTS CT_KEYURL CT_STEPS <<<"$e"
+    return 0
+  done
+  return 1
+}
+connector_name_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{1,30}$ ]]; }
+connector_secret() { printf '%s_MCP_TOKEN' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
+url_host() { local h="${1#https://}"; h="${h%%[/?#]*}"; h="${h%%:*}"; printf '%s' "$h" | tr 'A-Z' 'a-z'; }
+
+connect_add() { # connect_add <name> [https://url [--header NAME]] [agent...]
+  local name="${1:-}" url hosts header=Authorization agents value="" secret title="" keyurl="" steps=() s i=2 a
+  local url_re='^https://[A-Za-z0-9._~:/?#@&+,;=%-]+$' key_re='[?&](token|key|apikey|api_key|access_token|secret)='
+  [ -n "$name" ] || die "usage: cage connect add <$(catalog_names)> [agents]   or, for any other app: cage connect add NAME https://…/mcp"
+  connector_name_ok "$name" || die "name it in lowercase letters, like notes or my-crm"
+  shift
+  if catalog_get "$name"; then
+    [[ "${1:-}" != https://* ]] || die "$name is built in; just run: cage connect add $name"
+    url="$CT_URL" hosts="$CT_HOSTS" title="$CT_TITLE" keyurl="$CT_KEYURL"
+    IFS=';' read -r -a steps <<<"$CT_STEPS"
+  else
+    url="${1:-}"
+    [[ "$url" == https://* ]] || die "cage doesn't know \"$name\" ($(catalog_names) are built in). For any other app, give its MCP address: cage connect add $name https://…"
+    shift
+    [[ "$url" =~ $url_re ]] || die "that doesn't look like a web address: $url"
+    if [[ "$(printf '%s' "$url" | tr 'A-Z' 'a-z')" =~ $key_re ]]; then
+      die "that address has a key in it, which would put the key inside the VMs. Leave it off the address; cage asks for it next"
+    fi
+    hosts="$(url_host "$url")"
+    if [ "${1:-}" = --header ]; then
+      header="${2:-}"
+      [[ "$header" =~ ^[A-Za-z][A-Za-z0-9-]{0,40}$ ]] || die "--header takes the name of the header the key goes in, like X-API-Key"
+      shift 2
+    fi
+  fi
+  agents="${*:-all}"
+  [ "$agents" = all ] || for a in $agents; do check_agent "$a"; done
+  hosts_check "$hosts" "$agents"
+  secret="$(connector_secret "$name")"
+  if [ -f "$SECRETS/$secret.conf" ] && [ "$(conf_get "$SECRETS/$secret.conf" connector)" != "$name" ]; then
+    die "you already have a secret called $secret; remove it first: cage secret rm $secret"
+  fi
+
+  printf '\n%s%s %s%s%s  %s%s%s\n' "$IND" "$(brand)" "$C_B" "$name" "$C_0" "$C_DIM" "${title:-$url}" "$C_0" >&2
+  if [ -n "$title" ]; then
+    printf '%s  1. open %s\n' "$IND" "$(link "$keyurl")" >&2
+    for s in ${steps[@]+"${steps[@]}"}; do printf '%s  %s. %s\n' "$IND" "$i" "$s" >&2; i=$((i + 1)); done
+    prompt "paste it here (stays hidden): " value secret
+    [ -n "$value" ] || die "no key; nothing saved"
+  else
+    prompt "its key or token, if it needs one (stays hidden; Enter if none): " value secret
+  fi
+
+  mkdir -p "$CONNECTORS" && chmod 700 "$CONNECTORS"
+  if [ -n "$value" ]; then
+    secret_save "$secret" "$hosts" "$agents" "$value" "$name"
+  else
+    rm -f "$SECRETS/$secret" "$SECRETS/$secret.conf"
+    secret=""
+  fi
+  ( umask 077; printf 'url=%s\nheader=%s\nsecret=%s\nagents=%s\ntitle=%s\n' "$url" "$header" "$secret" "$agents" "$title" > "$CONNECTORS/$name.conf" )
+  ok "$name connected for $(agents_label "$agents")${secret:+; the key stays on this computer}"
+  connect_apply "$agents"
+}
+
+connect_apply() { # connect_apply <agents|all>: offers to restart the ones that are awake, so they pick up the change
+  local a awake=()
+  refresh_running
+  for a in $CAGE_AGENTS; do
+    for_agent "$1" "$a" || continue
+    if [ "$RUNNING" != "?" ] && [[ "$RUNNING" == *" $(vm "$a") "* ]]; then awake+=("$a"); fi
+  done
+  if [ ${#awake[@]} -eq 0 ]; then hint "your agents get it the next time they wake up: cage up"; return 0; fi
+  if [ -t 0 ] && yes_no "restart ${awake[*]} now so they can use it? (a minute or two)" y; then
+    cmd_up "${awake[@]}"
+  else
+    hint "they get it after a restart: cage up ${awake[*]}"
+  fi
+}
+
+connect_list() {
+  local e n f
+  printf '\n' >&2
+  for e in "${CATALOG[@]}"; do
+    n="${e%%|*}"
+    catalog_get "$n"
+    if [ -f "$CONNECTORS/$n.conf" ]; then
+      printf '  %s✓%s %s%-10s%s %s  %s%s%s\n' "$C_OK" "$C_0" "$C_B" "$n" "$C_0" "$CT_TITLE" "$C_DIM" "$(agents_label "$(conf_get "$CONNECTORS/$n.conf" agents)")" "$C_0" >&2
+    else
+      printf '  %s·%s %-10s %s%s%s\n' "$C_DIM" "$C_0" "$n" "$C_DIM" "$CT_TITLE" "$C_0" >&2
+    fi
+  done
+  for f in "$CONNECTORS"/*.conf; do
+    [ -f "$f" ] || continue
+    n="$(basename "$f" .conf)"
+    catalog_get "$n" && continue
+    printf '  %s✓%s %s%-10s%s %s  %s%s%s\n' "$C_OK" "$C_0" "$C_B" "$n" "$C_0" "$(conf_get "$f" url)" "$C_DIM" "$(agents_label "$(conf_get "$f" agents)")" "$C_0" >&2
+  done
+  printf '\n' >&2
+  hint "connect one: cage connect add <name>   ·   any app with an MCP address: cage connect add NAME https://…"
+  if [[ " $CAGE_AGENTS " == *" claude "* ]]; then hint "claude also gets the connectors on your claude.ai account (Settings → Connectors)"; fi
+  printf '\n' >&2
+}
+
+connect_rm() {
+  local name="${1:-}" f s ag
+  f="$CONNECTORS/$name.conf"
+  { connector_name_ok "$name" && [ -f "$f" ]; } || die "no connector called \"$name\" (see: cage connect)"
+  s="$(conf_get "$f" secret)" ag="$(conf_get "$f" agents)"
+  if [ -n "$s" ]; then rm -f "$SECRETS/$s" "$SECRETS/$s.conf"; fi
+  rm -f "$f"
+  ok "$name disconnected${s:+, and its key deleted from this computer}"
+  if [ -n "$s" ]; then hint "if you won't use that key again, revoke it on the app's website too"; fi
+  connect_apply "$ag"
+}
+
+cmd_connect() {
+  load_env
+  case "${1:-list}" in
+    add) shift; connect_add "$@" ;;
+    list) connect_list ;;
+    rm|remove) shift; connect_rm "$@" ;;
+    *) die "usage: cage connect [list] | add <$(catalog_names)|NAME https://…> [agents] | rm NAME" ;;
+  esac
+}
+
+connector_plan() { # connector_plan <agent>: what its VM wires up: addresses and secret names, never keys
+  local a="$1" f n list="" info="" title
+  for f in "$CONNECTORS"/*.conf; do
+    [ -f "$f" ] || continue
+    n="$(basename "$f" .conf)"
+    for_agent "$(conf_get "$f" agents)" "$a" || continue
+    title="$(conf_get "$f" title)"
+    list="$list$n|$(conf_get "$f" url)|$(conf_get "$f" header)|$(conf_get "$f" secret)"$'\n'
+    info="$info- $n: ${title:-$(url_host "$(conf_get "$f" url)")}"$'\n'
+  done
+  ( umask 077; printf '%s' "$list" > "$CAGE_HOME/agents/$a/connectors.list"; printf '%s' "$info" > "$CAGE_HOME/agents/$a/connectors.md" )
 }
 
 # --- VMs -------------------------------------------------------------------------------------------------------
@@ -1003,6 +1181,8 @@ cmd_up() {
   local quiet=()
   [ "$UI" = 1 ] && quiet=(-q)
   for a in "${AGENTS[@]}"; do
+    mkdir -p "$CAGE_HOME/agents/$a"
+    connector_plan "$a"
     render_config "$a"
     secret_plan "$a"
     [ "$UI" = 1 ] && printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2
@@ -1218,6 +1398,11 @@ cmd_home() {
   local n
   n="$(inbox_count)"
   if [ "$n" -gt 0 ]; then hint "your agents want to remember $n new thing$([ "$n" = 1 ] || echo s): cage memory"; fi
+  # Once everyone's awake and signed in, point at the next good thing: their apps.
+  if [[ "$STATES" != *:none* && "$STATES" != *:asleep* && "$STATES" != *:login* && "$STATES" != *:installing* ]] &&
+     [ -z "$(ls -A "$CONNECTORS" 2>/dev/null)" ]; then
+    hint "let them use your email, calendar and other apps: cage connect"
+  fi
   printf '\n' >&2
 }
 
@@ -1233,6 +1418,7 @@ usage() {
   row "  logs <agent>" "watch what an agent's VM is doing"
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
+  row "  connect [add|rm]" "apps your agents can use: Gmail, GitHub, …"
   row "  secret add|list|rm" "keys agents can use but never see"
   printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"
   row "  setup [agents]" "Telegram bots, and who may talk to them"
@@ -1264,6 +1450,7 @@ main() {
     destroy) cmd_destroy "$@" ;;
     memory) cmd_memory "$@" ;;
     secret|secrets) cmd_secret "$@" ;;
+    connect|connectors) cmd_connect "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;

@@ -80,6 +80,9 @@ ok "host mounts are read-only"
 # The VM comes back with a secret, so this also boots and provisions with TLS interception on.
 SECRET_VALUE="cage-e2e-$RANDOM$RANDOM$RANDOM"
 printf '%s\n' "$SECRET_VALUE" | cage secret add E2E_KEY postman-echo.com "$A" 2>/dev/null || fail "secret add"
+CONN_VALUE="cage-conn-$RANDOM$RANDOM$RANDOM"
+printf '%s\n' "$CONN_VALUE" | cage connect add deepwiki https://mcp.deepwiki.com/mcp --header X-Cage-Key "$A" 2>/dev/null \
+  || fail "connect add"
 ax sh -c 'echo keep > /home/agent/work/marker'
 cage down "$A"
 cage up "$A"
@@ -104,6 +107,24 @@ if gx sh -c 'command -v node >/dev/null'; then
     || fail "Node doesn't trust the interception CA"
 fi
 ok "secrets: placeholder in the VM, real value only at the allowed host, HTTPS still works under interception"
+
+# connectors: the agent's CLI has the app with only a placeholder in its config, and reaches the MCP server
+# through TLS interception (the CLIs that can check a connection without a login do)
+hx() { msb exec --no-tty -u agent -e HOME=/home/agent "$VM" -- bash -lc "set -a; . /etc/cage/runtime.env; set +a; $1"; }
+gx grep -rqF "$CONN_VALUE" /home/agent /etc/cage && fail "the connector's key reached the VM"
+ph="$(withenv 'printf %s "$DEEPWIKI_MCP_TOKEN"')"
+if [[ "$ph" == '$MSB_'* ]]; then gx grep -q "^${ph#\$}=" /etc/cage/runtime.env || fail "placeholder $ph not set to itself"; fi
+init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cage-e2e","version":"1"}}}'
+resp="$(withenv "curl -sS -m 30 https://mcp.deepwiki.com/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' -H \"X-Cage-Key: \$DEEPWIKI_MCP_TOKEN\" -d '$init'" || true)"
+grep -q serverInfo <<<"$resp" || fail "the MCP server didn't answer through interception: $resp"
+case "$A" in
+  claude) mcp="claude mcp list" want='deepwiki.*Connected' ;; codex) mcp="codex mcp get deepwiki" want='streamable_http' ;;
+  cursor) mcp="cursor-agent mcp list" want='deepwiki.*ready' ;; antigravity) mcp="agy mcp list" want='deepwiki +http' ;;
+esac
+retry 120 sh -c "msb exec --no-tty -u agent -e HOME=/home/agent $VM -- bash -lc 'set -a; . /etc/cage/runtime.env; set +a; $mcp' 2>&1 | grep -qE '$want'" \
+  || fail "$mcp: $(hx "$mcp" 2>&1 | tail -5)"
+ok "connectors: $mcp reaches the app through interception; only a placeholder in the VM"
 
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi
