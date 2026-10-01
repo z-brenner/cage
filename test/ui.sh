@@ -18,7 +18,7 @@ cmd="$1"; shift
 case "$cmd" in
   inspect) exit 0 ;;
   ps) echo cage-claude ;;
-  exec) case "$*" in *cage:ready*) echo cage:ready ;; esac ;;
+  exec) case "$*" in *cage:ready*) echo cage:ready ;; *strict-mcp-config*) echo 'Paris, says **the stub**' ;; esac ;;
   logs) for i in 1 2 3; do echo "cc-connect: line $i"; done ;;
 esac
 exit 0

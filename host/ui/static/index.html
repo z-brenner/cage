@@ -3,48 +3,71 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>cage</title>
   <link rel="icon" href="logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="vendor/xterm.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="top">
-    <a class="brand" href="#home" data-nav="home"><img src="logo.svg" alt="" width="32" height="32"><span>cage</span></a>
-    <nav id="nav" aria-label="Sections">
-      <a href="#home" data-nav="home">Agents</a>
-      <a href="#chats" data-nav="chats">Chats</a>
-      <a href="#apps" data-nav="apps">Apps</a>
-      <a href="#signins" data-nav="signins">Sign-ins &amp; keys</a>
-      <a href="#memory" data-nav="memory">Memory <span class="badge" id="badge-memory" hidden></span></a>
-      <a href="#security" data-nav="security">Security <span class="badge warn" id="badge-security" hidden></span></a>
-      <a href="#settings" data-nav="settings">Settings</a>
-    </nav>
-    <span class="version" id="version"></span>
-  </header>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#home"><img src="logo.svg" alt="" width="28" height="28"><span>cage</span></a>
+      <nav id="nav" aria-label="Sections">
+        <a href="#home" data-nav="home"><span class="ic" data-icon="house"></span><span class="label">Home</span></a>
+        <div class="nav-group">Agents</div>
+        <div id="nav-agents"></div>
+        <div class="nav-group">What they can use</div>
+        <a href="#apps" data-nav="apps"><span class="ic" data-icon="blocks"></span><span class="label">Apps</span></a>
+        <a href="#signins" data-nav="signins"><span class="ic" data-icon="key-round"></span><span class="label">Sign-ins &amp; keys</span></a>
+        <a href="#memory" data-nav="memory"><span class="ic" data-icon="brain"></span><span class="label">Memory</span><span class="badge" id="badge-memory" hidden></span></a>
+        <div class="nav-spacer"></div>
+        <a href="#security" data-nav="security"><span class="ic" data-icon="shield"></span><span class="label">Security</span><span class="badge alert" id="badge-security" hidden></span></a>
+        <a href="#settings" data-nav="settings"><span class="ic" data-icon="settings"></span><span class="label">Settings</span></a>
+      </nav>
+      <button type="button" class="jump" id="jump"><span class="ic" data-icon="search"></span><span class="grow">Jump to…</span><kbd id="jump-key">Ctrl K</kbd></button>
+      <div class="sidebar-foot" id="version"></div>
+    </aside>
+    <div class="scrim" id="scrim"></div>
 
-  <main id="main" tabindex="-1">
-    <p class="loading">Waking up…</p>
-  </main>
+    <div class="content">
+      <header class="topbar">
+        <button type="button" class="icon-btn" id="menu" aria-label="Menu"><span class="ic" data-icon="menu"></span></button>
+        <img src="logo.svg" alt="" width="22" height="22">
+        <span id="crumb"></span>
+      </header>
+      <main id="main" tabindex="-1">
+        <p class="loading">Waking up…</p>
+      </main>
+    </div>
+  </div>
 
   <dialog id="job" aria-labelledby="job-title">
-    <form method="dialog" class="job-head">
+    <header class="sheet-head">
       <h2 id="job-title">cage</h2>
-      <button type="button" id="job-cancel" class="ghost" title="Stop">Stop</button>
-      <button value="close" id="job-close" class="ghost" title="Close">Close</button>
-    </form>
+      <button type="button" class="icon-btn" id="job-x" aria-label="Dismiss" title="Dismiss (Esc)"><span class="ic" data-icon="x"></span></button>
+    </header>
+    <div class="sheet-progress" aria-hidden="true"></div>
     <div id="job-log" class="job-log" aria-live="polite"></div>
     <div id="job-term" class="job-term" hidden></div>
+    <footer class="sheet-foot">
+      <span id="job-status" class="job-status"></span>
+      <button type="button" id="job-cancel" class="btn">Stop</button>
+      <button type="button" id="job-close" class="btn primary" hidden>Close</button>
+    </footer>
   </dialog>
 
+  <dialog id="palette" aria-label="Go to, or do"></dialog>
+
   <template id="tpl-locked">
-    <section class="card center">
-      <img src="logo.svg" alt="" width="96" height="96">
+    <section class="locked">
+      <img src="logo.svg" alt="" width="88" height="88">
       <h1>Open cage from your computer</h1>
-      <p>This page needs the link that <code>cage ui</code> opens (or the <b>cage</b> shortcut in your Start menu or app launcher).</p>
+      <p>This page needs the link that <code>cage ui</code> opens, or the <b>cage</b> shortcut in your Start menu or app launcher.</p>
     </section>
   </template>
 
+  <script src="vendor/icons.js"></script>
   <script src="vendor/xterm.js"></script>
   <script src="vendor/addon-fit.js"></script>
   <script src="vendor/qrcode.js"></script>
