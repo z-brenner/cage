@@ -22,8 +22,9 @@ MODE="$(get VOICE_MODE)" MODEL="$(get VOICE_MODEL)" LANGUAGE="$(get VOICE_LANGUA
 [[ "$MODE" =~ ^(local|groq)$ && "$MODEL" =~ ^[a-z0-9.-]*$ && "$LANGUAGE" =~ ^[a-z]{0,3}$ && "$PORT" =~ ^[0-9]+$ ]] \
   || { log "bad settings in $CONF"; exit 1; }
 
+# Pinned to a set that works together (PyAV 19 dropped an argument faster-whisper 1.2.1 still passes)
 pkgs="imageio-ffmpeg==0.6.0"
-[ "$MODE" = local ] && pkgs="faster-whisper==1.2.1 $pkgs"
+[ "$MODE" = local ] && pkgs="faster-whisper==1.2.1 av==18.1.0 ctranslate2==4.8.2 onnxruntime==1.30.0 $pkgs"
 as_agent() { # as_agent <command…>: as the agent user, trusting what this VM trusts (microsandbox's CA, if any)
   runuser -u "$U" -- env HOME="$H" bash -c 'set -a; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
     [ -z "${SSL_CERT_FILE:-}" ] || export PIP_CERT="$SSL_CERT_FILE"; exec "$@"' _ "$@"
