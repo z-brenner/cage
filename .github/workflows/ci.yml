@@ -23,9 +23,13 @@ jobs:
           if grep -nP '[^\x00-\x7F]' install.ps1; then echo "non-ASCII in install.ps1"; exit 1; fi
           pwsh -NoProfile -Command '$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e); if ($e) { $e | ForEach-Object { $_.ToString() }; exit 1 }'
       - name: Python helpers compile (OAuth on the host; speech-to-text and the privacy mask in the VM)
-        run: python3 -m py_compile host/mcp_oauth.py guest/stt.py guest/mask.py
+        run: python3 -m py_compile host/mcp_oauth.py host/ui/server.py guest/stt.py guest/mask.py
       - name: privacy mask
         run: test/mask.sh
+      - name: web app (API, and the page in headless Chrome)
+        run: |
+          npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/pw/node_modules/playwright" CAGE_TEST_CHROME="$(command -v google-chrome)" test/ui.sh
       - name: Linux installer
         run: test/installer.sh
       - name: WhatsApp adapter rules (node)

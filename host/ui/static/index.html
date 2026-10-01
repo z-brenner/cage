@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cage</title>
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#home" data-nav="home"><img src="logo.svg" alt="" width="32" height="32"><span>cage</span></a>
+    <nav id="nav" aria-label="Sections">
+      <a href="#home" data-nav="home">Agents</a>
+      <a href="#chats" data-nav="chats">Chats</a>
+      <a href="#apps" data-nav="apps">Apps</a>
+      <a href="#signins" data-nav="signins">Sign-ins &amp; keys</a>
+      <a href="#memory" data-nav="memory">Memory <span class="badge" id="badge-memory" hidden></span></a>
+      <a href="#security" data-nav="security">Security <span class="badge warn" id="badge-security" hidden></span></a>
+      <a href="#settings" data-nav="settings">Settings</a>
+    </nav>
+    <span class="version" id="version"></span>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <p class="loading">Waking up…</p>
+  </main>
+
+  <dialog id="job" aria-labelledby="job-title">
+    <form method="dialog" class="job-head">
+      <h2 id="job-title">cage</h2>
+      <button type="button" id="job-cancel" class="ghost" title="Stop">Stop</button>
+      <button value="close" id="job-close" class="ghost" title="Close">Close</button>
+    </form>
+    <div id="job-log" class="job-log" aria-live="polite"></div>
+    <div id="job-term" class="job-term" hidden></div>
+  </dialog>
+
+  <template id="tpl-locked">
+    <section class="card center">
+      <img src="logo.svg" alt="" width="96" height="96">
+      <h1>Open cage from your computer</h1>
+      <p>This page needs the link that <code>cage ui</code> opens (or the <b>cage</b> shortcut in your Start menu or app launcher).</p>
+    </section>
+  </template>
+
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="vendor/qrcode.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

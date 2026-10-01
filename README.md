@@ -22,7 +22,7 @@ irm https://github.com/z-brenner/cage/releases/latest/download/install.ps1 | iex
 curl -fsSL https://github.com/z-brenner/cage/releases/latest/download/install.sh | bash
 ```
 
-That's the whole setup. It walks you through everything in about five minutes:
+That's the whole setup. cage then opens in your browser and walks you through everything in about five minutes. No terminal needed:
 
 1. checks your computer and installs what's missing (on Windows: WSL 2 and its own Ubuntu, restarting once if needed)
 2. asks which subscriptions you have
@@ -30,7 +30,19 @@ That's the whole setup. It walks you through everything in about five minutes:
 4. locks the bots to *your* Telegram account
 5. starts each agent in its own VM and signs it in with your subscription
 
-After that, type `cage` (on Windows, open **cage** from the Start menu) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
+After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to see how everyone's doing. Message your bots on Telegram and they work in their cages.
+
+<p align="center"><img src="assets/app.png" width="720" alt="cage in the browser: one card per agent with its state, chat apps and buttons to wake it, sign it in or see its logs"></p>
+
+The app does everything:
+- signs agents in;
+- adds chats, apps, website sign-ins and keys;
+- reviews memory, security events and backups;
+- holds every setting.
+
+Each action runs cage itself and shows its questions as a conversation. Vendor sign-ins open in a terminal view right in the page. The app only listens on your own computer and needs the private link it opened with.
+
+Prefer a terminal? Type `cage` instead; every command below works there too (`cage ui` opens the app).
 
 <p align="center"><img src="assets/avatars.png" width="440" alt="The four bot avatars: claude in peach, codex in mint, cursor in sky blue, antigravity in lilac"></p>
 
@@ -50,6 +62,7 @@ Every agent is a little creature in a cage, and its eyes tell you how it is.
 
 ```text
 cage                  set up, or see how your agents are doing
+cage ui               the same, and everything else, in your browser
 cage up [agents]      wake agents up (a fresh VM; logins and files are kept)
 cage down [agents]    put them to sleep
 cage login <agent>    sign an agent in to your subscription
@@ -204,7 +217,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 - **Sign-ins happen inside each VM**, with each vendor's own CLI, and stay on that agent's volume. They survive `up`, `update`, reboots and `cage destroy <agent> --keep-login`.
 - **Codex:** turn on device-code sign-in first (ChatGPT → Settings → Security).
 - **Antigravity** is Google's successor to Gemini CLI for AI Pro/Ultra (since 2026-06-18). Google has suspended accounts over third-party use of its CLI logins, so consider a spare Google account.
-- **After a reboot** your agents sleep until `cage up` (or `cage autostart on`, once). Waking reinstalls each CLI in about a minute; logins, sessions and files are kept.
+- **After a reboot** your agents sleep until you wake them (or turn on autostart, once). Each VM's system disk is new every time, but everything it downloaded (Ubuntu packages, Node.js, its CLI, cc-connect) is kept in a cache of its own. So waking reinstalls from there in seconds, without any vendor's servers, and logins, sessions and files are kept. `cage update` (the **Update** button) gets the newest of everything.
 - **Settings** live in `~/.cage/cage.env` (CPU, memory, disk, network rules, `CAGE_MODE=ask` to approve each tool call in chat).
 - **Updates:** `cage update` installs the newest cage release, then rebuilds the agents with the newest CLIs. Each release's download is checked against its `SHA256SUMS` before anything is replaced, and every file carries a signed build-provenance attestation: `gh attestation verify cage-v0.1.0.tar.gz --repo z-brenner/cage` shows it was built by this repo's release workflow from that tag. `cage --version` says which one you have. To follow the development version instead, install with `CAGE_REF=main`.
 - **Installer error "Could not determine latest release version"?** That's GitHub rate-limiting your IP. `cage` falls back to a pinned microsandbox automatically.

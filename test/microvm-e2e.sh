@@ -87,8 +87,14 @@ printf '%s\n' "$CONN_VALUE" | cage connect add deepwiki https://mcp.deepwiki.com
   || fail "connect add"
 ax sh -c 'echo keep > /home/agent/work/marker'
 cage down "$A"
+woke=$SECONDS
 cage up "$A"
 retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after up"
+msb logs "$VM" 2>&1 | grep -q 'base packages (cached)' || fail "the second boot didn't install from the cache: $(msb logs "$VM" 2>&1 | grep 'provision\[' | tail -8)"
+if msb logs "$VM" 2>&1 | grep -q "provision\[$A\]: \(Claude Code\|OpenAI Codex\|Cursor CLI\|Antigravity CLI\) "; then
+  fail "the second boot downloaded the agent's CLI again"
+fi
+echo "    (woke from the cache in $((SECONDS - woke))s)"
 [ "$(gx cat /home/agent/work/marker)" = keep ] || fail "home volume lost across down/up"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not back after down/up"
 ok "down + up keeps the home volume (logins, work) and brings cc-connect back"

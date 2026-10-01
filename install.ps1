@@ -2,7 +2,7 @@
 #   irm https://github.com/z-brenner/cage/releases/latest/download/install.ps1 | iex
 # (or download Install-cage.cmd from the latest release and double-click it)
 # It turns on WSL 2 with its own Ubuntu 24.04 (named "cage", separate from any Ubuntu you already have),
-# creates your Linux user, installs cage inside it and starts the guided setup. If Windows has to restart
+# creates your Linux user, installs cage inside it and opens it in your browser. If Windows has to restart
 # to turn WSL on, setup carries on by itself after you log back in.
 # $env:CAGE_CHECK_ONLY = '1' only checks this PC and prints what it would do.
 # Kept ASCII-only so Windows PowerShell 5.1 reads it correctly in any code page.
@@ -111,11 +111,30 @@ CAGERC
         & wsl.exe --terminate $Distro | Out-Null
         Ok "your Linux user '$user'"
 
-        Say 'Installing cage and starting the guided setup...'
+        # "Cage" in the Start menu opens the web app: a hidden launcher (no console window) runs `cage ui` in WSL.
+        $appDir = Join-Path $env:LOCALAPPDATA 'cage'
+        New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+        $vbs = Join-Path $appDir 'cage.vbs'
+        $run = "wsl.exe -d $Distro -u $user --exec /home/$user/.local/bin/cage ui"
+        Set-Content -Path $vbs -Encoding ASCII -Value ('CreateObject("WScript.Shell").Run "' + $run + '", 0, False')
+
+        Say 'Installing cage; the setup continues in your browser.'
         Write-Host ''
         & wsl.exe -d $Distro -u $user --cd '~' -- bash -lc "curl -fsSL $Raw/install.sh | bash"
         Write-Host ''
-        Say "Next time, open 'cage' from the Start menu to see your agents."
+        try {
+            Copy-Item -Force "\\wsl.localhost\$Distro\home\$user\cage\assets\cage.ico" (Join-Path $appDir 'cage.ico') -ErrorAction Stop
+        } catch {
+            try { Copy-Item -Force ('\\wsl$\' + $Distro + '\home\' + $user + '\cage\assets\cage.ico') (Join-Path $appDir 'cage.ico') -ErrorAction Stop } catch { }
+        }
+        $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Cage.lnk'
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+        $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+        $shortcut.Arguments = '"' + $vbs + '"'
+        $shortcut.Description = 'Your AI agents, each in its own little cage'
+        if (Test-Path (Join-Path $appDir 'cage.ico')) { $shortcut.IconLocation = (Join-Path $appDir 'cage.ico') }
+        $shortcut.Save()
+        Ok "'Cage' in your Start menu opens your agents"
     }
     catch {
         if ("$_" -ne 'cage-stop') { Write-Host "  $cross $_" -ForegroundColor Red }

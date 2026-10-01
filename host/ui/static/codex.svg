@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" width="640" height="640">
+  <title>cage · codex</title>
+  <rect width="640" height="640" fill="#8EE6C1"/>
+  <g transform="translate(36 22) scale(1.1)">
+  <defs>
+    <clipPath id="inside"><path d="M124 252 A132 132 0 0 1 388 252 V396 H124 Z"/></clipPath>
+  </defs>
+  <!-- risograph misregistration: the silhouette again, offset, in pink -->
+  <g fill="#FF77A9" transform="translate(14 14)">
+    <circle cx="256" cy="86" r="34"/>
+    <path d="M116 252 A140 140 0 0 1 396 252 V404 H116 Z"/>
+    <rect x="92" y="392" width="328" height="48" rx="24"/>
+    <rect x="138" y="430" width="46" height="34" rx="12"/>
+    <rect x="328" y="430" width="46" height="34" rx="12"/>
+  </g>
+  <!-- handle -->
+  <path d="M256 122 V110" stroke="#241C3B" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="256" cy="86" r="26" fill="none" stroke="#241C3B" stroke-width="30"/>
+  <circle cx="256" cy="86" r="26" fill="none" stroke="#FFB833" stroke-width="14"/>
+  <!-- inside -->
+  <path d="M124 252 A132 132 0 0 1 388 252 V396 H124 Z" fill="#2E2550"/>
+  <g clip-path="url(#inside)" fill="#FFB833" stroke="#241C3B" stroke-width="6">
+    <rect x="143" y="100" width="14" height="310"/>
+    <rect x="196" y="100" width="14" height="310"/>
+    <rect x="249" y="100" width="14" height="310"/>
+    <rect x="302" y="100" width="14" height="310"/>
+    <rect x="355" y="100" width="14" height="310"/>
+    <rect x="110" y="236" width="292" height="16"/>
+  </g>
+  <!-- frame -->
+  <path d="M124 252 A132 132 0 0 1 388 252 V396 H124 Z" fill="none" stroke="#241C3B" stroke-width="22"/>
+  <path d="M124 252 A132 132 0 0 1 388 252 V396 H124 Z" fill="none" stroke="#FFB833" stroke-width="8"/>
+  <!-- face: the cage itself is the character -->
+  <g stroke="#241C3B" stroke-width="9">
+    <ellipse cx="204" cy="306" rx="36" ry="42" fill="#FFFFFF"/>
+    <ellipse cx="308" cy="306" rx="36" ry="42" fill="#FFFFFF"/>
+  </g>
+  <circle cx="213" cy="306" r="19" fill="#241C3B"/>
+  <circle cx="317" cy="306" r="19" fill="#241C3B"/>
+  <circle cx="205" cy="296" r="7" fill="#FFFFFF"/>
+  <circle cx="309" cy="296" r="7" fill="#FFFFFF"/>
+  <ellipse cx="160" cy="360" rx="17" ry="10" fill="#FF77A9"/>
+  <ellipse cx="352" cy="360" rx="17" ry="10" fill="#FF77A9"/>
+  <path d="M242 360 Q256 374 270 360" fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round"/>
+  <!-- base and feet -->
+  <rect x="146" y="428" width="34" height="28" rx="10" fill="#FFB833" stroke="#241C3B" stroke-width="10"/>
+  <rect x="332" y="428" width="34" height="28" rx="10" fill="#FFB833" stroke="#241C3B" stroke-width="10"/>
+  <rect x="98" y="390" width="316" height="44" rx="22" fill="#FFB833" stroke="#241C3B" stroke-width="12"/>
+</g>
+</svg>

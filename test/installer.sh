@@ -26,7 +26,8 @@ bash "$ROOT/install.sh" 2>"$T/err" || fail "install failed: $(cat "$T/err")"
 [ "$(readlink -f "$HOME/.local/bin/cage")" = "$HOME/cage/cage" ] || fail "cage command not linked"
 [ "$(grep -c 'added by the cage installer' "$HOME/.bashrc")" = 1 ] || fail "PATH line missing from .bashrc"
 "$HOME/.local/bin/cage" help >/dev/null || fail "the cage command doesn't run"
-ok "fresh install from git: clones to ~/cage, links ~/.local/bin/cage, puts it on PATH"
+grep -qx "Exec=$HOME/.local/bin/cage ui" "$HOME/.local/share/applications/cage.desktop" || fail "no app menu entry"
+ok "fresh install from git: clones to ~/cage, links ~/.local/bin/cage, puts it on PATH and in the app menu"
 
 echo "# newer" >> "$T/src/README.md"
 commit commit -qam newer
