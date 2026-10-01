@@ -18,6 +18,7 @@ What cage adds:
 - login flows that run inside the VM
 - lifecycle commands (`up`, `login`, `status`, `logs`, `shell`, `update`, `down`, `destroy`)
 - releases: a reproducible tarball per tag with `SHA256SUMS` (checked by `install.sh` and `cage update`) and a signed build-provenance attestation, so installers never install an unreviewed `main`
+- an optional deny-by-default network per agent (`cage network strict`: msb `network.allow` built from the agent's service, chat apps, installers, connectors, key hosts and `cage allow`; `strict: false` because the chat apps and vendor hosts bypass TLS interception and must match by SNI), and security events collected from msb's runtime log (secret violations, and DNS/egress denials, which msb logs at debug level, so strict VMs run with `--log-level debug`) before each re-create and every minute
 - encrypted backups (`cage backup` / `cage restore`): `~/.cage` plus each agent's home volume, with the in-VM owners and modes microsandbox keeps in `user.*` xattrs
 
 ```

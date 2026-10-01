@@ -727,17 +727,28 @@ secret_plan() {
     fi
   done
   mkdir -p "$CAGE_HOME/msb" && chmod 700 "$CAGE_HOME/msb"
-  if [ ${#SECRET_ENV[@]} -gt 0 ]; then
+  local net=""
+  if [ "${CAGE_NETWORK:-open}" = strict ]; then
+    # Deny by default: only these names resolve and connect. Hosts that skip TLS interception (chat apps, the
+    # agent's own service) are matched by their TLS server name, which needs msb's non-strict hostname mode.
+    net="  allow: $(yaml_list "$(net_allow_for "$a" | tr '\n' ',')")
+  strict: false
+  http: {deny_response: true, deny_message: \"$STRICT_DENY_MSG\"}
+"
+  fi
+  if [ ${#SECRET_ENV[@]} -gt 0 ] || [ -n "$net" ]; then
     # Declaring secrets turns on TLS interception; the chat apps and the agent's own service bypass it, and
     # QUIC is blocked so browsers stay on the TLS path where placeholders can be swapped.
     ( umask 077
       { echo "# written by cage for $(vm "$a"): names, hosts and placeholders only; values come from msb's environment"
-        echo "secrets:"
-        printf '%s' "$yaml"
+        if [ ${#SECRET_ENV[@]} -gt 0 ]; then echo "secrets:"; printf '%s' "$yaml"; fi
         echo "network:"
-        echo "  tls:"
-        echo "    bypass: $(yaml_list "$(tls_bypass_for "$a" | tr -s ' \n' ',,')")"
-        echo "    block_quic: true"
+        printf '%s' "$net"
+        if [ ${#SECRET_ENV[@]} -gt 0 ]; then
+          echo "  tls:"
+          echo "    bypass: $(yaml_list "$(tls_bypass_for "$a" | tr -s ' \n' ',,')")"
+          echo "    block_quic: true"
+        fi
       } > "$conf" )
     SECRET_ARGS=(--conf "$conf")
   else
@@ -995,8 +1006,8 @@ oauth_refresh_all() { # oauth_refresh_all <seconds>: renews the sign-ins that ex
 }
 oauth_any() { compgen -G "$OAUTH/*.json" >/dev/null 2>&1; }
 refresher_pattern() { echo "$CAGE_ROOT/cage _refresh"; }
-refresher_start() {
-  oauth_any || return 0
+refresher_start() { # the background helper: renews sign-ins, collects security events (strict network logs a lot)
+  oauth_any || [ "${CAGE_NETWORK:-open}" = strict ] || return 0
   pgrep -f -- "$(refresher_pattern)" >/dev/null 2>&1 && return 0
   if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
   else nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
@@ -1845,6 +1856,9 @@ cmd_up() {
     connector_plan "$a"
     render_config "$a"
     secret_plan "$a"
+    events_harvest "$a"   # its runtime log goes with the old VM
+    local netlog=()
+    if [ "${CAGE_NETWORK:-open}" = strict ]; then netlog=(--log-level debug); fi   # blocked hosts are logged at debug
     [ "$UI" = 1 ] && printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2
     # Always (re)create: microsandbox runs the `--` command only on `msb run`; a plain start/restart boots
     # the VM without it. Re-creating reprovisions the system disk (~1 min) and keeps the named home volume,
@@ -1861,7 +1875,7 @@ cmd_up() {
       --mount-dir "$BRAIN/memory:/memory:ro" \
       --mount-dir "$BRAIN/inbox/$a:/memory-inbox" \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
-      ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
+      ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
     if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
   done
@@ -1988,11 +2002,194 @@ cmd_destroy() {
   local a="${1:-}" flag="${2:-}"
   [ -n "$a" ] || die "usage: cage destroy <agent> [--keep-login|--yes]"
   check_agent "$a"
+  case "$flag" in --keep-login|--yes) load_env 2>/dev/null && events_harvest "$a" 2>/dev/null || true ;; esac
   case "$flag" in
     --keep-login) "$MSB" rm --force "$(vm "$a")"; ok "removed $a's cage; its login and files are kept" ;;
     --yes) "$MSB" rm --force "$(vm "$a")"; "$MSB" volume rm "$(vm "$a")-home"; ok "removed $a's cage, login and files" ;;
     *) die "this deletes $a's cage. Add --keep-login to keep its login and files, or --yes to delete everything" ;;
   esac
+}
+
+# --- network rules and security events --------------------------------------------------------------------------
+# Open (the default): the public internet; your computer, your LAN and cloud metadata are blocked (microsandbox's
+# default policy). Strict (CAGE_NETWORK=strict): only the hosts each agent needs (its own service, its chat apps,
+# the apps and sites you connected, where its keys go, what it installs from) plus what you allow with `cage allow`.
+STRICT_DENY_MSG='cage blocked {host}: it is not on this agent'"'"'s allow list. If it should be, ask the user to run: cage allow {host}'
+
+net_allow_for() { # net_allow_for <agent>: the hosts it may reach in strict mode, one per line
+  local a="$1" f u
+  {
+    tls_bypass_for "$a"                                                    # its chat apps and its own service
+    echo "*.ubuntu.com deb.nodesource.com registry.npmjs.org github.com *.githubusercontent.com"   # what it installs
+    case "$a" in
+      claude) echo "downloads.claude.ai" ;;
+      cursor) echo "downloads.cursor.com" ;;
+      antigravity) echo "antigravity-cli-auto-updater-974169037036.us-central1.run.app" ;;
+    esac
+    if grep -q '|local:browser|' "$CAGE_HOME/agents/$a/connectors.list" 2>/dev/null; then
+      echo "cdn.playwright.dev playwright.download.prss.microsoft.com"     # Chromium, once
+    fi
+    while IFS='|' read -r _ u _ _; do case "$u" in https://*) url_host "$u" ;; esac; done \
+      < <(cat "$CAGE_HOME/agents/$a/connectors.list" 2>/dev/null || true)  # the apps you connected
+    for f in "$SECRETS"/*.conf; do                                         # where its keys and passwords go
+      [ -f "$f" ] && for_agent "$(conf_get "$f" agents)" "$a" && conf_get "$f" hosts
+    done
+    echo "${CAGE_ALLOW_HOSTS:-} $(cvar ALLOW_HOSTS "$a")"                  # what you allowed
+  } | tr ', ' '\n\n' | tr 'A-Z' 'a-z' | grep -E '^(\*\.)?[a-z0-9.-]+(/[0-9]+)?$' | awk '!seen[$0]++'
+}
+
+valid_allow_host() { # a hostname, *.suffix (two labels at least), IPv4 address or CIDR
+  [[ "$1" =~ ^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$ || "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]
+}
+
+cmd_network() {
+  load_env
+  local mode="${1:-}" a
+  case "$mode" in
+    "")
+      if [ "${CAGE_NETWORK:-open}" = strict ]; then
+        say "network: ${C_B}strict${C_0}. Each agent reaches only the hosts it needs, plus these you allowed:"
+        say "  everyone: ${CAGE_ALLOW_HOSTS:-none}"
+        for a in $CAGE_AGENTS; do [ -z "$(cvar ALLOW_HOSTS "$a")" ] || say "  $a: $(cvar ALLOW_HOSTS "$a")"; done
+        hint "see every host an agent may reach: cage network hosts <agent> · back to the open internet: cage network open"
+      else
+        say "network: ${C_B}open${C_0}. Agents reach the public internet; your computer, your network and cloud metadata are blocked."
+        hint "only the hosts each agent needs, and what you allow: cage network strict"
+      fi
+      return 0 ;;
+    hosts) check_agent "${2:-}"; net_allow_for "$2" | sed 's/^/  /' >&2; return 0 ;;
+    strict|open) ;;
+    *) die "usage: cage network [strict|open|hosts <agent>]" ;;
+  esac
+  set_env CAGE_NETWORK "$mode"
+  if [ "$mode" = strict ]; then
+    ok "strict network: each agent reaches only what it needs"
+    hint "when something is blocked, cage tells you on its home screen; cage allow <host> lets it through"
+  else
+    ok "open network: the public internet again"
+  fi
+  network_applies
+}
+
+network_applies() { # a VM takes network rules when it's (re)created: offer that for running agents
+  local a running=()
+  find_msb || return 0
+  refresh_running
+  for a in $CAGE_AGENTS; do if [[ "$RUNNING" == *" $(vm "$a") "* ]]; then running+=("$a"); fi; done
+  [ ${#running[@]} -gt 0 ] || return 0
+  if [ -t 0 ] && yes_no "Restart ${running[*]} so this applies now? Their logins and files are kept." y; then
+    cmd_up "${running[@]}"
+  else
+    hint "applies the next time they wake: cage up"
+  fi
+}
+
+cmd_allow() { # cage allow <host> [agents|all] / cage allow rm <host> [agents|all]
+  load_env
+  local rm=0 host agents var cur new h a
+  if [ "${1:-}" = rm ]; then rm=1; shift; fi
+  host="$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')"
+  host="${host#https://}" host="${host#http://}" host="${host%%/*}"
+  [ -n "$host" ] || die "usage: cage allow <host> [agents]   (e.g. cage allow api.example.com, or *.example.com)"
+  valid_allow_host "$host" || die "\"$host\" isn't a host name, *.domain.tld, or IP address"
+  shift
+  agents="${*:-all}"
+  for a in $agents; do
+    if [ "$a" = all ]; then var=CAGE_ALLOW_HOSTS; else check_agent "$a"; var="CAGE_ALLOW_HOSTS_$a"; fi
+    cur="${!var:-}" new=""
+    for h in $cur; do [ "$h" = "$host" ] || new="$new${new:+ }$h"; done
+    if [ "$rm" = 0 ]; then new="$new${new:+ }$host"; fi
+    set_env "$var" "$new"
+    printf -v "$var" '%s' "$new"
+  done
+  if [ "$rm" = 1 ]; then ok "$host is no longer on the allow list (${agents/all/everyone})"
+  else ok "$host is allowed (${agents/all/everyone})"; fi
+  [ "${CAGE_NETWORK:-open}" = strict ] || { hint "the network is open anyway; this applies once it's strict: cage network strict"; return 0; }
+  network_applies
+}
+
+# Security events come from microsandbox's runtime log, which is gone once a VM is re-created: cage collects them
+# before every `up`, every minute in the background, and whenever it shows you anything.
+#   $CAGE_HOME/events.log   epoch|agent|secret|<key name>|<host>     a key went to a host it isn't for (blocked)
+#                           epoch|agent|blocked|<host>|               strict network turned a host away
+EVENTS_LOG() { echo "$CAGE_HOME/events.log"; }
+events_harvest() { # events_harvest [agents...]: new events from their VMs' logs
+  local a since now line kind subj det h seen="$CAGE_HOME/events/seen-lines" list=("$@")
+  find_msb || return 0
+  [ $# -gt 0 ] || read -r -a list <<<"${CAGE_AGENTS:-}"
+  mkdir -p "$CAGE_HOME/events" && chmod 700 "$CAGE_HOME/events"
+  touch "$seen"
+  for a in ${list[@]+"${list[@]}"}; do
+    "$MSB" inspect "$(vm "$a")" >/dev/null 2>&1 || continue
+    since="$(cat "$CAGE_HOME/events/$a.since" 2>/dev/null || true)"
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      h="$(printf '%s' "$line" | cksum | cut -d' ' -f1)"
+      grep -qx "$h" "$seen" && continue
+      echo "$h" >> "$seen"
+      kind="" subj="" det=""
+      case "$line" in
+        *"secret violation"*) kind=secret subj="$(log_field secret_env_var "$line")" det="$(log_field host "$line")"
+          [ -n "$det" ] || det="$(log_field sni "$line")" ;;
+        *"DNS query denied"*) kind=blocked subj="$(log_field domain "$line")" ;;
+        *"denied by"*) kind=blocked subj="$(log_field sni "$line")"
+          [ -n "$subj" ] || subj="$(log_field dst "$line" | sed 's/:[0-9]*$//')" ;;
+      esac
+      [ -n "$kind" ] && [ -n "$subj" ] || continue
+      printf '%s|%s|%s|%s|%s\n' "$(date +%s)" "$a" "$kind" "$subj" "$det" >> "$(EVENTS_LOG)"
+    done < <("$MSB" logs "$(vm "$a")" --source system --no-color --grep 'secret violation|denied by' \
+               ${since:+--since "$since"} 2>/dev/null || true)
+    echo "$now" > "$CAGE_HOME/events/$a.since"
+  done
+  # keep the dedupe list short
+  if [ "$(wc -l < "$seen")" -gt 4000 ]; then tail -n 2000 "$seen" > "$seen.tmp" && mv "$seen.tmp" "$seen"; fi
+}
+log_field() { # log_field <key> <tracing line>: key=value or key="value"
+  printf '%s' "$2" | sed -n "s/.*[[:space:]]$1=\"\([^\"]*\)\".*/\1/p;t;s/.*[[:space:]]$1=\([^[:space:]]*\).*/\1/p" | head -n 1
+}
+
+events_unseen() { # how many events since you last looked
+  local total seen
+  total="$(wc -l < "$(EVENTS_LOG)" 2>/dev/null || echo 0)"
+  seen="$(cat "$CAGE_HOME/events/seen-count" 2>/dev/null || echo 0)"
+  [[ "$seen" =~ ^[0-9]+$ ]] || seen=0
+  echo $(( total > seen ? total - seen : 0 ))
+}
+
+ago() { # ago <epoch>
+  local d=$(( $(date +%s) - $1 ))
+  if [ $d -lt 90 ]; then echo "just now"; elif [ $d -lt 5400 ]; then echo "$((d / 60)) min ago"
+  elif [ $d -lt 129600 ]; then echo "$((d / 3600)) h ago"; else echo "$((d / 86400)) days ago"; fi
+}
+
+cmd_security() {
+  load_env
+  events_harvest
+  local log n=0 t a k s d c
+  log="$(EVENTS_LOG)"
+  if [ ! -s "$log" ]; then
+    ok "nothing blocked so far"
+    hint "cage records here when an agent sends a key where it isn't for, or (with cage network strict) tries a host it may not reach"
+    return 0
+  fi
+  say "what was blocked, newest first (same thing repeated is counted):"
+  # newest first, grouped by agent+kind+subject+detail, with a count and the latest time
+  while IFS='|' read -r c t a k s d; do
+    n=$((n + 1))
+    case "$k" in
+      secret) printf '  %s‼%s %s tried to send %s%s%s to %s%s%s · blocked, it never left (%s×, %s)\n' "$C_ERR" "$C_0" "$a" \
+                "$C_B" "$s" "$C_0" "$C_B" "${d:-an unknown host}" "$C_0" "$c" "$(ago "$t")" >&2 ;;
+      blocked) printf '  %s!%s %s couldn'"'"'t reach %s%s%s (%s×, %s)  %s→ cage allow %s %s%s\n' "$C_AMBER" "$C_0" "$a" "$C_B" "$s" \
+                 "$C_0" "$c" "$(ago "$t")" "$C_DIM" "$s" "$a" "$C_0" >&2 ;;
+    esac
+  done < <(awk -F'|' '{ key = $2 "|" $3 "|" $4 "|" $5; n[key]++; last[key] = $1 } END { for (k in n) print n[k] "|" last[k] "|" k }' "$log" |
+           sort -t'|' -k2,2nr | head -n "${CAGE_EVENTS_SHOW:-25}")
+  if grep -q '|secret|' "$log"; then
+    hint "a key going somewhere it isn't for usually means a prompt injection: something the agent read told it to send it"
+    hint "microsandbox only swaps the real key in for its own hosts, so the agent only ever had a placeholder"
+  fi
+  wc -l < "$log" | tr -d ' ' > "$CAGE_HOME/events/seen-count"
 }
 
 # --- backups ----------------------------------------------------------------------------------------------------
@@ -2263,6 +2460,9 @@ cmd_home() {
   local n
   n="$(inbox_count)"
   if [ "$n" -gt 0 ]; then hint "your agents want to remember $n new thing$([ "$n" = 1 ] || echo s): cage memory"; fi
+  events_harvest 2>/dev/null || true
+  n="$(events_unseen)"
+  if [ "$n" -gt 0 ]; then warn "$n thing$([ "$n" = 1 ] || echo s) blocked since you last looked: cage security"; fi
   local b
   for b in "$OAUTH"/*.broken; do [ -e "$b" ] && hint "$(basename "$b" .broken) needs you to sign in again: cage connect add $(basename "$b" .broken)"; done
   # Once everyone's awake and signed in, point at the next good thing: their apps.
@@ -2289,6 +2489,9 @@ usage() {
   row "  connect [add|rm]" "apps your agents can use: Gmail, GitHub, …"
   row "  password add|list|rm" "website sign-ins they use but never see"
   row "  secret add|list|rm" "keys agents can use but never see"
+  row "  security" "what was blocked: keys sent to the wrong place, hosts"
+  row "  network [strict|open]" "the open internet, or only what each agent needs"
+  row "  allow <host> [agents]" "let agents reach a host in strict mode"
   printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"
   row "  setup [agents]" "Telegram bots, and who may talk to them"
   row "  doctor" "check this computer, the config and the bots"
@@ -2325,12 +2528,16 @@ main() {
     connect|connectors) cmd_connect "$@" ;;
     chat) cmd_chat "$@" ;;
     backup) cmd_backup "$@" ;;
+    security|events) cmd_security "$@" ;;
+    network) cmd_network "$@" ;;
+    allow) cmd_allow "$@" ;;
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
     _open) UI=1 open_url "${1:-}" ;;
-    _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT; while :; do oauth_refresh_all 900; sleep 300 & wait "$!"; done ;;
+    _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT
+      i=0; while :; do events_harvest || true; [ $((i % 5)) != 0 ] || oauth_refresh_all 900; i=$((i + 1)); sleep 60 & wait "$!"; done ;;
     version|--version|-V) echo "cage $(cage_version)" ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;

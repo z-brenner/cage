@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null || true; rm -rf "$T"' EXIT
+trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null || true; pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true; rm -rf "$T"' EXIT
 unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -20,6 +20,7 @@ if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
 if [ "$cmd" = exec ]; then case "$*" in *cage:ready*) echo cage:ready ;; esac; fi   # every agent is signed in
+if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; esac; exit 0; fi
 if [ "$cmd" = volume ]; then   # named volumes are folders under $MSB_VOLUMES
   case "$1" in
     inspect) [ -d "$MSB_VOLUMES/$2" ] || exit 1; printf 'Name:           %s\nKind:           dir\nPath:           %s\n' "$2" "$MSB_VOLUMES/$2" ;;
@@ -275,6 +276,51 @@ mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb
 HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
 grep -qx 'stop | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
 ok "finds msb in the installer's location when it isn't on PATH"
+
+# --- strict network: deny by default, only each agent's own hosts plus what you allow
+cage network strict </dev/null 2>/dev/null
+grep -q '^CAGE_NETWORK="strict"' "$CAGE_HOME/cage.env" || fail "network strict not saved"
+cage allow api.example.org claude </dev/null 2>/dev/null || fail "allow for one agent"
+cage allow 'https://Files.Example.NET/x' </dev/null 2>/dev/null || fail "allow for everyone (from a URL)"
+for bad in 'not a host' '*.com' 'a;b' ''; do
+  if cage allow "$bad" </dev/null 2>/dev/null; then fail "accepted: cage allow '$bad'"; fi
+done
+printf 'k3y\n' | cage secret add NET_KEY api.netkey.example claude 2>/dev/null || fail "secret add"
+: > "$MSB_LOG"
+cage up claude codex 2>/dev/null
+y="$CAGE_HOME/msb/claude.yaml"
+for want in '"\*.anthropic.com"' '"api.telegram.org"' '"downloads.claude.ai"' '"\*.ubuntu.com"' '"api.netkey.example"' \
+            '"api.example.org"' '"files.example.net"'; do
+  grep -q "^  allow: .*$want" "$y" || fail "claude's allow list lacks $want: $(grep allow: "$y")"
+done
+grep -q '^  strict: false$' "$y" && grep -q 'deny_response: true' "$y" || fail "strict network settings: $(cat "$y")"
+if grep -q '"api.example.org"' "$CAGE_HOME/msb/codex.yaml"; then fail "claude's extra host leaked to codex"; fi
+grep -q '"files.example.net"' "$CAGE_HOME/msb/codex.yaml" && grep -q '"\*.openai.com"' "$CAGE_HOME/msb/codex.yaml" || fail "codex allow list"
+grep '^run | ' "$MSB_LOG" | grep -q -- '--log-level | debug' || fail "strict runs don't log blocked hosts"
+ok "strict network: per-agent allow lists (own service, chat, installs, keys, apps, cage allow), blocked hosts logged"
+
+# security events: collected from the VM's runtime log, shown once on the home screen, listed by cage security
+echo cage-claude >> "$MSB_EXISTING"
+{
+  echo '2026-10-01T10:00:00.000Z  WARN microsandbox_network::engine::secrets::handler: secret violation: placeholder detected where substitution or passthrough is not permitted action=block-and-log secret_env_var=GITHUB_TOKEN placeholder=$MSB_GITHUB_TOKEN protocol=http/1.1 sni=evil.example host=evil.example method=POST path=/x location=header match_form=raw guest_dst=1.2.3.4:443 http2_stream_id='
+  echo '2026-10-01T10:00:01.000Z DEBUG microsandbox_network::engine::dns::forwarder: DNS query denied by network policy domain=example.com'
+  echo '2026-10-01T10:00:02.000Z DEBUG microsandbox_network::engine::dns::forwarder: DNS query denied by network policy domain=example.com'
+} > "$T/syslog"
+export MSB_SYSLOG="$T/syslog"
+cage 2>"$T/home.out" >/dev/null || true
+grep -q '3 things blocked since you last looked: cage security' "$T/home.out" || fail "home screen doesn't flag events: $(cat "$T/home.out")"
+cage security 2>"$T/sec" || fail "cage security failed"
+grep -q 'claude tried to send GITHUB_TOKEN to evil.example' "$T/sec" || fail "secret violation not listed: $(cat "$T/sec")"
+grep -q "claude couldn't reach example.com (2×" "$T/sec" && grep -q 'cage allow example.com claude' "$T/sec" || fail "blocked host not listed: $(cat "$T/sec")"
+cage 2>"$T/home.out" >/dev/null || true
+if grep -q 'blocked since you last looked' "$T/home.out"; then fail "still flagged after cage security"; fi
+[ "$(wc -l < "$CAGE_HOME/events.log")" = 3 ] || fail "events collected twice: $(cat "$CAGE_HOME/events.log")"
+unset MSB_SYSLOG
+cage secret rm NET_KEY 2>/dev/null
+cage network open </dev/null 2>/dev/null
+cage up claude 2>/dev/null
+if grep -q '^  allow:' "$CAGE_HOME/msb/claude.yaml"; then fail "open network still has an allow list"; fi
+ok "security events: harvested once, flagged on the home screen until seen, grouped in cage security"
 
 # --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
 V="$T/volumes/cage-claude-home"

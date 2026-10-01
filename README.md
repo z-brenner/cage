@@ -60,6 +60,8 @@ cage password add …   a website sign-in they can use but never see
 cage chat add slack   talk to an agent in Slack too (or discord, whatsapp)
 cage secret add …     give agents a key they can use but never see
 cage backup           everything in one encrypted file (cage restore puts it back)
+cage security         what was blocked: keys sent to the wrong place, hosts (strict network)
+cage network strict   each agent reaches only what it needs (cage allow <host> for more)
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
 cage help             everything else
@@ -176,7 +178,18 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 ## Security model
 
 - **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
-- **Network:** microsandbox's default policy. The public internet is allowed; your host, LAN, loopback and cloud-metadata endpoints are blocked. You can tighten this to a domain allowlist via `CAGE_MSB_EXTRA_ARGS` (`--net-rule`; see the [microsandbox networking docs](https://docs.microsandbox.dev/networking/overview.md)).
+- **Network:** by default, microsandbox's policy applies: the public internet is allowed, and your computer, LAN, loopback and cloud-metadata endpoints are blocked. **`cage network strict`** switches each agent to deny-by-default. It may then reach only:
+  - its own service and its chat apps;
+  - where it installs from;
+  - the apps and sites you connected, and the hosts its keys are for;
+  - whatever you add with `cage allow <host> [agents]`.
+
+  Anything else fails to resolve, and the agent is told to ask you. `cage network hosts <agent>` shows the full list, and `cage network open` switches back.
+- **Security events:** cage collects what microsandbox blocks from each VM's log:
+  - a key or password placeholder sent anywhere other than its own hosts (usually a prompt injection; the real value never left);
+  - in strict mode, each host an agent couldn't reach.
+
+  Your home screen flags new ones, and `cage security` lists them, with the `cage allow` line for each blocked host.
 - **Only you can talk to the bots:** the Telegram ids in `CAGE_TELEGRAM_ALLOW`, and in Slack or Discord your own account unless you allowed others. Only your own accounts are admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
 - **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox.
 - **Known gap: each bot's token (Telegram, Slack, Discord, the WhatsApp link) lives inside that agent's VM.** An agent that gets prompt-injected could read it and impersonate its bot.
