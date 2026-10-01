@@ -9,7 +9,7 @@
 # vendor's servers; only the first boot and `cage update` download.
 # Vendor CLIs install system-wide (/opt/cage/tools, /usr/local/bin) so the agent's persistent home
 # volume holds only its login and work, never binaries.
-set -euo pipefail
+set -Eeuo pipefail   # -E: the ERR trap below fires inside functions too
 
 KIND="${1:?usage: provision.sh <claude|codex|cursor|antigravity> [--update]}"
 MODE="${2:-}"
@@ -35,6 +35,7 @@ if [ -d "$CACHE" ] && touch "$CACHE/.w" 2>/dev/null; then   # the cache volume (
 fi
 
 log() { echo "provision[$KIND]: $*"; }
+trap 'log "failed at line $LINENO: $BASH_COMMAND"' ERR   # so a failure is never silent
 
 [ "$(id -u)" = 0 ] || { echo "provision.sh must run as root" >&2; exit 1; }
 case "$KIND" in claude|codex|cursor|antigravity) ;; *) echo "unknown agent kind: $KIND" >&2; exit 2 ;; esac
@@ -156,11 +157,14 @@ install_browser() {
   link_npm_bins
   local cli deps
   cli="$(find "$(npm root -g)/@playwright/mcp" -path '*/node_modules/playwright/cli.js' | head -n 1)"
-  # Chromium's system libraries: the list Playwright would install, through apt_install (so from the cache)
-  deps="$(node "$cli" install-deps --dry-run chromium 2>/dev/null | sed -n 's/.*apt-get install -y --no-install-recommends //p' | head -n 1)"
-  if [ -n "$deps" ]; then
-    # shellcheck disable=SC2086  # a list of package names
-    apt_install libnss3-tools $deps
+  # Chromium's system libraries: the packages Playwright says are missing (it exits 1 when some are), through
+  # apt_install, so from the cache. Older Playwrights print the apt-get command instead.
+  deps="$( { node "$cli" install-deps --dry-run chromium 2>&1 || true; } |
+    sed -n -e 's/^ \{2,\}\([a-z0-9][a-z0-9.+-]*\)$/\1/p' -e 's/.*apt-get install -y --no-install-recommends \([^"]*\).*/\1/p' |
+    tr '\n' ' ')"
+  # shellcheck disable=SC2086  # a list of package names
+  if [ -n "$deps" ] && apt_install libnss3-tools $deps; then
+    :
   else
     apt_install libnss3-tools
     node "$cli" install-deps chromium >/dev/null
