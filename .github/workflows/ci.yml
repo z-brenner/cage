@@ -80,6 +80,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: test/guest-smoke.sh ${{ matrix.agent }}
+      - name: waking up with no network at all (from the agent's cache)
+        run: test/offline-wake.sh ${{ matrix.agent }}
 
   microvm:
     name: microVM e2e (${{ matrix.agent }})

@@ -44,12 +44,12 @@ if [ -e "$MARK" ] && [ "$MODE" != "--update" ] && [ "$MODE" != "--refresh" ] && 
   exit 0
 fi
 
-# cached: the agent's CLI is already in the cache and this isn't `cage update`
+# cached: there's a cache to install from and this isn't `cage update`
 cached() { [ "$CACHED" = 1 ] && [ "$REFRESH" = 0 ]; }
+apt_cached() { cached && compgen -G "$CACHE/apt/lists/*_Packages*" >/dev/null; }   # and it has Ubuntu's lists
 
 apt_install() { # apt_install <packages…>: from the cache if it has them all, else from Ubuntu
-  if cached && compgen -G "$CACHE/apt/lists/*_Packages*" >/dev/null &&
-     "${APT[@]}" install -y -qq --no-install-recommends --no-download "$@" >/dev/null 2>&1; then
+  if apt_cached && "${APT[@]}" install -y -qq --no-install-recommends --no-download "$@" >/dev/null 2>&1; then
     return 0
   fi
   "${APT[@]}" update -qq
@@ -64,7 +64,7 @@ link_npm_bins() { # global npm commands, from the cache's prefix onto PATH
 }
 
 base_packages() {
-  log "base packages$(cached && echo ' (cached)')"
+  log "base packages$(apt_cached && echo ' (cached)')"
   apt_install ca-certificates curl git jq ripgrep unzip xz-utils less procps util-linux sudo \
     python3 python3-venv build-essential openssh-client
 }
