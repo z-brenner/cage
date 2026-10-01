@@ -22,6 +22,23 @@
         if ($fix) { Write-Host "    -> $fix" -ForegroundColor DarkGray }
         throw 'cage-stop'
     }
+    # On a computer your company manages, some of this is IT's to change: write them a note (Desktop, clipboard).
+    function Write-ITNote([string[]]$needs) {
+        $lines = @('Hi,', '',
+            'I would like to use cage (https://github.com/z-brenner/cage), which runs AI assistants on this',
+            'computer, each in a small local virtual machine inside WSL 2. It needs:', '')
+        $lines += ($needs | ForEach-Object { "- $_" })
+        $lines += @('', 'It does not open any ports to the network. Could you help me set this up?', '', 'Thanks!')
+        $text = $lines -join "`r`n"
+        if ($env:CAGE_CHECK_ONLY) { Say 'check only: would write this note for your IT department:'; Write-Host $text; return }
+        $desk = [Environment]::GetFolderPath('Desktop')
+        if (-not $desk) { $desk = $env:USERPROFILE }
+        $file = Join-Path $desk 'cage - note for IT.txt'
+        try { Set-Content -Path $file -Value $text -Encoding ASCII; Start-Process notepad.exe $file } catch { $file = '' }
+        try { Set-Clipboard -Value $text } catch { }
+        if ($file) { Say "A note for your IT department is on your Desktop ('cage - note for IT.txt'), and copied." }
+        else { Say 'A note for your IT department is copied: paste it into an email.' }
+    }
     function Get-Distros {
         # wsl.exe prints UTF-16 unless WSL_UTF8 is set; strip NULs either way.
         $out = & wsl.exe --list --quiet 2>$null
@@ -52,9 +69,28 @@
         $cs = Get-CimInstance Win32_ComputerSystem
         $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
         if (-not ($cs.HypervisorPresent -or $cpu.VirtualizationFirmwareEnabled)) {
-            Stop-Setup 'virtualization is turned off on this PC' 'turn on Intel VT-x or AMD-V (SVM) in your BIOS/UEFI settings, then run this again'
+            Write-ITNote @('hardware virtualization (Intel VT-x or AMD-V) turned on in the firmware settings')
+            Stop-Setup 'virtualization is turned off on this PC' 'turn on Intel VT-x or AMD-V (SVM) in your BIOS/UEFI settings, then run this again (on a work PC, IT may need to)'
         }
         Ok 'Windows 11 on an x64 PC with virtualization'
+
+        # A company policy can turn WSL, or the nested virtualization the agents' VMs need, off (Intune: WSL settings).
+        $policy = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\WSL' -ErrorAction SilentlyContinue
+        $blocked = @()
+        if ($policy -and $policy.PSObject.Properties['AllowWSL'] -and $policy.AllowWSL -eq 0) { $blocked += 'WSL 2 allowed (Intune: WSL settings > Allow WSL)' }
+        if ($policy -and $policy.PSObject.Properties['AllowNestedVirtualization'] -and $policy.AllowNestedVirtualization -eq 0) {
+            $blocked += 'nested virtualization for WSL 2 allowed (Intune: WSL settings > Allow nested virtualization)'
+        }
+        if ($blocked.Count -gt 0) {
+            Write-ITNote $blocked
+            Stop-Setup 'your company has turned off part of WSL that cage needs' 'send the note to your IT department, then run this again'
+        }
+
+        $free = [math]::Floor((Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))).Free / 1GB)
+        if ($free -lt 15) { Stop-Setup "only $free GB free on $($env:SystemDrive)" 'cage needs about 15 GB for WSL and your agents: free some space, then run this again' }
+        $ram = [math]::Round($cs.TotalPhysicalMemory / 1GB)
+        if ($ram -lt 8) { Say "This PC has $ram GB of memory: keep one agent awake at a time." }
+        Ok "$free GB free, $ram GB of memory"
 
         $user = ($env:USERNAME.ToLower() -replace '[^a-z0-9_-]', '')
         if ($user -notmatch '^[a-z_][a-z0-9_-]{0,30}$') { $user = 'cage' }
@@ -67,6 +103,13 @@
 
         $env:WSL_UTF8 = '1'
         if ((Get-Distros) -notcontains $Distro) {
+            # Turning WSL on needs an administrator: on a work PC that's usually IT.
+            $admin = (& whoami.exe /groups) -match 'S-1-5-32-544'
+            & wsl.exe --status 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0 -and -not $admin) {
+                Write-ITNote @('WSL 2 installed (wsl --install), or administrator rights to install it')
+                Stop-Setup 'turning on WSL needs an administrator, and your account is not one' 'send the note to your IT department, or ask someone with admin rights to run this'
+            }
             Say "Turning on WSL 2 and installing a fresh Ubuntu 24.04 named '$Distro'."
             Say 'Windows may ask for permission; this takes a few minutes.'
             & wsl.exe --update 2>$null | Out-Null   # the newest WSL knows --name; harmless if WSL isn't on yet

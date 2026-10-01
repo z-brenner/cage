@@ -1741,6 +1741,51 @@ check_host() {
   return $good
 }
 
+# The setup screen's check of this computer, as JSON: [{id, status: ok|warn|bad, title, detail, fix, it}]. "fix": cage
+# can fix it itself (cage fix); "it": what to ask your IT department for, on a computer they manage.
+check_json() {
+  local out="" gb
+  item() {
+    out="$out${out:+,}{\"id\":$(jstr "$1"),\"status\":$(jstr "$2"),\"title\":$(jstr "$3"),\"detail\":$(jstr "$4"),\"fix\":$(jbool test -n "$5"),\"it\":$(jstr "$6")}"
+  }
+  if find_msb && command -v "$MSB" >/dev/null 2>&1; then item msb ok "microsandbox is installed" "It runs your agents' private computers." "" ""
+  else item msb bad "microsandbox isn't installed yet" "It runs your agents' private computers. cage installs it for you, without admin rights." fix ""; fi
+  if [ "$(uname -s)" = Linux ]; then
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then item kvm ok "This computer can run virtual machines" "Each agent gets one of its own." "" ""
+    elif [ -e /dev/kvm ]; then item kvm bad "You can't use virtual machines yet" "cage adds you to the kvm group; it may ask for your password." fix ""
+    elif is_wsl; then item kvm bad "Virtual machines are turned off inside WSL" "cage runs each agent in a small virtual machine inside WSL 2, which needs nested virtualization. Windows 11 allows it unless it's turned off." "" \
+      "nested virtualization for WSL 2 (Intune: WSL settings > Allow nested virtualization, or nestedVirtualization=true in .wslconfig)"
+    else item kvm bad "Virtualization is turned off" "Turn on Intel VT-x or AMD-V (SVM) in this computer's BIOS or UEFI settings, then restart." "" \
+      "hardware virtualization (Intel VT-x or AMD-V) turned on in the firmware settings"; fi
+    if is_wsl; then
+      if win_cmd powershell.exe >/dev/null && win_cmd reg.exe >/dev/null; then item interop ok "Windows and WSL can talk to each other" "So your agents keep running when you close windows." "" ""
+      else item interop warn "WSL can't start Windows programs" "Your agents stop when WSL does. Set enabled=true under [interop] in /etc/wsl.conf, then wsl --shutdown." "" \
+        "WSL interop (running Windows programs from WSL) allowed"; fi
+    fi
+  fi
+  gb="$(df -Pk "$HOME" 2>/dev/null | awk 'NR == 2 { print int($4 / 1048576) }')"
+  if [ "${gb:-0}" -ge 15 ]; then item disk ok "$gb GB of free space" "Each agent needs about 5 GB, more as it works." "" ""
+  else item disk warn "Only ${gb:-?} GB of free space" "Each agent needs about 5 GB, more as it works. Free some space, or start with one agent." "" ""; fi
+  gb="$(awk '/^MemTotal:/ { print int(($2 + 524288) / 1048576) }' /proc/meminfo 2>/dev/null || true)"
+  if [ -n "$gb" ]; then
+    if [ "$gb" -ge 8 ]; then item memory ok "$gb GB of memory" "Each awake agent uses up to ${CAGE_MEMORY:-4G}B." "" ""
+    else item memory warn "$gb GB of memory" "Each awake agent uses up to ${CAGE_MEMORY:-4G}B, so keep one or two awake at a time." "" ""; fi
+  fi
+  if curl -fsS -o /dev/null --max-time 8 https://registry.npmjs.org/ 2>/dev/null && curl -fsS -o /dev/null --max-time 8 https://github.com/ 2>/dev/null; then
+    item network ok "This computer reaches the internet" "Agents download their tools once, then talk to their AI service." "" ""
+  else item network bad "This computer can't reach what the agents need" "github.com and registry.npmjs.org didn't answer. A company firewall or proxy may be in the way." "" \
+    "access to github.com, registry.npmjs.org, deb.nodesource.com, archive.ubuntu.com and each AI service (claude.ai, anthropic.com, chatgpt.com, openai.com, cursor.com, google.com)"; fi
+  printf '{"checks":[%s]}\n' "$out"
+}
+
+cmd_fix() { # cage fix: what cage can fix on this computer itself (microsandbox, access to KVM)
+  if ! find_msb; then install_msb; fi
+  if [ "$(uname -s)" = Linux ] && [ -e /dev/kvm ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
+    fix_kvm || die "couldn't give you access to /dev/kvm; on a work computer, IT may need to"
+  fi
+  ok "this computer is ready for your agents"
+}
+
 cmd_doctor() {
   local good=1 t u any
   check_host || good=0
@@ -2014,7 +2059,7 @@ cmd_up() {
   done
   if is_wsl; then wsl_keepalive_start; fi
   refresher_start
-  if { [ "$UI" = 1 ] || [ -n "$PROTO" ]; } && [ -t 0 ]; then
+  if { [ "$UI" = 1 ] || [ -n "$PROTO" ]; } && [ -t 0 ] && [ -z "${NO_WAIT:-}" ]; then
     wait_ready "${AGENTS[@]}"
     [ "${ONBOARDING:-0}" = 1 ] || next_steps
   else
@@ -2033,7 +2078,7 @@ cmd_login() {
     asleep) die "$a is asleep; wake it up first: cage up $a" ;;
     installing) wait_ready "$a" ;;
   esac
-  printf '\n  %s  %ssign %s in to %s%s\n' "$(face "$a" login)" "$C_B" "$a" "$(agent_plan "$a")" "$C_0" >&2
+  [ -n "$PROTO" ] || printf '\n  %s  %ssign %s in to %s%s\n' "$(face "$a" login)" "$C_B" "$a" "$(agent_plan "$a")" "$C_0" >&2
   hint "$(login_hint "$a")"
   printf '\n' >&2
   agent_exec "$a" yes "$(login_cmd "$a")" || true
@@ -2309,7 +2354,9 @@ cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
 }
 
 cmd_add() { # cage add <agents>: your agents, to talk to in the app (chat apps are optional, later)
-  [ $# -gt 0 ] || die "usage: cage add <agent…> (claude codex cursor antigravity)"
+  local login=1
+  if [ "${1:-}" = --no-login ]; then login=0; shift; fi
+  [ $# -gt 0 ] || die "usage: cage add [--no-login] <agent…> (claude codex cursor antigravity)"
   cmd_init
   load_env
   local a keep=() k
@@ -2321,8 +2368,8 @@ cmd_add() { # cage add <agents>: your agents, to talk to in the app (chat apps a
   CAGE_AGENTS="${keep[*]}"
   for a in "$@"; do app_dirs "$a"; ok "$(agent_name "$a") is one of your agents"; done
   find_msb || { hint "next: cage up"; return 0; }
-  cmd_up "$@"
-  if interactive; then
+  if [ $login = 1 ]; then cmd_up "$@"; else NO_WAIT=1 cmd_up "$@"; fi   # the setup screen shows them getting ready
+  if [ $login = 1 ] && interactive; then
     for a in "$@"; do
       refresh_running
       [ "$(probe "$a")" = ready ] && continue
@@ -3044,6 +3091,7 @@ cmd_onboard() {
   about_you
 
   step "6 of 6" "Wake up and sign in"
+  [ -e "$CAGE_HOME/autostart" ] || ( cmd_autostart on ) || warn "couldn't turn on start-at-login (cage autostart on)"
   cmd_up "${picked[@]}"
   for a in "${picked[@]}"; do
     refresh_running
@@ -3121,6 +3169,7 @@ usage() {
   row "  add <agents>" "your agents, to talk to in the app (cage ui)"
   row "  setup [agents]" "Telegram bots, and who may talk to them"
   row "  doctor" "check this computer, the config and the bots"
+  row "  fix" "install what this computer is missing"
   row "  ui" "all of this in your browser"
   row "  autostart on|off" "wake agents when you log in"
   row "  update [agents]" "newest cage and agent CLIs"
@@ -3159,6 +3208,8 @@ main() {
     network) cmd_network "$@" ;;
     allow) cmd_allow "$@" ;;
     add) cmd_add "$@" ;;
+    fix) cmd_fix ;;
+    _check) check_json ;;
     approve) cmd_approve "$@" ;;
     ask) cmd_ask "$@" ;;
     ask-all) cmd_ask_all "$@" ;;

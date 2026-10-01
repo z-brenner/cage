@@ -6,8 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
 SERVER=""
-VM=""
-trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
+VM="" SERVER2=""
+trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$SERVER2" ] || kill "$SERVER2" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -19,7 +19,12 @@ cmd="$1"; shift
 case "$cmd" in
   inspect) exit 0 ;;
   ps) echo cage-claude ;;
-  exec) case "$*" in *cage:ready*) echo cage:ready ;; *strict-mcp-config*) echo 'Paris, says **the stub**' ;; esac ;;
+  exec) case "$*" in
+    *cage:ready*) echo cage:ready ;;
+    *strict-mcp-config*) echo 'Paris, says **the stub**' ;;
+    *"auth login"*) printf 'Browser didn'"'"'t open? Use the url below to sign in (c to copy)\n\n\033[1mhttps://claude.ai/oauth/authorize?code=true&client_id=9d1c&state=xyz\033[0m\n\nPaste code here if prompted > '
+      read -r c; [ "$c" = "CODE-123" ] && echo "Login successful." ;;
+  esac ;;
   logs) for i in 1 2 3; do echo "cc-connect: line $i"; done ;;
 esac
 exit 0
@@ -67,10 +72,33 @@ rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
 ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
 
 mkdir -p "$T/work/reports" && printf 'Q3: up 12%%\n' > "$T/work/reports/q3.txt" && printf '# Notes\n' > "$T/work/notes.md"
+
+# A second, fresh computer for the setup screen: Codex needs a sign-in (by device code) until it's done
+mkdir -p "$T/bin2"
+cat > "$T/bin2/msb" <<'STUB'
+#!/usr/bin/env bash
+cmd="$1"; shift
+case "$cmd" in
+  inspect) exit 0 ;;
+  ps) echo cage-codex ;;
+  exec) case "$*" in
+    *cage:ready*) if [ -e "$STUB_SIGNED" ]; then echo cage:ready; else echo cage:login; fi ;;
+    *"login --device-auth"*) printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mWXYZ-12345\033[0m\n'
+      sleep 2; : > "$STUB_SIGNED" ;;
+  esac ;;
+esac
+exit 0
+STUB
+chmod +x "$T/bin2/msb"
+PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+CAGE_HOME="$T/fresh" CAGE_MSB="$T/bin2/msb" CAGE_UI_PORT="$PORT2" STUB_SIGNED="$T/signed" "$ROOT/cage" ui --no-open 2>/dev/null || fail "the second cage ui"
+SERVER2="$(pgrep -f "host/ui/server.py" -n || true)"
+B2="http://127.0.0.1:$PORT2"
+TOK2="$(cat "$T/fresh/ui.token")"
 node "$ROOT/test/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
 
 if command -v node >/dev/null 2>&1; then
-  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" \
+  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" \
     || fail "the web app in a browser (above)"
   ok "the web app in a real browser"
 fi
