@@ -690,7 +690,7 @@ def restart_when_updated():
     except OSError:
         return
     while True:
-        time.sleep(20)
+        time.sleep(3)
         try:
             changed = os.stat(me).st_mtime != born
         except OSError:

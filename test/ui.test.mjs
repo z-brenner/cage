@@ -2,6 +2,7 @@
 // hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one (test/fake-vm.mjs plays
 // its VM), the phone layout, and that nothing works without the token.
 //   node test/ui.test.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token> <its home>
+//     <an installed release's url> <its folder>
 // (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
 import fs from 'node:fs'
 import path from 'node:path'
@@ -9,7 +10,7 @@ import { createRequire } from 'node:module'
 // PLAYWRIGHT_MODULE: where the playwright package is, when it isn't installed next to this file
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const [base, token, home, work, base2, token2, home2] = process.argv.slice(2)
+const [base, token, home, work, base2, token2, home2, base3, inst] = process.argv.slice(2)
 let pass = 0
 const ok = (m) => { pass++; console.log('ok - ' + m) }
 const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
@@ -266,6 +267,23 @@ await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).cli
 await page.locator('.chat .msg-agent', { hasText: 'is ready' }).waitFor({ timeout: 10000 })
 if (await badge.count()) fail('the unread mark stayed after opening the chat')
 ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
+
+// updating while the app is open: the server restarts with the new code, and the page reloads with the new page
+const p3 = await browser.newPage()
+p3.on('pageerror', (e) => errors.push(e.message))
+await p3.goto(base3 + '/#' + token)
+await p3.locator('#version', { hasText: 'cage v1.0.0' }).waitFor({ timeout: 15000 })
+await p3.evaluate(() => { window.__oldPage = true })
+const srv = path.join(inst, 'host', 'ui', 'server.py')
+fs.writeFileSync(srv, fs.readFileSync(srv, 'utf8').replace('return self.send(200, "ok", "text/plain")', 'return self.send(200, "ok, updated", "text/plain")'))
+fs.writeFileSync(path.join(inst, 'VERSION'), 'v1.0.1\n')
+const healthz = async () => { try { return await (await fetch(base3 + '/healthz')).text() } catch (e) { return '' } }
+for (let i = 0; i < 50 && (await healthz()) !== 'ok, updated'; i++) await p3.waitForTimeout(200)
+if ((await healthz()) !== 'ok, updated') fail('the server did not restart with its new code')
+await p3.waitForFunction(() => !window.__oldPage, null, { timeout: 20000 })   // a new page, not just a redraw
+await p3.locator('#version', { hasText: 'cage v1.0.1' }).waitFor({ timeout: 20000 })
+await p3.close()
+ok('updating while the app is open: the server restarts with its new code, and the page reloads')
 
 // on a phone: the sidebar is a menu
 await page.setViewportSize({ width: 390, height: 844 })

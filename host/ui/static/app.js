@@ -147,9 +147,15 @@ async function api (path, opts = {}) {
   if (!res.ok) throw new Error(data.error || res.statusText)
   return data
 }
+let BOOTED = ''   // the cage version this page came with; after an update, the page reloads to get the new one
 async function refresh () {
   try {
     STATE = await api('/api/state')
+    BOOTED = BOOTED || STATE.version
+    if (STATE.version !== BOOTED && !job && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) {
+      BOOTED = STATE.version   // once: the server restarts itself within seconds of an update (host/ui/server.py)
+      setTimeout(() => location.reload(), 4000)
+    }
     render()
     if (CHAT) drawChatState(CHAT)
     liveConnect()

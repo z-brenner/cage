@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
 SERVER=""
 VM="" SERVER2=""
-trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$SERVER2" ] || kill "$SERVER2" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
+trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$SERVER2" ] || kill "$SERVER2" 2>/dev/null; [ -z "$SERVER3" ] || kill "$SERVER3" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -101,8 +101,15 @@ B2="http://127.0.0.1:$PORT2"
 TOK2="$(cat "$T/fresh/ui.token")"
 node "$ROOT/test/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
 
+# An installed release (a VERSION file), for updating while the app is open: the server restarts itself with the new
+# code once nothing is running, and the page reloads to get the new page
+mkdir -p "$T/inst" && tar --exclude=.git --exclude=node_modules -C "$ROOT" -cf - . | tar -C "$T/inst" -xf - && echo v1.0.0 > "$T/inst/VERSION"
+PORT3="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+CAGE_UI_PORT="$PORT3" "$T/inst/cage" ui --no-open 2>/dev/null || fail "the installed cage ui"
+SERVER3="$(pgrep -f "$T/inst/host/ui/server.py" -n || true)"
+
 if command -v node >/dev/null 2>&1; then
-  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" STUB_AWAKE="$T/codex-awake" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" \
+  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" STUB_AWAKE="$T/codex-awake" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" "http://127.0.0.1:$PORT3" "$T/inst" \
     || fail "the web app in a browser (above)"
   ok "the web app in a real browser"
 fi
