@@ -61,7 +61,8 @@ class Job:
         env = dict(os.environ, CAGE_PROTO="1", TERM="xterm-256color", COLUMNS="100", LINES="30")
         env.pop("NO_COLOR", None)
         self.proc = subprocess.Popen([CAGE] + args, stdin=slave, stdout=slave, stderr=slave, env=env,
-                                     start_new_session=True, close_fds=True, cwd=os.path.expanduser("~"))
+                                     start_new_session=True, close_fds=True, cwd=os.path.expanduser("~"),
+                                     preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))   # /dev/tty works (sudo)
         os.close(slave)
         self.master = master
         threading.Thread(target=self.read, daemon=True).start()
