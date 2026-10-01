@@ -2155,8 +2155,12 @@ cmd_restore() {
   rm -rf "$stage"
   ok "restored from $(basename "$file")"
   hint "what was here before is in $old; delete it once everything works"
-  configured || { hint "next: cage"; return 0; }
-  cmd_up
+  # wake the agents someone can talk to (the others were never set up)
+  local wake=()
+  load_env
+  for v in $CAGE_AGENTS; do if reachable "$v"; then wake+=("$v"); fi; done
+  if [ ${#wake[@]} -eq 0 ]; then hint "next: cage"; return 0; fi
+  cmd_up "${wake[@]}"
 }
 
 # --- the guided first run ---------------------------------------------------------------------------------------
