@@ -94,6 +94,7 @@ usermod -aG kvm $user
 echo '$user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-cage
 chmod 440 /etc/sudoers.d/90-cage
 grep -q '^\[user\]' /etc/wsl.conf 2>/dev/null || printf '\n[user]\ndefault=$user\n' >> /etc/wsl.conf
+(apt-get update -qq && apt-get install -y -qq qrencode) >/dev/null 2>&1 || true
 grep -q 'cage: show your agents' /home/$user/.bashrc 2>/dev/null || cat >> /home/$user/.bashrc <<'CAGERC'
 "@
         $rootSetup += @'

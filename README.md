@@ -56,6 +56,7 @@ cage login <agent>    sign an agent in to your subscription
 cage logs <agent>     watch what an agent's VM is doing
 cage memory           review what your agents want to remember
 cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
+cage chat add slack   talk to an agent in Slack (or discord) too
 cage secret add …     give agents a key they can use but never see
 cage doctor           check this computer, the config and the bots
 cage autostart on     wake them up whenever you log in
@@ -65,6 +66,22 @@ cage help             everything else
 In Telegram, each chat is a session: `/new` starts fresh, `/stop` interrupts, `/list` and `/switch` move between sessions, `/model` and `/mode` change how the agent works, `/usage` shows your quota.
 
 **Ask several agents at once:** add your bots to one Telegram group, turn **Group Privacy** off for each (BotFather → Bot Settings), then @mention the bots you want in one message. Set `CAGE_TELEGRAM_GROUP_REPLY_ALL=true` to have all of them answer everything there.
+
+## Slack and Discord
+
+Telegram is where setup starts, and you can add an agent to Slack or Discord as well. Each one is that agent's own bot there, run by the same VM, with the same login and files.
+
+```bash
+cage chat add slack claude      # opens a Slack app for claude, already filled in; you paste two tokens
+cage chat add discord codex     # you make an app in Discord's portal and paste its token; cage does the rest
+cage chat                       # who's where
+```
+
+- **Slack:** the link creates the app with everything set (Socket Mode, so nothing on your computer is exposed to the internet). You click Install, then copy two tokens. DM it, or invite it to a channel and @mention it.
+- **Discord:** cage turns on the permission it needs to read your messages, gives it its face, and shows an invite link (and a QR code) for your server. DM it, or @mention it in a channel.
+- **Only you can talk to it** unless you say otherwise: cage finds your Slack account from your email, and your Discord account from the app's owner.
+- **Letting coworkers use it** is possible (`everyone`, or a list of emails in Slack), but think twice. Each agent runs on *your* personal subscription. Those plans are for one person, so sharing one with a team likely breaks their terms (see below). Everyone you let in can also reach what you connected it to: your email, files and keys. For a team bot, use the vendor's team plan or API key instead.
+- **WhatsApp** isn't supported yet.
 
 ## Memory
 
@@ -125,9 +142,9 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 
 - **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. Set `CAGE_MODE=ask` to approve each tool call in chat instead.
 - **Network:** microsandbox's default policy. The public internet is allowed; your host, LAN, loopback and cloud-metadata endpoints are blocked. You can tighten this to a domain allowlist via `CAGE_MSB_EXTRA_ARGS` (`--net-rule`; see the [microsandbox networking docs](https://docs.microsandbox.dev/networking/overview.md)).
-- **Only the allowlisted Telegram user ids** in `CAGE_TELEGRAM_ALLOW` can talk to the bots. They are also the only admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
+- **Only you can talk to the bots:** the Telegram ids in `CAGE_TELEGRAM_ALLOW`, and in Slack or Discord your own account unless you allowed others. Only your own accounts are admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
 - **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox.
-- **Known gap: each bot's Telegram token lives inside that agent's VM.** An agent that gets prompt-injected could read it and impersonate its bot.
+- **Known gap: each bot's token (Telegram, Slack, Discord) lives inside that agent's VM.** An agent that gets prompt-injected could read it and impersonate its bot.
   - microsandbox's secret substitution can't cover this, because Telegram puts the token in the URL path.
   - cc-connect's `run_as_user` split could, but it supports only Claude Code today.
   - Mitigation: one bot per agent limits the blast radius. If you suspect a leak, rotate the token in BotFather.
