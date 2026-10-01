@@ -76,7 +76,10 @@ ok "egress: public internet allowed; metadata and private ranges blocked"
 if gx sh -c 'echo x > /cage/pwned' 2>/dev/null; then fail "/cage is writable"; fi
 ok "host mounts are read-only"
 
-# persistence: down + up (what you do after a reboot) re-creates the VM and keeps the home volume
+# persistence: down + up (what you do after a reboot) re-creates the VM and keeps the home volume.
+# The VM comes back with a secret, so this also boots and provisions with TLS interception on.
+SECRET_VALUE="cage-e2e-$RANDOM$RANDOM$RANDOM"
+printf '%s\n' "$SECRET_VALUE" | cage secret add E2E_KEY postman-echo.com "$A" 2>/dev/null || fail "secret add"
 ax sh -c 'echo keep > /home/agent/work/marker'
 cage down "$A"
 cage up "$A"
@@ -84,6 +87,23 @@ retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned aft
 [ "$(gx cat /home/agent/work/marker)" = keep ] || fail "home volume lost across down/up"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not back after down/up"
 ok "down + up keeps the home volume (logins, work) and brings cc-connect back"
+
+# secrets: the agent only ever sees a placeholder; the allowed host gets the real value; nowhere else does
+withenv() { ax bash -lc "set -a; . /etc/cage/runtime.env; set +a; $1"; }
+v="$(withenv 'printf %s "$E2E_KEY"')"
+[ -n "$v" ] && [ "$v" != "$SECRET_VALUE" ] || fail "the agent sees the real secret, or nothing: '$v'"
+gx grep -q 'E2E_KEY' /home/agent/work/AGENTS.md || fail "the agent wasn't told about its key"
+resp="$(withenv 'curl -sS -m 30 https://postman-echo.com/headers -H "x-cage-key: $E2E_KEY"' || true)"
+grep -q "$SECRET_VALUE" <<<"$resp" || fail "the allowed host didn't receive the real value: $resp"
+resp="$(withenv 'curl -sS -m 30 https://httpbin.org/anything -H "x-cage-key: $E2E_KEY"' 2>&1 || true)"
+if grep -q "$SECRET_VALUE" <<<"$resp"; then fail "the real value reached a host it isn't allowed for"; fi
+withenv 'curl -sS -m 30 -o /dev/null https://github.com' || fail "HTTPS through the interception CA fails"
+ax curl -sS -m 30 -o /dev/null https://api.telegram.org || fail "Telegram (exempt from interception) unreachable"
+if gx sh -c 'command -v node >/dev/null'; then
+  withenv 'node -e "fetch(\"https://github.com\").then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"' \
+    || fail "Node doesn't trust the interception CA"
+fi
+ok "secrets: placeholder in the VM, real value only at the allowed host, HTTPS still works under interception"
 
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi

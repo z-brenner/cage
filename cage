@@ -11,6 +11,7 @@ CAGE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CAGE_HOME="${CAGE_HOME:-$HOME/.cage}"
 CAGE_ENV="${CAGE_ENV:-$CAGE_HOME/cage.env}"
 BRAIN="$CAGE_HOME/brain"
+SECRETS="$CAGE_HOME/secrets"
 MSB="${CAGE_MSB:-msb}"
 # The microsandbox installer puts msb in ~/.local/bin, which isn't on PATH in non-login sessions
 # (autostart at login, `wsl.exe --exec`). Find it there too.
@@ -516,6 +517,102 @@ cmd_memory() {
   esac
 }
 
+# --- secrets ---------------------------------------------------------------------------------------------------
+# Keys the agents can use but never see. The value stays on this computer (~/.cage/secrets, 0600). The VM gets a
+# placeholder, and microsandbox swaps in the real value on the way out, only for requests to the hosts allowed
+# for that key; a placeholder headed anywhere else is blocked. Declaring a secret turns on TLS interception for
+# that VM, so each agent's own service and Telegram are exempted (and only VMs with secrets are intercepted).
+secret_name_ok() {
+  [[ "$1" =~ ^[A-Z][A-Z0-9_]{1,40}$ ]] && ! [[ "$1" =~ ^(MSB_|CAGE_|SSL_|NODE_|LD_|BASH|GIT_SSL|CURL_|REQUESTS_) ]] &&
+    ! [[ "$1" =~ ^(PATH|HOME|USER|SHELL|TERM|LANG|LOGNAME|PWD)$ ]]
+}
+host_ok() { [[ "$1" =~ ^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; }
+host_matches() { # host_matches <host> <pattern>: "*.x.com" matches x.com and anything under it
+  case "$2" in '*.'*) [[ "$1" == "${2#\*.}" || "$1" == *".${2#\*.}" ]] ;; *) [ "$1" = "$2" ] ;; esac
+}
+tls_bypass_for() { # hosts that must not be intercepted: Telegram, and the agent's own service
+  echo "api.telegram.org"
+  case "$1" in
+    claude) echo "anthropic.com *.anthropic.com claude.ai *.claude.ai claude.com *.claude.com" ;;
+    codex) echo "openai.com *.openai.com chatgpt.com *.chatgpt.com" ;;
+    cursor) echo "cursor.com *.cursor.com cursor.sh *.cursor.sh" ;;
+    antigravity) echo "antigravity.google *.googleapis.com *.google.com *.gstatic.com" ;;
+  esac
+}
+
+secret_add() { # secret_add NAME HOST[,HOST...] [agent...]
+  local name="${1:-}" hosts="${2:-}" agents value h a b
+  [ -n "$name" ] && [ -n "$hosts" ] || die "usage: cage secret add NAME HOST[,HOST...] [agent...]   e.g. cage secret add GITHUB_TOKEN api.github.com"
+  shift 2
+  secret_name_ok "$name" || die "name it in capitals, like GITHUB_TOKEN (not a system variable)"
+  agents="${*:-$CAGE_AGENTS}"
+  for a in $agents; do check_agent "$a"; done
+  for h in ${hosts//,/ }; do
+    host_ok "$h" || die "\"$h\" isn't a host name (like api.github.com, or *.example.com)"
+    for a in $agents; do
+      for b in $(tls_bypass_for "$a"); do
+        host_matches "${h#\*.}" "$b" && die "$h is $a's own service; cage doesn't intercept it, so a key can't be protected there"
+      done
+    done
+  done
+  prompt "$(brand) value for $name (stays hidden): " value secret
+  [ -n "$value" ] || die "empty value; nothing saved"
+  mkdir -p "$SECRETS" && chmod 700 "$SECRETS"
+  ( umask 077
+    printf '%s' "$value" > "$SECRETS/$name"
+    printf 'hosts=%s\nagents=%s\n' "$hosts" "$agents" > "$SECRETS/$name.conf" )
+  ok "$name saved on this computer; agents only ever see a placeholder"
+  hint "it works only for requests to $hosts, by: $agents. Apply it: cage up $agents"
+}
+
+secret_list() {
+  local f n=0 name
+  for f in "$SECRETS"/*.conf; do
+    [ -f "$f" ] || continue
+    n=$((n + 1)) name="$(basename "$f" .conf)"
+    printf '  %s%-24s%s %s  %s(%s)%s\n' "$C_B" "$name" "$C_0" "$(sed -n 's/^hosts=//p' "$f")" "$C_DIM" "$(sed -n 's/^agents=//p' "$f")" "$C_0"
+  done
+  [ $n -gt 0 ] || { say "no secrets yet"; hint "cage secret add GITHUB_TOKEN api.github.com"; }
+}
+
+secret_rm() {
+  local name="${1:-}"
+  { secret_name_ok "$name" && [ -f "$SECRETS/$name.conf" ]; } || die "no secret called \"$name\" (see: cage secret list)"
+  rm -f "$SECRETS/$name" "$SECRETS/$name.conf"
+  ok "$name removed from this computer"
+  hint "running agents keep it until they restart: cage up"
+}
+
+cmd_secret() {
+  load_env
+  case "${1:-list}" in
+    add) shift; secret_add "$@" ;;
+    list) secret_list ;;
+    rm) shift; secret_rm "$@" ;;
+    *) die "usage: cage secret add NAME HOST[,HOST...] [agent...] | list | rm NAME" ;;
+  esac
+}
+
+SECRET_ARGS=() SECRET_ENV=()
+secret_plan() { # secret_plan <agent>: msb flags and values for its secrets; writes what the VM may know about them
+  local a="$1" f name hosts agents b names="" info=""
+  SECRET_ARGS=() SECRET_ENV=()
+  for f in "$SECRETS"/*.conf; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f" .conf)"
+    hosts="$(sed -n 's/^hosts=//p' "$f")" agents="$(sed -n 's/^agents=//p' "$f")"
+    { [[ " $agents " == *" $a "* ]] && [ -r "$SECRETS/$name" ]; } || continue
+    SECRET_ARGS+=(--secret "$name@$hosts")
+    SECRET_ENV+=("$name=$(cat "$SECRETS/$name")")
+    names="$names$name"$'\n' info="$info- \$$name: ${hosts//,/, }"$'\n'
+  done
+  if [ ${#SECRET_ENV[@]} -gt 0 ]; then
+    for b in $(tls_bypass_for "$a"); do SECRET_ARGS+=(--tls-bypass "$b"); done
+  fi
+  # Names and hosts only (never values): the VM passes the placeholders on and tells the agent what it has.
+  ( umask 077; printf '%s' "$names" > "$CAGE_HOME/agents/$a/secrets.names"; printf '%s' "$info" > "$CAGE_HOME/agents/$a/secrets.md" )
+}
+
 # --- VMs -------------------------------------------------------------------------------------------------------
 exists() { "$MSB" inspect "$(vm "$1")" >/dev/null 2>&1; }
 
@@ -523,7 +620,7 @@ agent_exec() { # agent_exec <agent> <tty:yes|no> <command>
   local tty=--no-tty
   [ "$2" = yes ] && tty=-t
   "$MSB" exec "$tty" -u agent -e HOME=/home/agent -w /home/agent "$(vm "$1")" -- \
-    bash -lc "set -a; [ -r /etc/cage/env ] && . /etc/cage/env; set +a; $3"
+    bash -lc "set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a; $3"
 }
 
 RUNNING="?"
@@ -907,13 +1004,16 @@ cmd_up() {
   [ "$UI" = 1 ] && quiet=(-q)
   for a in "${AGENTS[@]}"; do
     render_config "$a"
+    secret_plan "$a"
     [ "$UI" = 1 ] && printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2
     # Always (re)create: microsandbox runs the `--` command only on `msb run`; a plain start/restart boots
     # the VM without it. Re-creating reprovisions the system disk (~1 min) and keeps the named home volume,
     # so logins, sessions and work survive. This is also what `cage update` does, and it applies config changes.
     # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
+    # Secret values reach msb only through its environment (never its arguments, which `ps` shows).
     # shellcheck disable=SC2086
-    "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
+    ( for kv in ${SECRET_ENV[@]+"${SECRET_ENV[@]}"}; do export "${kv?}"; done
+    exec "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
       -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
       --mount-named "$(vm "$a")-home:/home/agent" \
       --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
@@ -921,8 +1021,8 @@ cmd_up() {
       --mount-dir "$BRAIN/memory:/memory:ro" \
       --mount-dir "$BRAIN/inbox/$a:/memory-inbox" \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" \
-      ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
-      "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a"
+      ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
+      "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
     if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
   done
   if is_wsl; then wsl_keepalive_start; fi
@@ -1133,6 +1233,7 @@ usage() {
   row "  logs <agent>" "watch what an agent's VM is doing"
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
+  row "  secret add|list|rm" "keys agents can use but never see"
   printf '\n  %ssetting up%s\n' "$C_DIM" "$C_0"
   row "  setup [agents]" "Telegram bots, and who may talk to them"
   row "  doctor" "check this computer, the config and the bots"
@@ -1162,6 +1263,7 @@ main() {
     down) cmd_down "$@" ;;
     destroy) cmd_destroy "$@" ;;
     memory) cmd_memory "$@" ;;
+    secret|secrets) cmd_secret "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
