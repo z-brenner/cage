@@ -50,6 +50,17 @@ render() {
     cat /cage-config/secrets.md
     echo
   fi
+  if [ -s /cage-config/passwords.md ]; then
+    echo "## Website sign-ins"
+    echo
+    echo "Your user saved these sign-ins for you. Use your browser tools: open the site's own sign-in page, enter the"
+    echo "username, and type the placeholder below exactly as shown into the password field. cage swaps in the real"
+    echo "password when the form is sent to that site, and blocks it anywhere else, so never put a placeholder"
+    echo "anywhere but that site's password field."
+    echo
+    head -c 4000 /cage-config/passwords.md
+    echo
+  fi
   if [ -s /cage-config/connectors.md ]; then
     echo "## Apps you're connected to"
     echo

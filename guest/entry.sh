@@ -51,6 +51,9 @@ for v in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_
 done > /etc/cage/runtime.env
 chmod 644 /etc/cage/runtime.env
 bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
+if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then
+  bash /cage/browser.sh || log "could not set up the browser (continuing without it)"
+fi
 bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing without them)"
 
 # WhatsApp, if it's on for this agent: an adapter that talks to cc-connect's bridge (guest/whatsapp.sh)

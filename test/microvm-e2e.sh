@@ -80,6 +80,8 @@ ok "host mounts are read-only"
 # The VM comes back with a secret, so this also boots and provisions with TLS interception on.
 SECRET_VALUE="cage-e2e-$RANDOM$RANDOM$RANDOM"
 printf '%s\n' "$SECRET_VALUE" | cage secret add E2E_KEY postman-echo.com "$A" 2>/dev/null || fail "secret add"
+PW="p&ss w0rd-$RANDOM"   # characters that forms encode, so the pre-encoded twin is exercised too
+printf 'e2e-user\n%s\n' "$PW" | cage password add postman-echo.com "$A" 2>/dev/null || fail "password add"
 CONN_VALUE="cage-conn-$RANDOM$RANDOM$RANDOM"
 printf '%s\n' "$CONN_VALUE" | cage connect add deepwiki https://mcp.deepwiki.com/mcp --header X-Cage-Key "$A" 2>/dev/null \
   || fail "connect add"
@@ -125,6 +127,26 @@ esac
 retry 120 sh -c "msb exec --no-tty -u agent -e HOME=/home/agent $VM -- bash -lc 'set -a; . /etc/cage/runtime.env; set +a; $mcp' 2>&1 | grep -qE '$want'" \
   || fail "$mcp: $(hx "$mcp" 2>&1 | tail -5)"
 ok "connectors: $mcp reaches the app through interception; only a placeholder in the VM"
+
+# website passwords: the agent sees placeholders; the allowed site gets the real password in the request body,
+# as JSON (first placeholder) or as an HTML form (its pre-encoded twin); nowhere else does. The agent's own
+# browser (Chromium, trusting microsandbox's CA) signs in with it.
+gx grep -rqF "$PW" /home/agent /etc/cage /cage-config && fail "the website password reached the VM"
+ph="$(gx grep -o 'type `cagepw-[a-z0-9-]*`' /home/agent/work/AGENTS.md | head -n 1 | tr -d '`' | sed 's/^type //')"
+alt="$(gx grep -o 'try `cagepwf-[a-z0-9-]*`' /home/agent/work/AGENTS.md | head -n 1 | tr -d '`' | sed 's/^try //')"
+[ -n "$ph" ] && [ -n "$alt" ] || fail "the agent wasn't told its sign-in: $(gx grep -A3 'Website sign-ins' /home/agent/work/AGENTS.md)"
+resp="$(ax curl -sS -m 30 https://postman-echo.com/post -H 'Content-Type: application/json' -d "{\"password\":\"$ph\"}" || true)"
+grep -qF "\"password\":\"$PW\"" <<<"$resp" || fail "JSON sign-in didn't get the real password: $resp"
+resp="$(ax curl -sS -m 30 https://postman-echo.com/post --data-urlencode "password=$alt" || true)"
+grep -qF "\"password\":\"$PW\"" <<<"$resp" || fail "form sign-in didn't get the real password: $resp"
+resp="$(ax curl -sS -m 30 https://httpbin.org/post --data-urlencode "password=$alt" 2>&1 || true)"
+if grep -qF "$PW" <<<"$resp" || grep -qF 'p%26ss' <<<"$resp"; then fail "the password reached another site"; fi
+form="data:text/html,<form method=post action=https://postman-echo.com/post><input name=user value=e2e-user><input type=password name=password id=pw><button>Sign in</button></form>"
+calls="[[\"browser_navigate\",{\"url\":\"$form\"}],[\"browser_type\",{\"element\":\"password\",\"target\":\"e4\",\"text\":\"$alt\",\"submit\":true}],[\"browser_wait_for\",{\"time\":3}],[\"browser_snapshot\",{}]]"
+out="$(msb exec --no-tty -u agent -e HOME=/home/agent "$VM" -- node /cage/mcp-try.mjs "$calls" cage-browser 2>&1 || true)"
+grep -qF "\\\"password\\\":\\\"$PW\\\"" <<<"$out" || grep -qF "\"password\":\"$PW\"" <<<"$out" \
+  || fail "the browser's sign-in didn't carry the real password: $(tail -c 1500 <<<"$out")"
+ok "website passwords: JSON and form sign-ins get the real password at the allowed site only; the browser signs in with it"
 
 cage destroy "$A" --yes
 if msb inspect "$VM" >/dev/null 2>&1; then fail "VM still exists after destroy"; fi

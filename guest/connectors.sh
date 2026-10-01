@@ -19,11 +19,17 @@ set -a
 [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env
 set +a
 
-# servers: {name: {url, headers}} for each connector whose key (if it has one) reached this VM
+# servers: {name: {url, headers}} for each connector whose key (if it has one) reached this VM,
+#          or {name: {command}} for one that runs inside it
 servers='{}'
 names=""
 while IFS='|' read -r name url header secret; do
-  if ! [[ "$name" =~ ^[a-z][a-z0-9-]*$ && "$url" == https://* ]]; then continue; fi
+  if ! [[ "$name" =~ ^[a-z][a-z0-9-]*$ && ( "$url" == https://* || "$url" == local:browser ) ]]; then continue; fi
+  if [ "$url" = local:browser ]; then   # a local server: the browser (guest/browser.sh, provision.sh)
+    servers="$(jq -c --arg n "$name" '.[$n] = {command: "/usr/local/bin/cage-browser"}' <<<"$servers")"
+    names="$names$name "
+    continue
+  fi
   headers='{}'
   if [ -n "$secret" ]; then
     if ! [[ "$secret" =~ ^[A-Z][A-Z0-9_]*$ && "$header" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then continue; fi
@@ -75,8 +81,9 @@ codex_servers() {
   if [ "$servers" != '{}' ]; then
     { echo "$begin"
       echo "# rewritten at every boot: use \`cage connect\` on your computer instead of editing these"
-      jq -r 'to_entries[] | "[mcp_servers.\(.key | @json)]", "url = \(.value.url | @json)",
-        (select(.value.headers | length > 0)
+      jq -r 'to_entries[] | "[mcp_servers.\(.key | @json)]",
+        if .value.command then "command = \(.value.command | @json)" else "url = \(.value.url | @json)" end,
+        (select((.value.headers // {}) | length > 0)
           | "http_headers = { " + ([.value.headers | to_entries[] | "\(.key | @json) = \(.value | @json)"] | join(", ")) + " }")' \
         <<<"$servers"
       echo "$end"; } >> "$tmp"
@@ -86,10 +93,10 @@ codex_servers() {
 }
 runuser -u "$U" -- mkdir -p "$H/.config/cage" "$H/.codex" "$H/.cursor" "$H/.gemini/config"
 case "$KIND" in
-  claude) json_servers "$H/.claude.json" '{type: "http", url: .url, headers: .headers}' ;;
+  claude) json_servers "$H/.claude.json" 'if .command then {type: "stdio", command: .command, args: []} else {type: "http", url: .url, headers: .headers} end' ;;
   codex) codex_servers ;;
-  cursor) json_servers "$H/.cursor/mcp.json" '{url: .url, headers: .headers}' ;;
-  antigravity) json_servers "$H/.gemini/config/mcp_config.json" '{serverUrl: .url, headers: .headers}' ;;
+  cursor) json_servers "$H/.cursor/mcp.json" 'if .command then {command: .command, args: []} else {url: .url, headers: .headers} end' ;;
+  antigravity) json_servers "$H/.gemini/config/mcp_config.json" 'if .command then {command: .command, args: []} else {serverUrl: .url, headers: .headers} end' ;;
 esac
 # Remember what cage added (not the user's own servers it skipped), so the next boot can take it out again.
 added="$(jq -r 'keys_unsorted[]' <<<"$servers")"

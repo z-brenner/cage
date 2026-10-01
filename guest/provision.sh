@@ -88,6 +88,26 @@ install_antigravity() {
   ln -sf "$TOOLS/.local/bin/agy" /usr/local/bin/agy
 }
 
+PLAYWRIGHT_MCP_VERSION="${PLAYWRIGHT_MCP_VERSION:-0.0.83}"
+install_browser() {
+  node_22
+  log "browser (Playwright MCP $PLAYWRIGHT_MCP_VERSION, Chromium's libraries)"
+  npm install -g --no-fund --no-audit "@playwright/mcp@$PLAYWRIGHT_MCP_VERSION" >/dev/null
+  "${APT[@]}" install -y -qq --no-install-recommends libnss3-tools >/dev/null
+  local cli
+  cli="$(find "$(npm root -g)/@playwright/mcp" -path '*/node_modules/playwright/cli.js' | head -n 1)"
+  node "$cli" install-deps chromium >/dev/null
+  cat > /usr/local/bin/cage-browser <<'SH'
+#!/bin/sh
+# The agent's web browser: Playwright MCP driving headless Chromium. Its profile (cookies, the sites it's signed
+# in to) lives in ~/.cache/cage-browser, so it survives restarts. The VM is the sandbox, hence --no-sandbox.
+export PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
+exec node "$(npm root -g)/@playwright/mcp/cli.js" --headless --no-sandbox --browser chromium \
+  --user-data-dir /home/agent/.cache/cage-browser --output-dir /home/agent/.cache/cage-browser-files "$@"
+SH
+  chmod 755 /usr/local/bin/cage-browser
+}
+
 install_cc_connect() {
   local arch os=linux
   case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; esac
@@ -119,8 +139,10 @@ else
   base_packages
 fi
 "install_$KIND"
-# Extras some agents run next to their CLI: the WhatsApp adapter needs Node.js.
+# Extras some agents run next to their CLI: the WhatsApp adapter needs Node.js; the browser, Node.js and Chromium's
+# system libraries (the browser itself downloads once into the home volume: guest/browser.sh).
 if [ -r /cage-config/whatsapp.env ]; then node_22; fi
+if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then install_browser; fi
 install_cc_connect
 guest_env
 case "$KIND" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$KIND" ;; esac

@@ -31,6 +31,8 @@ if [ "$A" = claude ]; then
 fi
 # A connector with a key: microsandbox would hand the VM a placeholder for it, so the container gets one too.
 printf 'smoke-key\n' | PATH="$T/bin:$PATH" "$ROOT/cage" connect add demo https://mcp.deepwiki.com/mcp --header X-Cage-Key 2>/dev/null
+# The browser (codex only, to keep CI quick): Playwright MCP and Chromium install, and it loads a real page.
+if [ "$A" = codex ]; then PATH="$T/bin:$PATH" "$ROOT/cage" connect add browser codex </dev/null 2>/dev/null; fi
 PATH="$T/bin:$PATH" "$ROOT/cage" up "$A" 2>/dev/null
 sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md"
 
@@ -99,6 +101,13 @@ if [ "$A" = claude ]; then
   [[ "$st" == *'"state":"qr"'* ]] || fail "WhatsApp gave no linking code: $st"
   grep -q 'bridge: adapter registered" platform=whatsapp' <<<"$(docker logs "$NAME" 2>&1)" || fail "cc-connect didn't register the adapter"
   ok "whatsapp: the adapter installed, registered with cc-connect's bridge and got a linking code from WhatsApp"
+fi
+
+if [ "$A" = codex ]; then
+  out="$(hx 'node /cage/mcp-try.mjs "[[\"browser_navigate\",{\"url\":\"https://example.com\"}]]" cage-browser' 2>&1 || true)"
+  grep -q 'Example Domain' <<<"$out" || fail "the browser didn't load a page: $(tail -c 1200 <<<"$out")"
+  grep -q 'browser  */usr/local/bin/cage-browser' <<<"$(hx 'codex mcp list' 2>&1)" || fail "codex doesn't have the browser"
+  ok "browser: Playwright MCP and Chromium installed, codex has it, and it loads a real page"
 fi
 
 logs="$(docker logs "$NAME" 2>&1)"
