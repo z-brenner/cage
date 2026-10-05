@@ -261,6 +261,15 @@ await chat.locator('.typing').waitFor({ state: 'visible', timeout: 10000 })
 fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'error', session: 'you', text: 'the agent stopped' }) + '\n')
 await chat.locator('.chat-note.bad', { hasText: 'The agent stopped' }).waitFor({ timeout: 10000 })
 if (await chat.locator('.typing').isVisible()) fail('the agent still looks busy after an error')
+// an answer being written that stops to ask something, or at an error, stays as written, and isn't "being written" any
+// more (a screen reader waits for that to read it)
+for (const end of [{ t: 'buttons', text: 'Which one?', buttons: [[{ text: 'The first', data: 'first' }]] }, { t: 'error', text: 'it broke halfway' }]) {
+  fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'preview', session: 'you', handle: 'p-' + end.t, text: 'Looking into ' + end.t }) + '\n')
+  await chat.locator('.msg-agent[aria-busy="true"]', { hasText: 'Looking into ' + end.t }).waitFor({ timeout: 10000 })
+  fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), session: 'you', ...end }) + '\n')
+  await chat.getByText(end.t === 'buttons' ? 'Which one?' : /it broke halfway/i).waitFor({ timeout: 10000 })
+  if (await chat.locator('[aria-busy]').count()) fail('an answer that stopped at ' + end.t + ' is still marked as being written')
+}
 ok('a new chat log keeps the conversation on screen, also after a reload; a link says where it really goes; a dropped relay is shown; an error ends "working…"')
 
 // Stop while it works: the button by "working…", or Esc with nothing typed (cc-connect's /stop), but not Esc while you write
