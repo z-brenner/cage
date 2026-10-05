@@ -289,6 +289,7 @@ cage is a few hundred lines of shell around two open-source projects: [cc-connec
 ## Development
 
 ```bash
+test/all.sh                     # every fast check, as CI runs them, with a summary (test/all.sh host setup: only those)
 shellcheck cage install.sh guest/*.sh test/*.sh scripts/*.sh
 test/installer.sh               # install.sh from git and from releases (checksums, in-place updates, cage update)
 test/host.sh                    # cage against a stub msb: config rendering, validation, msb arguments, status, guards
@@ -305,7 +306,7 @@ CI (`.github/workflows/ci.yml`) runs:
 - guest smoke tests for all four agents
 - the real-microVM end-to-end test for all four agents, on KVM-enabled GitHub runners
 
-Releases: push a tag like `v0.2.0` on main, or run the release workflow on main with that version. `.github/workflows/release.yml` runs the quick checks, builds the release with `scripts/build-release.sh` (reproducible: the same commit gives the same tarball), attests it, and publishes it. The installers always take the latest release.
+Releases: first add a `## v0.2.0` section to `CHANGELOG.md` on main that says what changed; the release page shows it, and a release without one stops. Then push a tag like `v0.2.0` on main, or run the release workflow on main with that version. `.github/workflows/release.yml` waits for CI to pass on that commit and stops if it failed (if a job failed only by chance, re-run it, then start the release again). It builds the release twice with `scripts/build-release.sh` and stops if the two differ (reproducible: the same commit gives the same tarball), attests it, and publishes it. The installers always take the latest release.
 
 Files:
 - `cage`: the host CLI.
