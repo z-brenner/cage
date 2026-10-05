@@ -1794,7 +1794,7 @@ check_host() {
   if find_msb && command -v "$MSB" >/dev/null 2>&1; then
     if ! msb_version_ok; then
       echo "  ${C_ERR}✗${C_0} microsandbox $MSB_HAVE is too old for cage"
-      echo "    ${C_DIM}→ run: cage update${C_0}"; good=1
+      echo "    ${C_DIM}→ run: cage fix${C_0}"; good=1
     elif ! msb_tested; then
       echo "  ${C_AMBER}!${C_0} microsandbox $MSB_HAVE (cage is tested with ${CAGE_MSB_VERSION#v})"
     else
@@ -2149,7 +2149,7 @@ cmd_up() {
   load_env
   resolve_agents "$@"
   find_msb || die "microsandbox isn't installed; run cage to set it up"
-  msb_version_ok || die "microsandbox $MSB_HAVE is too old for cage; run: cage update"
+  msb_version_ok || die "microsandbox $MSB_HAVE is too old for cage; run: cage fix"
   brain_init "${AGENTS[@]}"
   if oauth_any; then oauth_refresh_all 1800; fi
   local quiet=()
@@ -3416,6 +3416,13 @@ install_msb() { # install_msb [why]: the microsandbox release cage is tested wit
   fi
   find_msb || die "microsandbox installed, but msb isn't where expected; open a new terminal and run cage again"
   msb_version_ok || true
+  if [ -n "$MSB_HAVE" ] && ver_lt "$MSB_HAVE" "${CAGE_MSB_VERSION#v}"; then
+    # The installer puts msb in ~/.microsandbox/bin and ~/.local/bin; an older one from another install, earlier on
+    # PATH, is still the one that runs.
+    bad "microsandbox ${CAGE_MSB_VERSION#v} is installed, but an older one ($MSB_HAVE) comes first on your PATH: $(command -v "$MSB")"
+    hint "remove that one (or put ~/.local/bin first on your PATH), then run: cage doctor"
+    exit 1
+  fi
   ok "microsandbox ${MSB_HAVE:-${CAGE_MSB_VERSION#v}}"
 }
 

@@ -651,7 +651,14 @@ rm -rf "$MSB_HOME"
 out="$(printf 'y\n' | FAIL_MSB_INSTALL=1 PATH="$nomsb" HOME="$T/fixhome2" CAGE_HOME="$T/fixhome2/.cage" "$ROOT/cage" fix 2>&1 || true)"
 grep -q "couldn't install microsandbox: error: glibc 2.28 or newer is required (found 2.17)" <<<"$out" || fail "the installer's error isn't shown: $out"
 grep -q "$T/fixhome2/.cage/msb-install.log" <<<"$out" || fail "no pointer to the installer's log: $out"
-ok "cage fix installs the microsandbox version cage pins, and shows the installer's error when it fails"
+# an older msb from another install, first on PATH, still wins after the pinned one went into ~/.microsandbox
+mkdir -p "$T/oldmsb" && printf '#!/bin/sh\necho "msb 0.7.4"\n' > "$T/oldmsb/msb" && chmod +x "$T/oldmsb/msb"
+rc=0; out="$(printf 'y\n' | PATH="$T/oldmsb:$nomsb" HOME="$T/fixhome3" CAGE_HOME="$T/fixhome3/.cage" "$ROOT/cage" fix 2>&1)" || rc=$?
+[ "$rc" != 0 ] && grep -q "microsandbox $pin is installed, but an older one (0.7.4) comes first on your PATH: $T/oldmsb/msb" <<<"$out" ||
+  fail "an older msb first on PATH: $out"
+grep -q "✓ microsandbox\|ready for your agents" <<<"$out" && fail "cage fix said all is well with the old msb still in use: $out"
+rm -rf "$MSB_HOME"
+ok "cage fix installs the microsandbox version cage pins, shows the installer's error when it fails, and an older one that still comes first"
 
 echo "msb 0.7.99" > "$MSB_STUB_VERSION"
 out="$(CAGE_HOME="$T/doc" cage doctor 2>&1 || true)"
@@ -660,12 +667,12 @@ CAGE_HOME="$T/doc" cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["
 assert c["msb"]["status"] == "warn" and "0.7.99" in c["msb"]["title"], c["msb"]' || fail "the app's check doesn't warn about the msb version"
 echo "msb 0.7.4" > "$MSB_STUB_VERSION"
 out="$(CAGE_HOME="$T/doc" cage doctor 2>&1 || true)"
-grep -q "✗ microsandbox 0.7.4 is too old for cage" <<<"$out" && grep -q "run: cage update" <<<"$out" || fail "doctor: an old msb: $out"
+grep -q "✗ microsandbox 0.7.4 is too old for cage" <<<"$out" && grep -q "run: cage fix" <<<"$out" || fail "doctor: an old msb: $out"
 CAGE_HOME="$T/doc" cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
 assert c["msb"]["status"] == "bad" and c["msb"]["fix"], c["msb"]' || fail "the app's check: an old msb isn't something cage fixes"
 : > "$MSB_LOG"
 if cage up claude 2>"$T/err"; then fail "up ran with a microsandbox that's too old"; fi
-grep -q "microsandbox 0.7.4 is too old for cage; run: cage update" "$T/err" || fail "up: $(cat "$T/err")"
+grep -q "microsandbox 0.7.4 is too old for cage; run: cage fix" "$T/err" || fail "up: $(cat "$T/err")"
 grep -q '^run | ' "$MSB_LOG" && fail "up started a VM with an old msb"
 printf 'y\n' | cage update claude 2>"$T/err" || fail "update with an old msb: $(cat "$T/err")"
 grep -q "✓ microsandbox $pin" "$T/err" || fail "update didn't install microsandbox $pin: $(cat "$T/err")"
