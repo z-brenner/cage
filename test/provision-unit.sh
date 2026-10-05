@@ -177,21 +177,26 @@ ok "provisioning's log lines end with the time"
 mkdir -p "$T/slow"
 printf '#!/bin/sh\necho $$ > "$T/sleep.pid"\nexec %s 2\n' "$(command -v sleep)" > "$T/slow/sleep"
 chmod +x "$T/slow/sleep"
-beat() {
+beat() { # beat <seconds the step has been going>
   PATH="$T/slow:$PATH" STEP_FILE="$T/step"
   step "base packages"
+  printf '%s base packages\n' "$(( $(date +%s) - $1 ))" > "$STEP_FILE"
+  : > "$T/sleep.pid"
   heartbeat > "$T/beat" & local hb=$!
-  for _ in $(seq 1 50); do grep -q 'still on' "$T/beat" && break; /bin/sleep 0.1; done
+  for _ in $(seq 1 50); do [ -s "$T/beat" ] && break; /bin/sleep 0.1; done
+  /bin/sleep 0.2
   kill "$hb"; wait "$hb" 2>/dev/null || true
   /bin/sleep 0.3
   # still running, not just dead and waiting to be reaped (a zombie: kill -0 counts those too)
   if [[ "$(awk '{ print $3 }' "/proc/$(cat "$T/sleep.pid")/stat" 2>/dev/null)" =~ ^[RSD]$ ]]; then echo "SLEEP LEFT BEHIND"; fi
   cat "$T/beat"
 }
-lib beat || fail "heartbeat: $(shown)"
-grep -Eq '^provision\[claude\]: still on base packages \(0 min\) \(' "$T/out" || fail "no heartbeat line: $(shown)"
+lib beat 130 || fail "heartbeat: $(shown)"
+grep -Eq '^provision\[claude\]: still on base packages \(2 min\) \(' "$T/out" || fail "no heartbeat line: $(shown)"
 grep -q 'SLEEP LEFT BEHIND' "$T/out" && fail "the heartbeat's sleep outlived it: $(shown)"
-ok "while a step runs, a line every minute says which one; stopping the heartbeat stops its sleep too"
+lib beat 10 || fail "heartbeat: $(shown)"
+grep -q 'still on' "$T/out" && fail "a step that just started was reported: $(shown)"
+ok "while a step runs, a line every minute says which one (from its first minute on); stopping it stops its sleep too"
 
 # --- entry.sh: `cage update` falls back to the cache; cc-connect's restarts slow down, and recover ----------------------
 entry() { ( CAGE_ENTRY_LIB=1 . "$ROOT/guest/entry.sh" claude; "$@" ); }

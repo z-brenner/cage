@@ -45,12 +45,13 @@ step() { # step <what>: logs the step; while it runs, the heartbeat repeats it o
   { printf '%s %s\n' "$(date +%s)" "$*" > "$STEP_FILE"; } 2>/dev/null || true
 }
 heartbeat() { # in the background: which step is still going, and for how long, so a slow one shows in the log
-  local since what
+  local since what took
   trap 'kill "$!" 2>/dev/null; exit 0' TERM   # its sleep goes with it
   while kill -0 "$$" 2>/dev/null; do
     sleep 60 & wait "$!"
     [ -r "$STEP_FILE" ] && read -r since what < "$STEP_FILE" || continue
-    log "still on $what ($(( ($(date +%s) - since) / 60 )) min)"
+    took=$(( $(date +%s) - since ))
+    [ "$took" -lt 60 ] || log "still on $what ($((took / 60)) min)"   # a step that just started isn't news
   done
 }
 
