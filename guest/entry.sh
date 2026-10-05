@@ -21,7 +21,7 @@ PROVISION_LIMIT="${CAGE_PROVISION_LIMIT:-1800}"   # seconds for the first try at
 
 log() { echo "cage-entry[$KIND]: $*"; }
 
-# `cage update` sets CAGE_REFRESH: the newest of everything. When that keeps failing (offline, or a vendor's servers
+# `cage update` sets CAGE_REFRESH: the newest versions. When that keeps failing (offline, or a vendor's servers
 # are down), the agent wakes up with the versions it had, from its cache, instead of staying down.
 refresh_arg() { # refresh_arg <attempt>: --refresh for the first two tries of `cage update`, then nothing
   if [ -n "${CAGE_REFRESH:-}" ] && [ "$1" -le 2 ]; then echo --refresh; fi

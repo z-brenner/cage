@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs ONE agent CLI plus cc-connect into an Ubuntu 24.04 guest. Idempotent. Runs as root.
 #   usage: provision.sh <claude|codex|cursor|antigravity> [--refresh | --node | --browser]
-#   --refresh (from `cage update`) gets the newest of everything instead of what's cached
+#   --refresh (from `cage update`) gets the newest versions instead of what's cached (Claude Code: its stable release)
 #   --node only makes sure Node.js 22 is there (for the WhatsApp adapter, on an already provisioned VM)
 #   --browser sets up the browser's part (Playwright MCP, Chromium's libraries). guest/browser.sh runs it in the
 #     background once cc-connect is up, so the browser's downloads never keep the agent offline.
@@ -405,7 +405,9 @@ case "$MODE" in
   --browser) install_browser; log "browser: done"; exit 0 ;;
 esac
 base_packages
-if [ "$REFRESH" = 1 ]; then log "cage update: the newest of everything"; fi
+if [ "$REFRESH" = 1 ]; then
+  log "cage update: the newest versions$([ "$KIND" != claude ] || echo " (Claude Code's stable release, about a week behind its newest)")"
+fi
 "install_$KIND"
 adapters_node
 # The browser itself is set up after cc-connect starts (guest/browser.sh); its command is here from the start
