@@ -281,6 +281,16 @@ await page.keyboard.press('Alt+2')
 await drawn('agent/codex')
 await page.keyboard.press('Alt+1')
 await drawn('agent/claude')
+// but in a box you type in, Option and a digit types a character on a Mac ("#" on a UK keyboard, "@" on a Swedish one):
+// it goes into the box, and the page stays
+const composed = await page.evaluate(() => {
+  CHAT.ta.focus()
+  const ev = new KeyboardEvent('keydown', { key: '#', code: 'Digit3', altKey: true, bubbles: true, cancelable: true })
+  CHAT.ta.dispatchEvent(ev)
+  return ev.defaultPrevented
+})
+await page.waitForTimeout(300)
+if (composed || (await page.evaluate(() => location.hash)) !== '#agent/claude') fail('Option+3 ("#" on a Mac) in the message box went to another page')
 await page.keyboard.press('Control+Shift+O')
 for (let i = 0; i < 50 && !sent('/new'); i++) await page.waitForTimeout(100)
 await chat.locator('.chat-divider', { hasText: 'New conversation' }).last().waitFor({ timeout: 10000 })
@@ -963,7 +973,19 @@ await page.waitForFunction(() => document.getElementById('sidebar').getBoundingC
 await page.locator('#nav').getByRole('link', { name: 'Settings' }).click()
 await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 10000 })
 await offscreen().catch(() => fail('the menu stays open after picking a page'))
-ok('on a phone, the sidebar is a menu that closes when you pick a page')
+// Esc closes the menu, and does nothing else: an agent that's working isn't stopped by it
+await page.evaluate(() => go('agent/claude'))
+await drawn('agent/claude')
+const stopsBefore = stops()
+busy()
+await chat.locator('.typing').waitFor({ state: 'visible', timeout: 10000 })
+await page.getByRole('button', { name: 'Menu' }).click()
+await page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().x >= 0, null, { timeout: 5000 })
+await page.keyboard.press('Escape')
+await offscreen().catch(() => fail('Esc does not close the menu'))
+await page.waitForTimeout(600)
+if (stops() !== stopsBefore) fail('Esc that closed the menu stopped the agent too')
+ok('on a phone, the sidebar is a menu that closes when you pick a page, or with Esc (which then does nothing else)')
 
 if (errors.length) fail('page errors: ' + errors.join(' | '))
 await browser.close()

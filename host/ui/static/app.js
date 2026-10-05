@@ -2089,7 +2089,7 @@ function newConversation (name) { const C = openChat(name); if (C) chatSend(C, '
 // (⌘⇧O) starts a new conversation with the agent you're on; Esc stops an agent that's working, while you haven't
 // typed anything; ? lists them.
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
-const KEYS = [[MAC ? '⌘K' : 'Ctrl K', 'Go to, or do, anything'], [MAC ? '⌥1 … ⌥4' : 'Alt 1 … Alt 4', 'Open an agent’s chat, as listed on the left'],
+const KEYS = [[MAC ? '⌘K' : 'Ctrl K', 'Go to, or do, anything'], [MAC ? '⌥1 … ⌥4' : 'Alt 1 … Alt 4', 'Open an agent’s chat, as listed on the left' + (MAC ? ' (when you’re not typing)' : '')],
   [MAC ? '⌘⇧O' : 'Ctrl Shift O', 'Start a new conversation with this agent'], ['Esc', 'Stop the agent while it’s working (with nothing typed)'],
   ['Enter', 'Send'], ['Shift Enter', 'A new line'], ['?', 'These shortcuts']]
 const keysSheet = document.getElementById('keys')
@@ -2103,10 +2103,12 @@ keysSheet.addEventListener('click', (e) => { if (e.target === keysSheet) keysShe
 document.addEventListener('keydown', (e) => {
   if (dlg.open) return   // in the side panel, Ctrl+K is the terminal's (and the panel is modal anyway)
   if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (pal.open) pal.close(); else openPalette() }
-  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) document.body.classList.remove('nav-open')
+  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) { document.body.classList.remove('nav-open'); return }   // (and nothing else)
   if (!STATE || !STATE.configured || document.querySelector('dialog[open]')) return
   const field = typing(document.activeElement)
-  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-4]$/.test(e.code)) { // (by the key: on a Mac, Alt+1 types "¡")
+  // By the key, as Alt+1 on a Mac is "¡". But in a box you type in, only Alt with a plain digit: on a Mac, Option and a
+  // digit is how many keyboards type "#", "@", "$" or "£", which must go into the box, not to another page.
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-4]$/.test(e.code) && !(field && !/^[1-4]$/.test(e.key))) {
     const a = STATE.agents.slice().sort((x, y) => y.enabled - x.enabled)[+e.code.slice(5) - 1]
     if (a) { e.preventDefault(); go('agent/' + a.name) }
   } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyO') {
