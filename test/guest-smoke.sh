@@ -1,22 +1,43 @@
 #!/usr/bin/env bash
-# Guest-side smoke test. A Docker container stands in for the microsandbox VM: same ubuntu:24.04 image,
-# same mounts and entry command that `cage up` passes to `msb run`. Needs Docker and internet.
+# Guest-side smoke test. A Docker container stands in for the microsandbox VM: the same image, volumes, folders,
+# environment and entry command that `cage up` passes to `msb run`. Needs Docker and internet.
 #   test/guest-smoke.sh <claude|codex|cursor|antigravity>
-# Extra docker flags (proxy, CA, network) via CAGE_TEST_DOCKER_ARGS.
+# Extra docker flags (proxy, CA, network, an apt mirror) via CAGE_TEST_DOCKER_ARGS. When it fails, what the container
+# was doing (its output, its processes, apt's own logs) is printed and saved in CAGE_TEST_ARTIFACTS, if set.
 set -euo pipefail
 A="${1:?usage: guest-smoke.sh <agent>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
 NAME="cage-smoke-$A"
-VOL="cage-smoke-$A-home"
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; docker volume rm "$VOL" >/dev/null 2>&1 || true; rm -rf "$T"; }
+VOLS=""   # the docker volumes standing in for the VM's named volumes (its home, its cache)
+cleanup() {
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  for v in $VOLS; do docker volume rm "$v" >/dev/null 2>&1 || true; done
+  rm -rf "$T"
+}
 trap cleanup EXIT
-fail() { echo "FAIL[$A]: $*" >&2; docker logs --tail 40 "$NAME" >&2 2>/dev/null || true; exit 1; }
+diagnose() { # what the container was doing: its output, its processes, and apt's own logs (also saved, for CI)
+  local d="${CAGE_TEST_ARTIFACTS:-$T}/guest-smoke-$A"
+  mkdir -p "$d"
+  docker logs "$NAME" > "$d/container.log" 2>&1 || true
+  echo "--- the container's last output (all of it: $d/container.log) ---"
+  docker logs --tail 80 "$NAME" 2>&1 || true
+  # ps comes with the base packages, so before those it's /proc
+  docker exec "$NAME" sh -c 'echo "--- processes"
+    ps -eo pid,etime,args --forest 2>/dev/null ||
+      for p in /proc/[0-9]*; do printf "%s %s\n" "${p#/proc/}" "$(tr "\0" " " < "$p/cmdline" 2>/dev/null)"; done
+    echo "--- the step provisioning is on"; cat /run/cage-step.* 2>/dev/null
+    echo "--- apt: the end of term.log"; tail -n 40 /var/log/apt/term.log 2>/dev/null
+    echo "--- apt: history.log"; grep -E "^(Start-Date|End-Date|Commandline)" /var/log/apt/history.log 2>/dev/null | tail -n 24' \
+    2>&1 | tee "$d/inside.txt" || true
+}
+fail() { echo "FAIL[$A]: $*" >&2; diagnose >&2; exit 1; }
 ok() { echo "ok - [$A] $*"; }
 
-# Render the real config through ./cage (stub msb: nothing exists yet, every call succeeds).
+# Render the real config through ./cage. The stub msb: nothing exists yet, every call succeeds, and `msb run`'s
+# arguments are kept (NUL-separated), so the container below gets exactly what the VM would.
 mkdir -p "$T/bin"
-printf '#!/bin/sh\n[ "$1" = inspect ] && exit 1\nexit 0\n' > "$T/bin/msb"
+printf '#!/bin/sh\n[ "$1" = inspect ] && exit 1\n[ "$1" != run ] || printf "%%s\\0" "$@" > "%s"\nexit 0\n' "$T/msb-run" > "$T/bin/msb"
 chmod +x "$T/bin/msb"
 export CAGE_HOME="$T/home"
 PATH="$T/bin:$PATH" "$ROOT/cage" init 2>/dev/null
@@ -36,12 +57,29 @@ if [ "$A" = codex ]; then PATH="$T/bin:$PATH" "$ROOT/cage" connect add browser c
 PATH="$T/bin:$PATH" "$ROOT/cage" up "$A" 2>/dev/null
 sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md"
 
+# `msb run`'s arguments as docker's: named volumes (as docker volumes of this test's own), folders, environment, and
+# the image and command. A secret becomes its placeholder, as microsandbox would hand the VM.
+args=() cmd=() prev="" image="" after=0
+while IFS= read -r -d '' x; do
+  if [ "$after" = 1 ]; then cmd+=("$x"); continue; fi
+  case "$prev" in
+    --mount-named) v="cage-smoke-${x#cage-}"; VOLS="$VOLS ${v%%:*}"; args+=(-v "$v") ;;
+    --mount-dir) args+=(-v "$x") ;;
+    -e) args+=(-e "$x") ;;
+    --conf) for s in $(awk '/^secrets:/ { on = 1; next } /^[a-z]/ { on = 0 } on && /^  [A-Z][A-Z0-9_]*:$/ { sub(/:$/, ""); print $1 }' "$x"); do
+        args+=(-e "$s=\$MSB_$s"); done ;;
+  esac
+  if [ "$x" = -- ]; then after=1; image="$prev"; fi
+  prev="$x"
+done < "$T/msb-run"
+[ -n "$image" ] && [ ${#cmd[@]} -gt 0 ] || fail "cage up didn't run msb as expected: $(tr '\0' ' ' < "$T/msb-run")"
+for want in /home/agent /var/cache/cage /cage /cage-config /memory /memory-inbox /cage-app; do
+  [[ " ${args[*]} " == *":$want "* || " ${args[*]} " == *":$want:ro "* ]] || fail "cage up gives the VM no $want: ${args[*]}"
+done
+docker rm -f "$NAME" >/dev/null 2>&1 || true   # left over from a run that was cut short: start cold
+for v in $VOLS; do docker volume rm "$v" >/dev/null 2>&1 || true; done
 # shellcheck disable=SC2086
-docker run -d --name "$NAME" \
-  -v "$ROOT/guest:/cage:ro" -v "$CAGE_HOME/agents/$A:/cage-config:ro" -v "$VOL:/home/agent" \
-  -v "$CAGE_HOME/brain/memory:/memory:ro" -v "$CAGE_HOME/brain/inbox/$A:/memory-inbox" \
-  -e CC_CONNECT_VERSION=v1.5.0 -e 'DEMO_MCP_TOKEN=$MSB_DEMO_MCP_TOKEN' ${CAGE_TEST_DOCKER_ARGS:-} \
-  ubuntu:24.04 /bin/bash /cage/entry.sh "$A" >/dev/null
+docker run -d --name "$NAME" "${args[@]}" ${CAGE_TEST_DOCKER_ARGS:-} "$image" "${cmd[@]}" >/dev/null
 
 wait_for() { # wait_for <pattern> <seconds>
   local i=0
@@ -52,14 +90,27 @@ wait_for() { # wait_for <pattern> <seconds>
     sleep 5
   done
 }
-wait_for "starting cc-connect as agent" 900
+wait_for "starting cc-connect as agent" 1200
 ok "first boot provisioned and started cc-connect"
 
 case "$A" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$A" ;; esac
 docker exec -u agent -e HOME=/home/agent "$NAME" "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"
-ok "$BIN runs as the unprivileged agent user"
+[ "$(docker exec "$NAME" id -u agent)" = 1001 ] || fail "the agent's user id isn't 1001: $(docker exec "$NAME" id agent)"
+ok "$BIN runs as the unprivileged agent user (uid 1001)"
 
-sleep 3
+# Node.js 22 from NodeSource (not Ubuntu's older one), installed while provisioning (where it's retried), not later by
+# the app's chat on its own: every agent has the app
+logs="$(docker logs "$NAME" 2>&1)"
+node_at="$(grep -n "^provision\[$A\]: Node.js 22" <<<"$logs" | head -n 1 | cut -d: -f1)"
+done_at="$(grep -n "^provision\[$A\]: done:" <<<"$logs" | head -n 1 | cut -d: -f1)"
+[ -n "$node_at" ] && [ -n "$done_at" ] && [ "$node_at" -lt "$done_at" ] || fail "Node.js wasn't installed while provisioning"
+[[ "$(docker exec "$NAME" node --version)" == v22.* ]] || fail "not Node.js 22: $(docker exec "$NAME" node --version)"
+ok "Node.js 22 (NodeSource's) comes with provisioning"
+
+for _ in $(seq 1 30); do
+  [ "$(docker exec "$NAME" ps -o user= -C cc-connect | head -1 | tr -d ' ')" = agent ] && break
+  sleep 1
+done
 [ "$(docker exec "$NAME" ps -o user= -C cc-connect | head -1 | tr -d ' ')" = agent ] || fail "cc-connect not running as agent"
 [ "$(docker exec "$NAME" stat -c '%U %a' /home/agent/.cc-connect/config.toml)" = "agent 600" ] || fail "config perms"
 ok "cc-connect runs as agent with a 0600 config"
@@ -103,7 +154,20 @@ if [ "$A" = claude ]; then
   ok "whatsapp: the adapter installed, registered with cc-connect's bridge and got a linking code from WhatsApp"
 fi
 
+# the app's chat: the relay in the VM (guest/app.mjs) reaches cc-connect's bridge, and cc-connect answers /help itself
+D="$CAGE_HOME/app/$A"
+in_log() { grep -q "$1" "$D/log.jsonl" 2>/dev/null; }
+for _ in $(seq 1 60); do in_log '"t":"status","connected":true' && break; sleep 5; done
+in_log '"t":"status","connected":true' || fail "the app's relay never reached cc-connect's bridge: $(tail -5 "$D/log.jsonl" 2>/dev/null)"
+printf '%s' '{"type":"message","id":"smoke-1","session":"you","text":"/help"}' > "$D/in/.smoke-1.tmp"
+mv "$D/in/.smoke-1.tmp" "$D/in/smoke-1.json"
+for _ in $(seq 1 60); do in_log '"ctx":"smoke-1"' && break; sleep 2; done
+in_log '"ctx":"smoke-1"' || fail "no answer to /help in the app: $(tail -5 "$D/log.jsonl" 2>/dev/null)"
+ok "the app's chat: the relay reaches cc-connect, which answers /help"
+
 if [ "$A" = codex ]; then
+  # The browser gets ready in the background, after cc-connect starts (guest/browser.sh)
+  wait_for 'cage-browser: ready' 900
   out="$(hx 'node /cage/mcp-try.mjs "[[\"browser_navigate\",{\"url\":\"https://example.com\"}]]" cage-browser' 2>&1 || true)"
   grep -q 'Example Domain' <<<"$out" || fail "the browser didn't load a page: $(tail -c 1200 <<<"$out")"
   grep -q 'browser  */usr/local/bin/cage-browser' <<<"$(hx 'codex mcp list' 2>&1)" || fail "codex doesn't have the browser"
@@ -117,9 +181,13 @@ ok "cc-connect loaded the config and created the $A agent"
 
 # persistence: the home volume survives a restart and provisioning is skipped the second time
 docker exec -u agent "$NAME" sh -c 'echo keep > /home/agent/work/marker'
+# as on a home volume from an image that gave the agent another user id: its files are given back, once
+docker exec "$NAME" chown -R 4242:4242 /home/agent/.cc-connect /home/agent/work
 docker restart "$NAME" >/dev/null
 sleep 5
 wait_for "already provisioned" 120
 [ "$(docker exec "$NAME" cat /home/agent/work/marker)" = keep ] || fail "home volume lost data"
-ok "restart keeps the home volume (logins, work) and skips reprovisioning"
+grep -q 'giving them back to agent (once)' <<<"$(docker logs "$NAME" 2>&1)" \
+  && [ "$(docker exec "$NAME" stat -c %u /home/agent/work/marker)" = 1001 ] || fail "the agent's files weren't given back to it"
+ok "restart keeps the home volume (logins, work, given back to the agent if needed) and skips reprovisioning"
 echo "guest smoke test passed for $A"

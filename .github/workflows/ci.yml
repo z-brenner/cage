@@ -94,18 +94,32 @@ jobs:
   guest-smoke:
     name: guest smoke (${{ matrix.agent }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         agent: [claude, codex, cursor, antigravity]
+    env:
+      # Ubuntu's packages from the mirror next to GitHub's runners; the scheduled run uses Ubuntu's own servers, as
+      # people's agents do
+      CAGE_TEST_DOCKER_ARGS: ${{ github.event_name != 'schedule' && '-e CAGE_APT_MIRROR=http://azure.archive.ubuntu.com/ubuntu/' || '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - run: test/guest-smoke.sh ${{ matrix.agent }}
+      - name: guest smoke
+        run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/guest-smoke.sh ${{ matrix.agent }}
       - name: waking up with no network at all (from the agent's cache)
-        run: test/offline-wake.sh ${{ matrix.agent }}
+        if: success() || failure()
+        timeout-minutes: 20
+        run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/offline-wake.sh ${{ matrix.agent }}
+      - name: what the guest was doing
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: guest-${{ matrix.agent }}
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
 
   microvm:
     name: microVM e2e (${{ matrix.agent }})
@@ -115,6 +129,9 @@ jobs:
       fail-fast: false
       matrix:
         agent: [claude, codex, cursor, antigravity]
+    env:
+      # as for guest-smoke; cage up passes it to the VMs
+      CAGE_APT_MIRROR: ${{ github.event_name != 'schedule' && 'http://azure.archive.ubuntu.com/ubuntu/' || '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -131,4 +148,11 @@ jobs:
         run: |
           test/install-msb-pinned.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: test/microvm-e2e.sh ${{ matrix.agent }}
+      - run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/microvm-e2e.sh ${{ matrix.agent }}
+      - name: what the VM was doing
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: microvm-${{ matrix.agent }}
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
