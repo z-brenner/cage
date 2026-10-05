@@ -29,7 +29,8 @@ jobs:
           persist-credentials: false
       - name: actionlint, for test/all.sh to check the workflow files (a pinned release, its checksum checked)
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSL --retry 3 --connect-timeout 20 --max-time 120 -o "$RUNNER_TEMP/actionlint.tgz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/bin"
           tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP/bin" actionlint
@@ -44,7 +45,10 @@ jobs:
         run: node --test test/whatsapp.test.mjs test/app.test.mjs
       - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
         run: |
-          curl -fsSL https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/cc-connect.tgz" \
+            https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz
+          echo "72859035a1ee011b710204fc508de711838f919eb2ae6f104f1ddb3e5cd8ca87  $RUNNER_TEMP/cc-connect.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/cc-connect.tgz" -C "$RUNNER_TEMP"
           npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
       # CAGE_TEST_NO_SKIP: a suite that can't run here (no Playwright, say) fails the job instead of being skipped
       - name: the other fast checks, as a local test/all.sh runs them (mask and unit are the two steps above)

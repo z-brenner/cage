@@ -2,7 +2,8 @@
 # The cc-connect and microsandbox versions cage is tested with are written down in several places: cage's default,
 # the VM's fallback, the smoke test, CI (which checks configs with a real cc-connect and runs real microVMs) and
 # cage.env.example. This checks they all agree with cage, so a version bump can't leave CI testing one version while
-# people get another.
+# people get another. It also checks that the workflows run only what they pin: each GitHub Action at a commit, and
+# each download against its checksum.
 #   test/pins.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,5 +56,43 @@ msb="$(grep -oE "MSB_VERSION(=|:-)[\"']?$V" cage | grep -oE "$V" | sort -u || tr
 [ "$(wc -l <<<"$msb")" = 1 ] || fail "cage pins more than one microsandbox version: $(echo $msb)"
 where="$(agree microsandbox "$msb" "(MSB_VERSION(=|:-|: )[\"']?|microsandbox/releases/download/)$V")"
 ok "microsandbox $msb everywhere:${where:- (only in cage)}"
+
+# The workflows. A tag like @v4 can be moved to other code at any time, so each action is pinned to a commit, with
+# its version in a comment for people and Dependabot. actions/checkout leaves the job's token in .git/config
+# for every later step unless told not to. And whatever curl downloads is checked with sha256sum -c in the same step.
+# (A merge that brings back an older side of a workflow would lose any of these without failing anything else.)
+problems="$(awk '
+  function indent() { match($0, /^ */); return RLENGTH }
+  function end_step() {
+    if (checkout && !nocred) print FILENAME ":" checkout ": actions/checkout without persist-credentials: false (the token would stay in .git/config for the steps after it)"
+    if (download && !summed) print FILENAME ":" download ": a curl download with no sha256sum -c after it in the same step"
+    checkout = nocred = download = summed = 0; step = -1
+  }
+  FNR == 1 { end_step(); more = "" }
+  # a shell line continued with a backslash is read as one line, numbered by its first
+  { ln = FNR; if (more != "") { ln = from; $0 = more " " $0; more = "" } }
+  /\\$/ { from = ln; more = substr($0, 1, length($0) - 1); next }
+  /^[[:space:]]*(#|$)/ { next }
+  # a step (or any list item) runs from its "- " to the next line indented no deeper than that dash
+  step >= 0 && indent() <= step { end_step() }
+  step < 0 && /^ *- / { step = indent() }
+  /^[ -]*uses:/ {
+    uses++; v = $0; sub(/^[ -]*uses:[[:space:]]*/, "", v)
+    at = v; sub(/^[^@]*@/, "", at); commit = at; sub(/[[:space:]].*/, "", commit)
+    if (v !~ /^\.\// && !(v ~ /^[^@[:space:]]+@/ && commit ~ /^[0-9a-f]+$/ && length(commit) == 40 && at ~ / # v[0-9]/))
+      print FILENAME ":" ln ": " v " isn'"'"'t pinned to a commit. Write it as <action>@<commit> # vX.Y.Z, with the commit from git ls-remote https://github.com/<action> vX.Y.Z"
+  }
+  /uses:[[:space:]]*actions\/checkout@/ { checkouts++; checkout = ln }
+  /persist-credentials:[[:space:]]*false/ { nocred = 1 }
+  /(^|[^[:alnum:]_-])curl[[:space:]].*https?:\/\// { downloads++; download = ln; summed = 0 }
+  /sha256sum (-c|--check)/ && download { summed = 1 }
+  END { end_step(); print "counts " uses + 0 " " checkouts + 0 " " downloads + 0 }
+' .github/workflows/*.yml)"
+counts="$(sed -n 's/^counts //p' <<<"$problems")"
+problems="$(grep -v '^counts ' <<<"$problems" || true)"
+[ -z "$problems" ] || fail "$problems"
+read -r uses checkouts downloads <<<"$counts"
+[ "$uses" -gt 0 ] && [ "$checkouts" -gt 0 ] && [ "$downloads" -gt 0 ] || fail "found no actions, checkouts or downloads in .github/workflows; update test/pins.sh"
+ok "the workflows: $uses actions pinned to commits, $checkouts checkouts that keep no token, $downloads downloads checked"
 
 echo "all $pass pin tests passed"
