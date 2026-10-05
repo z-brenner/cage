@@ -195,7 +195,18 @@ CAGERC
 
         Say 'Installing cage; the setup continues in your browser.'
         Write-Host ''
-        & wsl.exe -d $Distro -u $user --cd '~' -- bash -lc "curl -fsSL $Raw/install.sh | bash"
+        # Downloaded to a file first, so a failed download is an error here instead of an empty script that "works".
+        $get = @'
+set -o pipefail
+f="$(mktemp)"
+curl -fsSL --retry 3 -o "$f" "@RAW@/install.sh" && bash "$f"
+rc=$?
+rm -f "$f"
+exit $rc
+'@
+        $get64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($get.Replace('@RAW@', $Raw).Replace("`r", '')))
+        & wsl.exe -d $Distro -u $user --cd '~' -- bash -lc "bash <(echo $get64 | base64 -d)"
+        if ($LASTEXITCODE -ne 0) { Stop-Setup "cage couldn't be installed inside WSL" 'check your internet connection, then run this again' }
         Write-Host ''
         try {
             Copy-Item -Force "\\wsl.localhost\$Distro\home\$user\cage\assets\cage.ico" (Join-Path $appDir 'cage.ico') -ErrorAction Stop
