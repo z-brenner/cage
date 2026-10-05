@@ -508,10 +508,12 @@ grep -qF '{"t":"answer","text":"answer from cage-claude to: is it \"raining\"?",
   && grep -qF '"agent":"codex"}' <<<"$ev" || fail "cage ask for the web app, the answers: $ev"
 ok "cage ask, for the web app: the question, then each agent's answer as its own event"
 
-# asking before acting: Claude only for your apps (everything inside its VM is pre-approved), the others for everything
+# asking before acting: Claude only for your apps (everything inside its VM is pre-approved), the others for everything.
+# Codex can't ask in chat (cc-connect runs it read-only instead), so cage says that, not Allow and Deny.
 sed -i 's/^CAGE_MODE=ask/CAGE_MODE=yolo/' "$CAGE_HOME/cage.env"
 cage approve claude on </dev/null >/dev/null 2>&1
-cage approve codex on </dev/null >/dev/null 2>&1
+out="$(cage approve codex on </dev/null 2>&1)"
+grep -q 'read-only' <<<"$out" && ! grep -q 'Allow and Deny' <<<"$out" || fail "cage approve codex on says it asks in the chat: $out"
 cage up claude codex </dev/null >/dev/null 2>&1
 c="$CAGE_HOME/agents/claude/cc-connect.toml"
 grep -q '^mode = "default"$' "$c" && grep -q '^allowed_tools = \[".*"\]$' "$c" || fail "claude asks only for apps: $(grep -E '^(mode|allowed_tools)' "$c")"
@@ -524,12 +526,12 @@ for t in Bash Edit Write Read Glob Grep WebFetch WebSearch TodoWrite Skill Agent
   [[ "$tools" == *" $t "* ]] || fail "with approve on, claude would ask before $t, which stays inside its VM: $tools"
 done
 for t in $tools; do case "$t" in mcp__browser) ;; mcp__*) fail "an app's tool is pre-approved: $t" ;; esac; done
-grep -q '^mode = "default"$' "$CAGE_HOME/agents/codex/cc-connect.toml" && ! grep -q '^allowed_tools' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex asks for everything"
+grep -q '^mode = "default"$' "$CAGE_HOME/agents/codex/cc-connect.toml" && ! grep -q '^allowed_tools' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex: cc-connect's default mode (read-only), nothing pre-approved"
 cage _state 2>/dev/null | python3 -c 'import json,sys; d={a["name"]: a for a in json.load(sys.stdin)["agents"]}; assert d["claude"]["approve"] and not d["cursor"]["approve"], d' || fail "approve in the state"
 cage approve claude off </dev/null >/dev/null 2>&1; cage approve codex off </dev/null >/dev/null 2>&1
 cage up claude </dev/null >/dev/null 2>&1
 grep -q '^mode = "bypassPermissions"$' "$c" && ! grep -q '^allowed_tools' "$c" || fail "approve off"
-ok "asking first: Claude asks before using your apps only, the others before every action; off again"
+ok "asking first: Claude asks before using your apps only, Codex works read-only and cage says so; off again"
 
 # cage add: agents to talk to in the app, no chat app needed; earlier agents are kept only if they were set up
 ( block_watch; export CAGE_HOME="$T/added"

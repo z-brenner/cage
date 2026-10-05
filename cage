@@ -227,10 +227,10 @@ vm() { echo "cage-$1"; }
 # cc-connect agent type and autonomy mode for each agent. "yolo" is safe because the microVM is the sandbox.
 cc_type() { case "$1" in claude) echo claudecode ;; *) echo "$1" ;; esac; }
 # Asking before acting (cage approve <agent> on): Claude asks only before it uses your apps (its MCP tools), since
-# everything else it can do stays inside its VM; the others ask before every action, which is all they offer.
-# Claude Code's own tools, by their names now (Monitor to CronList: the Cron ones schedule a prompt in its own
-# session) and before (Task, BashOutput, KillShell, MultiEdit, LS, NotebookRead, SlashCommand: an older CLI still has
-# them, and a name it doesn't know does nothing).
+# everything else it can do stays inside its VM; the others ask before every action, which is all they offer (Codex
+# can't ask at all: cc-connect runs it read-only instead). Claude Code's own tools, by their names now (Monitor to
+# CronList: the Cron ones schedule a prompt in its own session) and before (Task, BashOutput, KillShell, MultiEdit,
+# LS, NotebookRead, SlashCommand: an older CLI still has them, and a name it doesn't know does nothing).
 CLAUDE_INSIDE="Agent Task Bash BashOutput KillShell Edit MultiEdit Write Read Glob Grep LS NotebookEdit NotebookRead
   WebFetch WebSearch TodoWrite ExitPlanMode Skill SlashCommand ListMcpResourcesTool ReadMcpResourceTool mcp__browser
   Monitor EnterWorktree ExitWorktree TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch
@@ -3313,9 +3313,14 @@ cmd_approve() { # cage approve <agent> [on|off]: ask you before it acts in your 
   check_agent "$a"
   case "${2:-}" in
     on) set_env "CAGE_APPROVE_$a" on; printf -v "CAGE_APPROVE_$a" '%s' on
-      if [ "$a" = claude ]; then ok "Claude Code asks you before it uses your apps (email, calendar, GitHub…)"
-      else ok "$(agent_name "$a") asks you before every action (it can't tell your apps from its own work)"; fi
-      hint "it asks in the chat, with Allow and Deny buttons" ;;
+      case "$a" in
+        claude) ok "Claude Code asks you before it uses your apps (email, calendar, GitHub…)" ;;
+        # cc-connect can't take Codex's questions to the chat, so it runs Codex in its read-only sandbox instead
+        codex) ok "Codex works read-only now: it can read and answer, but not change files"
+          hint "it can't ask you in the chat. Apps you connected for it may still let it act, so to be sure, don't connect apps to Codex" ;;
+        *) ok "$(agent_name "$a") asks you before every action (it can't tell your apps from its own work)" ;;
+      esac
+      [ "$a" = codex ] || hint "it asks in the chat, with Allow and Deny buttons" ;;
     off) set_env "CAGE_APPROVE_$a" ""; printf -v "CAGE_APPROVE_$a" '%s' ""
       ok "$(agent_name "$a") acts without asking (inside its VM, and in the apps you connected)" ;;
     "") say "$(agent_name "$a") asks first: ${C_B}$( [ "$(cvar APPROVE "$a")" = on ] && echo on || echo off)${C_0}"; return 0 ;;
@@ -4323,7 +4328,7 @@ usage() {
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
   row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too (rm: Telegram too)"
-  row "  approve <a> on|off" "ask you before it acts in your apps"
+  row "  approve <a> on|off" "ask you before it acts in your apps (Codex: works read-only)"
   row "  ask \"…\" [agents]" "every awake agent answers, here"
   row "  ask-all on|off" "/all <question> in chat: all of them answer"
   row "  fallback <a> <b>" "when a is out of quota, b answers instead"
