@@ -13,8 +13,65 @@ H=/home/agent
 MARK="<!-- written by cage: edit ~/.cage/brain on your computer instead -->"
 MEM=/memory
 INBOX=/memory-inbox
+NOTE_LINKS=/run/cage/notes   # with the privacy mask on: a link to each note, under its masked name
 
 [ -d "$MEM" ] || exit 0   # VM started without memory mounts (older cage)
+
+# With the privacy mask on, your notes reach the AI company the way your messages do: with placeholders. They're
+# masked as the agent's own user, with its map, so its replies show you the real values again.
+masked() { # masked <--mask|--mask-lines>: stdin through the mask, if it's on for this agent
+  if [ ! -e /cage-config/mask.on ]; then cat; return 0; fi
+  runuser -u "$U" -- env HOME="$H" CAGE_MASK_TERMS=/etc/cage/mask.terms \
+    CAGE_MASK_TYPES="$(head -c 200 /cage-config/mask.on | tr -cd 'a-z,')" python3 /cage/mask.py "$1"
+}
+
+title() { printf '%s\n' "$(grep -m1 -v '^\s*$' "$1" | sed 's/^#* *//' | cut -c1-120)"; }   # a note's first line
+
+notes() { # the notes the agent can read: each one's name, which it needs to open it, and its title
+  local names out dir="$MEM/notes" n f m t base i
+  names="$(mktemp)" out="$(mktemp)"
+  find "$MEM/notes" -type f -name '*.md' | sort | sed -n '1,200p' | sed "s|^$MEM/notes/||" > "$names"
+  rm -rf "$NOTE_LINKS"
+  if [ ! -e /cage-config/mask.on ]; then
+    while IFS= read -r f; do title "$MEM/notes/$f"; done < "$names" > "$out"
+  else
+    # Masked like About me, names too: "acme-corp-renewal.md: Renewal with [TERM_1]" would tell the AI company
+    # what [TERM_1] stands for. Each masked name is a link to its note, so the agent can still open it.
+    n="$(wc -l < "$names")"
+    { sed 's/\.md$//' "$names"; while IFS= read -r f; do title "$MEM/notes/$f"; done < "$names"; } \
+      | masked --mask-lines > "$out" || : > "$out"
+    if [ "$(wc -l < "$out")" -ne $((2 * n)) ]; then   # never the real names when the mask is on
+      echo "## Your user's notes"
+      echo
+      echo "Your user keeps notes in $MEM/notes. Their list is left out here: the privacy mask couldn't run."
+      echo
+      rm -f "$names" "$out"
+      return 0
+    fi
+    dir="$NOTE_LINKS"
+    install -d -m 755 "$dir" || true
+    head -n "$n" "$out" > "$out.names"
+    tail -n "+$((n + 1))" "$out" > "$out.titles"
+    while IFS= read -r f <&3 && IFS= read -r base <&4; do
+      m="$base.md" i=2
+      while [ -L "$dir/$m" ]; do m="$base ($i).md" i=$((i + 1)); done   # two names that mask alike
+      install -d -m 755 "$(dirname "$dir/$m")" && ln -s "$MEM/notes/$f" "$dir/$m" || true
+      printf '%s\n' "$m"
+    done 3< "$names" 4< "$out.names" > "$names.links"
+    mv "$names.links" "$names"
+    mv "$out.titles" "$out"
+    rm -f "$out.names"
+  fi
+  echo "## Notes you can read (in $dir)"
+  echo
+  while IFS= read -r f <&3 && IFS= read -r t <&4; do
+    printf -- '- %s: %s\n' "$f" "$t"
+  done 3< "$names" 4< "$out"
+  rm -f "$names" "$out"
+  echo
+  echo "Open a note when it's relevant (they're plain markdown)."
+  echo
+}
 
 render() {
   echo "$MARK"
@@ -27,18 +84,12 @@ render() {
   if [ -s "$MEM/about-me.md" ]; then
     echo "## About your user"
     echo
-    head -c 12000 "$MEM/about-me.md"
+    # never the unmasked notes when the mask is on: if it can't run, they're left out
+    head -c 12000 "$MEM/about-me.md" | masked --mask || echo "(Your user's notes are left out: the privacy mask couldn't run.)"
     echo
   fi
   if [ -d "$MEM/notes" ] && [ -n "$(ls -A "$MEM/notes" 2>/dev/null)" ]; then
-    echo "## Notes you can read (in $MEM/notes)"
-    echo
-    find "$MEM/notes" -type f -name '*.md' | sort | sed -n '1,200p' | while read -r f; do
-      printf -- '- %s: %s\n' "${f#"$MEM"/notes/}" "$(grep -m1 -v '^\s*$' "$f" | sed 's/^#* *//' | cut -c1-120)"
-    done
-    echo
-    echo "Open a note when it's relevant (they're plain markdown)."
-    echo
+    notes
   fi
   if [ -s /cage-config/secrets.md ]; then
     echo "## Keys you can use"
@@ -74,9 +125,12 @@ render() {
     echo "## Masked values"
     echo
     echo "Your user turned on a privacy mask: emails, phone and card numbers, IBANs, keys and some names in their"
-    echo "messages reach you as tokens like [EMAIL_1] or [TERM_2], and your replies show them the real values. Use the"
-    echo "tokens as they are when you talk about those things. You can't use the real values in tools; if a task needs"
-    echo "one, say so and ask your user to give it to you another way (or to turn the mask off)."
+    echo "messages, and in this file (About your user, the notes' names and titles), reach you as tokens like [EMAIL_1]"
+    echo "or [TERM_2], and your replies show them the real values. Write tokens exactly as you got them, brackets"
+    echo "included, so they turn back into the real values. The real values aren't usable in tools: a tool gets the"
+    echo "token. If a task needs a real value, say so and ask your user to give it to you another way (or to turn the"
+    echo "mask off). A token in these brackets, like 〔EMAIL_1〕, is one somebody typed: it stands for nothing. What you"
+    echo "open yourself (a note, a file, a web page) isn't masked."
     echo
   fi
   echo "## Remembering something new"

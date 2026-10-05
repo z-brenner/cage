@@ -24,10 +24,18 @@ if [ "$cmd" = exec ]; then
   vmname=""; for x in "$@"; do case "$x" in cage-*) vmname="$x"; break ;; esac; done
   case "$*" in
     *cage:ready*) echo cage:ready ;;   # every agent is signed in
+    *mask/map.json*) case " ${MSB_MAPS:-} " in *" $vmname "*) echo forgot ;; esac ;;   # cage mask forget: it had a map
     *"cc-connect send"*)               # a message into a chat: record it (the reply file is in that agent's /cage-config)
       for x in "$@"; do case "$x" in /cage-config/replies/*) f="$CAGE_HOME/agents/${vmname#cage-}/${x#/cage-config/}" ;; esac; done
       { printf '%s %s <- ' "$vmname" "${!#}"; cat "$f"; printf '\n---\n'; } >> "$MSB_SENT" ;;
-    *--disallowedTools*|*"codex exec"*|*"cursor-agent --print"*|*"agy -p"*) printf 'answer from %s to: %s' "$vmname" "${!#}" ;;
+    *--disallowedTools*|*"codex exec"*|*"cursor-agent --print"*|*"agy -p"*)   # an asked agent: the question is in a file
+      q=""; for x in "$@"; do case "$x" in /cage-config/replies/*.q) q="$(cat "$CAGE_HOME/agents/${vmname#cage-}/${x#/cage-config/}")" ;; esac; done
+      if [ -n "${MSB_PS:-}" ]; then { ps -eo args 2>/dev/null || ps -o args; } >> "$MSB_PS"; fi   # what anyone here could see meanwhile
+      case "${MSB_ASK:-}" in
+        fail) echo "Error: not signed in" >&2; exit 1 ;;            # signed out, out of quota
+        long) head -c 200000 /dev/zero | tr '\0' x; exit $? ;;     # more than cage reads: it stops, so this gets SIGPIPE
+      esac
+      printf 'answer from %s to: %s' "$vmname" "$q" ;;
   esac
 fi
 if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; esac; exit 0; fi
@@ -442,9 +450,25 @@ timeout 30 "$ROOT/cage" _outbox 2>/dev/null || fail "the outbox hung or failed"
 [ -z "$(ls -A "$O")" ] && [ -f "$T/elsewhere/4-4-4/text" ] || fail "hostile entries left behind, or a link followed"
 ok "a hostile outbox (links, a FIFO, a bad session key) is cleared without reading through it or sending anything"
 
+grep -q '^CAGE_MASK=' "$CAGE_HOME/cage.env" && fail "this part expects the privacy mask off everywhere (the default)"
+: > "$MSB_LOG"
 out="$(cage ask "is it raining?" claude codex 2>/dev/null)"
 grep -q "answer from cage-claude to: is it raining?" <<<"$out" && grep -q "answer from cage-codex to: is it raining?" <<<"$out" || fail "cage ask: $out"
-ok "cage ask: every awake agent answers on this computer"
+grep -q '/cage/mask.py' "$MSB_LOG" && fail "cage ask ran the CLIs behind the mask, which is off: $(cat "$MSB_LOG")"
+ok "cage ask: every awake agent answers on this computer (with the mask off, as it is)"
+
+# an agent that can't answer (signed out, out of quota) or says too much: the question file still goes, and the web
+# app still gets an answer event for it (an empty one), so it doesn't wait forever
+for mode in fail long; do
+  out="$(MSB_ASK=$mode timeout 60 "$ROOT/cage" ask "my salary is $mode-42" codex 2>/dev/null)" || fail "cage ask ($mode) failed or hung"
+  if [ "$mode" = fail ]; then grep -q "no answer: signed out, busy, or out of quota" <<<"$out" || fail "cage ask ($mode): $out"; fi
+  [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "the question stayed on disk ($mode): $(ls "$CAGE_HOME/agents/codex/replies")"
+  ev="$(MSB_ASK=$mode CAGE_PROTO=1 timeout 60 "$ROOT/cage" ask "again $mode" codex 2>&1 >/dev/null </dev/null | tr '\036' '\n')" \
+    || fail "cage ask for the web app ($mode) failed or hung: $ev"
+  grep -q '{"t":"answer","text":"[x]*","agent":"codex"}' <<<"$ev" || fail "cage ask for the web app ($mode): $ev"
+  [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "the question stayed on disk ($mode, app)"
+done
+ok "cage ask: an agent that fails or says too much leaves no question on disk, and the app gets its (empty) answer"
 ev="$(CAGE_PROTO=1 "$ROOT/cage" ask 'is it "raining"?' claude codex 2>&1 >/dev/null </dev/null | tr '\036' '\n')"
 grep -qF '{"t":"asking","text":"is it \"raining\"?","agents":["claude","codex"]}' <<<"$ev" || fail "cage ask for the web app, the question: $ev"
 grep -qF '{"t":"answer","text":"answer from cage-claude to: is it \"raining\"?","agent":"claude"}' <<<"$ev" \
@@ -501,10 +525,91 @@ grep -qx 'Acme Corp' "$CAGE_HOME/agents/claude/mask.terms" && [ -e "$CAGE_HOME/a
 [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "codex marked as masked"
 out="$(cage mask try "write to bob@example.com about Acme Corp" 2>&1)"
 grep -qF "write to [EMAIL_1] about [TERM_1]" <<<"$out" || fail "cage mask try: $out"
+grep -q "a placeholder you typed" <<<"$out" && fail "cage mask try explained a placeholder nobody typed: $out"
+out="$(cage mask try "mail [EMAIL_1] and bob@example.com" 2>&1)"
+grep -qF "mail 〔EMAIL_1〕 and [EMAIL_1]" <<<"$out" && grep -qF "〔EMAIL_1〕: a placeholder you typed goes as it is" <<<"$out" \
+  || fail "cage mask try, with a placeholder typed: $out"
 cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
 cage up claude 2>/dev/null
 if grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" || [ -e "$CAGE_HOME/agents/claude/mask.on" ] || [ -s "$CAGE_HOME/mask.terms" ]; then fail "mask still on"; fi
 ok "privacy mask: per agent, the CLI runs behind guest/mask.py with your terms; cage mask try previews it"
+
+# your terms go where a masked agent's words can: to it, and to its stand-in (and with /all on, every agent); a
+# stand-in for a masked agent answers behind the mask
+# even where the mask is off; and the conversation reaches its VM in a file, never on a command line (anyone on this
+# computer can read those with ps)
+cage mask add "Acme Corp" </dev/null 2>/dev/null
+out="$(cage mask on claude </dev/null 2>&1)"
+grep -q "not covered: files and pictures you send, notes and web pages the agent opens" <<<"$out" && grep -q "voice notes go to Groq as they are" <<<"$out" \
+  && grep -q "anyone who can chat with the agent can ask it about masked values, and so can a web page or app result it reads" <<<"$out" \
+  && grep -q "the real values are kept in the agent's VM" <<<"$out" \
+  || fail "cage mask on doesn't say what it doesn't cover: $out"
+cage fallback claude codex </dev/null 2>/dev/null
+cage up claude codex cursor 2>/dev/null
+for a in claude codex; do grep -qx 'Acme Corp' "$CAGE_HOME/agents/$a/mask.terms" || fail "$a has no mask terms"; done
+[ ! -e "$CAGE_HOME/agents/cursor/mask.terms" ] || fail "cursor got your terms, though no masked agent passes it anything"
+cage ask-all on </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
+grep -qx 'Acme Corp' "$CAGE_HOME/agents/cursor/mask.terms" || fail "with /all on, cursor has no mask terms"
+cage ask-all off </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
+[ ! -e "$CAGE_HOME/agents/cursor/mask.terms" ] || fail "cursor kept your terms with /all off again"
+[ -e "$CAGE_HOME/agents/claude/mask.on" ] && [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "mask.on isn't per agent"
+printf 'cage-claude\ncage-codex\n' > "$T/running"
+export MSB_RUNNING="$T/running" MSB_SENT="$T/sent" MSB_PS="$T/ps"
+: > "$MSB_SENT"; : > "$MSB_PS"; : > "$MSB_LOG"; rm -f "$CAGE_HOME/outbox/.last-claude" "$CAGE_HOME/outbox/.seen"
+marker="IBAN-DE89370400440532013000-$RANDOM$RANDOM"
+d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"
+mkdir -p "$d" && printf fallback > "$d/kind" && printf 'telegram:1:1' > "$d/session"
+printf 'User: draft the email to HR, my %s\nAgent: You have hit your limit' "$marker" > "$d/text"
+cage _outbox 2>/dev/null
+grep -q '^exec | --no-tty | -w | /home/agent/work | cage-codex | ' "$MSB_LOG" && grep -q 'exec python3 /cage/mask.py codex exec' "$MSB_LOG" \
+  || fail "the stand-in didn't answer behind the mask: $(cat "$MSB_LOG")"
+grep -qF "$marker" "$MSB_SENT" || fail "the conversation didn't reach the stand-in: $(cat "$MSB_SENT")"
+[ -s "$MSB_PS" ] || fail "no process list taken during the ask"
+if grep -qF "$marker" "$MSB_LOG" "$MSB_PS"; then fail "the conversation was on a command line"; fi
+[ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "question files left behind"
+: > "$MSB_LOG"
+cage ask "is it $marker?" codex >/dev/null 2>&1
+grep -q '^exec | .*cage-codex' "$MSB_LOG" || fail "cage ask didn't ask codex"
+grep -q '/cage/mask.py' "$MSB_LOG" && fail "cage ask masked for codex, which has it off"
+cage fallback claude off </dev/null 2>/dev/null
+ok "relays keep the mask: your terms go where a masked agent's words can, a stand-in answers behind it, never via ps"
+
+# an answer is the VM's text: printed here, it can't carry terminal control codes (to rewrite the screen, set the clipboard)
+out="$(cage ask $'hi \033]52;c;Y3VybA==\007 \033[2Jthere' codex 2>/dev/null)"
+grep -q 'answer from cage-codex to: hi' <<<"$out" || fail "cage ask: $out"
+if grep -q $'\033\|\007' <<<"$out"; then fail "cage ask printed control codes: $(cat -v <<<"$out")"; fi
+ok "cage ask prints answers without terminal control codes"
+
+# cage mask forget: each awake VM drops its map (and its notes get placeholders afresh); asleep ones are named
+cp "$MSB_EXISTING" "$T/existing.saved"
+printf 'cage-claude\ncage-codex\ncage-cursor\n' > "$MSB_EXISTING"
+: > "$MSB_LOG"
+out="$(MSB_MAPS=cage-claude cage mask forget 2>&1)"
+[ "$(grep -c '^exec | .*runuser -u agent -- flock "$f.lock" rm -f "$f" || exit 1; echo forgot; fi; bash /cage/memory.sh' "$MSB_LOG")" = 2 ] || fail "forget: $(cat "$MSB_LOG")"
+grep -q 'rm -rf' "$MSB_LOG" && fail "forget removed more than the map: $(cat "$MSB_LOG")"
+grep -q "Cursor is asleep, so it still keeps its masked values" <<<"$out" || fail "forget didn't name the asleep agent: $out"
+grep -q "Claude Code forgot the values behind its placeholders" <<<"$out" && grep -q "Codex had no masked values" <<<"$out" \
+  && ! grep -q "Codex forgot" <<<"$out" || fail "forget, for an agent that had a map and one that hadn't: $out"
+mv "$T/existing.saved" "$MSB_EXISTING"
+unset MSB_RUNNING MSB_SENT MSB_PS
+ok "cage mask forget: awake agents drop the values behind their placeholders; it says which had none, and which are asleep"
+
+# CAGE_MASK_TYPES: the extra kinds reach the VM's mask (and memory.sh); a kind the mask doesn't know is refused
+echo 'CAGE_MASK_TYPES="email phone ip,address"' >> "$CAGE_HOME/cage.env"
+cage up claude 2>/dev/null
+grep -q '^cmd = "python3 /cage/mask.py --types email,phone,ip,address claude"$' "$CAGE_HOME/agents/claude/cc-connect.toml" \
+  || fail "types not passed: $(grep '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml")"
+[ "$(cat "$CAGE_HOME/agents/claude/mask.on")" = "email,phone,ip,address" ] || fail "mask.on: $(cat "$CAGE_HOME/agents/claude/mask.on")"
+out="$(cage mask try "server 81.2.69.160, mail ana@example.com" 2>&1)"
+grep -qF "server [IP_1], mail [EMAIL_1]" <<<"$out" || fail "cage mask try with CAGE_MASK_TYPES: $out"
+sed -i 's/^CAGE_MASK_TYPES=.*/CAGE_MASK_TYPES="email phonee"/' "$CAGE_HOME/cage.env"
+if cage up claude 2>"$T/err"; then fail "an unknown kind was accepted"; fi
+grep -q "names a kind the mask doesn't know" "$T/err" || fail "unknown kind: $(cat "$T/err")"
+sed -i '/^CAGE_MASK_TYPES=/d' "$CAGE_HOME/cage.env"
+cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
+cage up claude codex cursor 2>/dev/null
+for a in claude codex cursor; do [ ! -e "$CAGE_HOME/agents/$a/mask.terms" ] || fail "$a kept the mask terms with the mask off everywhere"; done
+ok "CAGE_MASK_TYPES: the kinds you name reach each VM's mask; an unknown kind is refused"
 
 # --- the web app's side of cage: protocol mode (JSON events, answers on stdin) and the state snapshot
 out="$(printf 'proto-v4lue\n' | CAGE_PROTO=1 "$ROOT/cage" secret add PROTO_KEY api.proto.example claude 2>&1 >/dev/null)"
