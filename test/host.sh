@@ -803,7 +803,8 @@ ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is 
   grep -q 'the note as shown' "$N/swap.md" && ! grep -q 'swapped in later' "$N/swap.md" || fail "kept something other than what was shown: $(cat "$N/swap.md")"
   # ~/.cage reached through a link, and no `timeout` command (macOS): notes are still read
   ln -s "$CAGE_HOME" "$T/jlink" && mkdir "$T/nt"
-  for p in ${PATH//:/ }; do for x in "$p"/*; do n="${x##*/}"; [ "$n" = timeout ] || [ -e "$T/nt/$n" ] || ln -s "$x" "$T/nt/$n"; done; done
+  # (an empty or missing PATH folder leaves its glob as it is: skip it, or a second one would clash on a link named '*')
+  for p in ${PATH//:/ }; do for x in "$p"/*; do [ -e "$x" ] || continue; n="${x##*/}"; [ "$n" = timeout ] || [ -e "$T/nt/$n" ] || [ -L "$T/nt/$n" ] || ln -s "$x" "$T/nt/$n"; done; done
   printf 'read through a link, without timeout\n' > "$I/linked.md"
   printf 'y\n' | PATH="$T/nt" CAGE_HOME="$T/jlink" "$ROOT/cage" memory > "$T/j3.out" 2>&1 || fail "cage memory: $(cat "$T/j3.out")"
   grep -q 'without timeout' "$N/linked.md" || fail "a note wasn't read with ~/.cage behind a link, or without timeout: $(cat "$T/j3.out")" )
