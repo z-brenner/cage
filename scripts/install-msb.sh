@@ -14,7 +14,8 @@ trap 'rm -rf "$tmp"' EXIT
 if [ -n "${CAGE_MSB_INSTALLER:-}" ]; then
   cp "$CAGE_MSB_INSTALLER" "$tmp/install.sh"
 else
-  curl -fsSL --proto =https --retry 3 --retry-connrefused https://install.microsandbox.dev -o "$tmp/install.sh" ||
+  curl -fsSL --proto =https --retry 3 --retry-connrefused --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    https://install.microsandbox.dev -o "$tmp/install.sh" ||
     { echo "error: couldn't download the microsandbox installer (https://install.microsandbox.dev)" >&2; exit 1; }
 fi
 grep -q '^get_latest_version() {$' "$tmp/install.sh" || { echo "error: the microsandbox installer changed: no get_latest_version()" >&2; exit 1; }

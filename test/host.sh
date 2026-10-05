@@ -597,8 +597,11 @@ if NET_DOWN=registry.npmjs.org cage update claude 2>"$T/err"; then fail "update 
 grep -q "you're offline (or a firewall is in the way); nothing was changed, your agents keep running" "$T/err" || fail "offline update: $(cat "$T/err")"
 if NET_BLOCKED=github.com cage update claude 2>"$T/err"; then fail "update went ahead with GitHub blocked"; fi
 grep -q "you're offline" "$T/err" || fail "blocked update: $(cat "$T/err")"
+if NET_MISSING=/cc-connect/releases/ cage update claude 2>"$T/err"; then fail "update went ahead without its cc-connect"; fi
+grep -q "there's no cc-connect v[0-9.]* to download (CAGE_CC_CONNECT_VERSION in $CAGE_HOME/cage.env): fix or remove that line" "$T/err" &&
+  ! grep -q "offline" "$T/err" || fail "a cc-connect version that doesn't exist: $(cat "$T/err")"
 grep -q '^run | \|^rm | \|^stop | ' "$MSB_LOG" && fail "an offline update touched the VMs: $(cat "$MSB_LOG")"
-ok "cage update offline (or with GitHub blocked) changes nothing and leaves the agents running"
+ok "cage update offline (or with GitHub blocked, or no such cc-connect) changes nothing and leaves the agents running"
 
 # the cc-connect version earlier cages wrote into cage.env goes, so this cage's own applies; one you picked stays
 grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env" && fail "the test config already pins cc-connect"

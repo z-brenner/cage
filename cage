@@ -2286,15 +2286,17 @@ cage_version() {
 # changes nothing: a VM rebuilt without the internet would have nothing to install, and your agents would be down.
 SHIPPED_CC_CONNECT="v1.5.0"   # the cc-connect versions earlier cages wrote into cage.env (cmd_init copied them)
 cmd_update() {
-  local want="" v
-  if [ "${1:-}" = --to ]; then
-    want="${2:-}"
-    [[ "$want" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "usage: cage update --to <a release, like v0.3.0> [agents]"
-    shift 2
-  fi
-  if [ -z "${CAGE_ONLINE:-}" ] && ! online; then
-    die "you're offline (or a firewall is in the way); nothing was changed, your agents keep running"
-  fi
+  local want="" v agents=()
+  while [ $# -gt 0 ]; do   # agents are checked before anything changes, and --to can come anywhere
+    case "$1" in
+      --to)
+        want="${2:-}"
+        [[ "$want" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "usage: cage update [--to <a release, like v0.3.0>] [agents]"
+        shift 2 ;;
+      *) check_agent "$1"; agents+=("$1"); shift ;;
+    esac
+  done
+  if [ -z "${CAGE_ONLINE:-}" ]; then online; fi
   if [ -n "${CAGE_NO_SELF_UPDATE:-}" ]; then :
   elif [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; then
     local before tmp rc=0 ref=""
@@ -2306,13 +2308,17 @@ cmd_update() {
       bash "$tmp/install.sh" >/dev/null 2>"$tmp/log" || rc=$?
     installer_says "$tmp/log"
     rm -rf "$tmp"
-    if [ "$rc" = 3 ]; then   # GitHub didn't answer: the installer changed nothing, and neither does the rest
-      say "your agents keep running as they are"; exit 1
-    elif [ "$rc" != 0 ] && [ -n "$want" ]; then die "couldn't install cage $want; cage $before stays as it is"
-    elif [ "$rc" != 0 ]; then warn "couldn't update cage itself (still $before); updating the agents anyway"
-    elif [ "$(cage_version)" != "$before" ]; then
-      exec env CAGE_NO_SELF_UPDATE=1 CAGE_ONLINE=1 "$CAGE_ROOT/cage" update "$@"   # the rest with the new cage
-    fi
+    case "$rc" in
+      0) if [ "$(cage_version)" != "$before" ]; then   # the rest with the new cage
+           exec env CAGE_NO_SELF_UPDATE=1 CAGE_ONLINE=1 "$CAGE_ROOT/cage" update ${agents[@]+"${agents[@]}"}
+         fi ;;
+      3) say "your agents keep running as they are"; exit 1 ;;   # GitHub didn't answer: the installer changed nothing
+      4) # some of cage's files are the new release's already: agents rebuilt from that would be half one, half the other
+        hint "to finish the update: cage update"
+        say "your agents keep running as they are"; exit 1 ;;
+      *) if [ -n "$want" ]; then die "couldn't install cage $want; cage $before stays as it is"; fi
+        warn "couldn't update cage itself (still $before); updating the agents anyway" ;;   # it changed nothing
+    esac
   elif [ -n "$want" ]; then
     die "this cage is a development checkout ($(cage_version)): pick its version with git"
   fi
@@ -2329,14 +2335,22 @@ cmd_update() {
     v="$(conf_get "$CAGE_ENV" CAGE_CC_CONNECT_VERSION)" v="${v//\"/}"
     if [ -n "$v" ] && [[ " $SHIPPED_CC_CONNECT " == *" $v "* ]]; then unset_env CAGE_CC_CONNECT_VERSION; fi
   fi
-  CAGE_REFRESH=1 cmd_up "$@"   # the VMs download the newest of everything, instead of waking from their cache
+  CAGE_REFRESH=1 cmd_up ${agents[@]+"${agents[@]}"}   # the VMs download the newest of everything, instead of waking from their cache
 }
 
-online() { # what a rebuilt VM downloads first answers: npm, and GitHub (cc-connect's release)
-  local u
-  for u in https://registry.npmjs.org/ "$(cc_connect_url)"; do
-    curl -fsS -o /dev/null -I --max-time 8 "$u" >/dev/null 2>&1 || return 1
-  done
+online() { # what a rebuilt VM downloads first has to answer: npm, and cc-connect's release on GitHub. Stops if not.
+  local u r v
+  u="$(cc_connect_url)"
+  r="$(curl -sS -o /dev/null -I --max-time 8 -w '%{http_code} %{http_connect}' "$u" 2>/dev/null)" || true
+  case "$r" in
+    404\ *)   # GitHub answered: there's no such cc-connect (a version named in cage.env that doesn't exist)
+      v="${u%/*}" v="${v##*/}"
+      die "there's no cc-connect $v to download (CAGE_CC_CONNECT_VERSION in $CAGE_ENV): fix or remove that line; nothing was changed, your agents keep running" ;;
+    2??\ *|3??\ *) ;;
+    *) die "you're offline (or a firewall is in the way); nothing was changed, your agents keep running" ;;
+  esac
+  curl -fsS -o /dev/null -I --max-time 8 https://registry.npmjs.org/ >/dev/null 2>&1 ||
+    die "you're offline (or a firewall is in the way); nothing was changed, your agents keep running"
 }
 
 installer_says() { # installer_says <log>: install.sh's ✓ ! ✗ lines, as cage's own (so the web app shows them too)
@@ -2360,7 +2374,11 @@ cmd_rollback() {
   while IFS= read -r t; do   # newest first
     if [ "$t" != "$now" ] && [ -f "$CAGE_HOME/releases/$t/cage-$t.tar.gz" ]; then prev="$t"; break; fi
   done < <(ls -1t "$CAGE_HOME/releases" 2>/dev/null)
-  [ -n "$prev" ] || die "there's no earlier release on this computer to go back to (cage keeps the last two it installed)"
+  if [ -z "$prev" ]; then
+    bad "there's no earlier release on this computer to go back to (cage keeps the last two it installed)"
+    hint "to download one: cage update --to <a release, like v0.3.0>"
+    exit 1
+  fi
   say "going back from cage $now to $prev…"
   tmp="$(mktemp -d)"
   cp "$CAGE_ROOT/install.sh" "$tmp/install.sh"
@@ -2369,6 +2387,7 @@ cmd_rollback() {
     bash "$tmp/install.sh" >/dev/null 2>"$tmp/log" || rc=$?
   installer_says "$tmp/log"
   rm -rf "$tmp"
+  [ "$rc" != 4 ] || die "cage stopped halfway back to $prev; run cage rollback again to finish (your agents keep running as they are)"
   [ "$rc" = 0 ] || die "couldn't go back to $prev; cage $now stays as it is"
   hint "to go forward again: cage update"
   [ -f "$CAGE_ENV" ] || return 0

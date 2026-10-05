@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Tests install.sh against local copies of this repo: from git (fresh install, the `cage` command, PATH setup, re-run
 # update), and from releases on a local stand-in for GitHub Releases (checksums, in-place updates, a tampered download).
-# Then everything that can go wrong on the way: no network, GitHub down while git works, a disk that fills up halfway,
-# running as root, an older release; plus going back (a pinned version, cage rollback) and cage uninstall.
+# Then everything that can go wrong on the way: no network, a server that stops answering, GitHub down while git works,
+# a failed git download, a disk that fills up halfway, an update that stops halfway, one left by an installer that was
+# killed, a release that turns a file into a folder, running as root, an older release, a preview release; plus going
+# back (a pinned version, cage rollback) and cage uninstall (it never deletes a backup, or more than cage's own).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-SERVER=""
-trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; rm -rf "$T"' EXIT
+SERVER="" STALL=""
+trap '[ -z "$SERVER$STALL" ] || kill $SERVER $STALL 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -187,6 +189,28 @@ grep -q 'no cage release found .* so cage v9.9.10 stays as it is' "$T/err" || fa
 mv "$T/latest.off" "$T/www/latest"
 ok "an installed release never turns into a git checkout of main: not with GitHub down, not with no release found"
 
+CAGE_REF=main CAGE_REPO="$T/missing" bash "$ROOT/install.sh" 2>"$T/err" && fail "a failed git download went on"
+grep -q "couldn't download cage (main) from $T/missing; nothing was changed" "$T/err" || fail "failed clone: $(cat "$T/err")"
+[ "$(version)" = v9.9.10 ] && [ "$(readlink -f "$HOME/.local/bin/cage")" = "$HOME/cage/cage" ] || fail "a failed git download changed cage"
+ls -d "$HOME"/cage.* >/dev/null 2>&1 && fail "a failed git download left: $(ls -d "$HOME"/cage.*)"
+ok "a failed git download (CAGE_REF) leaves the installed release as it was, and nothing next to it"
+
+# a server that takes the connection and then never answers (a stalled proxy): the installer gives up, it doesn't hang
+python3 -c 'import socket, sys
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(16)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+held = []
+while True: held.append(s.accept()[0])' "$T/stall.port" & STALL=$!
+for _ in $(seq 50); do [ -s "$T/stall.port" ] && break; sleep 0.1; done
+start=$SECONDS rc=0
+CAGE_TEST_TIMEOUT=1 CAGE_RELEASES="http://127.0.0.1:$(cat "$T/stall.port")/releases" timeout 60 bash "$ROOT/install.sh" 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] && [ $((SECONDS - start)) -lt 30 ] || fail "a stalled server: exit $rc after $((SECONDS - start)) s: $(cat "$T/err")"
+[ "$(version)" = v9.9.10 ] || fail "a stalled server changed cage"
+kill "$STALL" 2>/dev/null; STALL=""
+CAGE_RELEASES="http://releases.example.com/cage" bash "$ROOT/install.sh" 2>"$T/err" && fail "downloaded over plain http"
+grep -q "CAGE_RELEASES has to be an https:// address" "$T/err" || fail "plain http: $(cat "$T/err")"
+ok "gives up on a server that stops answering (exit 3, nothing changed), and downloads over https only"
+
 echo "# v9.9.12" >> "$T/src/README.md"
 commit commit -qam v9.9.12
 release v9.9.12
@@ -206,6 +230,94 @@ bash "$ROOT/install.sh" 2>"$T/err" || fail "the next try failed: $(cat "$T/err")
 [ "$(version)" = v9.9.12 ] || fail "the next try didn't install v9.9.12"
 ok "a disk that fills up halfway: an error, cage as it was, and the next try works"
 
+echo "# v9.9.13" >> "$T/src/README.md"
+commit commit -qam v9.9.13
+release v9.9.13
+mkdir -p "$T/mvshim"
+cat > "$T/mvshim/mv" <<EOF
+#!/bin/sh
+# mv, failing (MV_FAIL) or quietly doing nothing (MV_SKIP) for one file going into ~/cage, as a dying disk might
+for a; do last="\$a"; done
+case "\$last" in
+  */cage/"\${MV_FAIL:-//}"|*/cage/./"\${MV_FAIL:-//}") echo "mv: cannot move to '\$last': Input/output error" >&2; exit 1 ;;
+  */cage/"\${MV_SKIP:-//}"|*/cage/./"\${MV_SKIP:-//}") exit 0 ;;
+esac
+exec "$(command -v mv)" "\$@"
+EOF
+chmod +x "$T/mvshim/mv"
+cat > "$T/mvshim/rm" <<EOF
+#!/bin/sh
+# rm, failing for one file in ~/cage (RM_FAIL)
+for a; do last="\$a"; done
+case "\$last" in */cage/"\${RM_FAIL:-//}") echo "rm: cannot remove '\$last': Input/output error" >&2; exit 1 ;; esac
+exec "$(command -v rm)" "\$@"
+EOF
+chmod +x "$T/mvshim/rm"
+rc=0; MV_FAIL=README.md PATH="$T/mvshim:$PATH" bash "$ROOT/install.sh" 2>"$T/err" || rc=$?
+[ "$rc" = 4 ] && grep -q "couldn't replace $HOME/cage/README.md; run this again to finish the update" "$T/err" || fail "stopped halfway: exit $rc: $(cat "$T/err")"
+[ "$(version)" = v9.9.12 ] || fail "an update that stopped halfway says it's the new version"
+rc=0; MV_SKIP=VERSION PATH="$T/mvshim:$PATH" bash "$ROOT/install.sh" 2>"$T/err" || rc=$?
+[ "$rc" = 4 ] && grep -q "cage v9.9.13 didn't end up in $HOME/cage; run this again" "$T/err" && ! grep -q 'installed cage' "$T/err" ||
+  fail "VERSION not replaced: exit $rc: $(cat "$T/err")"
+: > "$MSB_LOG"
+if MV_FAIL=README.md PATH="$T/mvshim:$PATH" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" update 2>"$T/err"; then fail "cage update went on after stopping halfway"; fi
+grep -q 'to finish the update: cage update' "$T/err" && grep -q 'your agents keep running as they are' "$T/err" || fail "cage update, halfway: $(cat "$T/err")"
+grep -q 'updating the agents anyway' "$T/err" && fail "cage update rebuilt the agents from a half-updated cage: $(cat "$T/err")"
+[ ! -s "$MSB_LOG" ] || fail "cage update touched the agents after stopping halfway: $(cat "$MSB_LOG")"
+bash "$ROOT/install.sh" 2>"$T/err" || fail "the next try: $(cat "$T/err")"
+[ "$(version)" = v9.9.13 ] && tail -1 "$HOME/cage/README.md" | grep -q 'v9.9.13' || fail "the next try didn't finish the update"
+ok "an update that stops halfway exits with 4 and still says the old version; cage update stops too; the next try finishes it"
+
+dead="$(sh -c 'echo $$')"   # a process that has ended
+mkdir -p "$HOME/cage/.update.$dead/guest" "$HOME/cage/.update.$$" "$HOME/cage.new.$dead" "$HOME/cage.old.$dead"
+bash "$ROOT/install.sh" 2>"$T/err" || fail "with leftovers: $(cat "$T/err")"
+[ ! -e "$HOME/cage/.update.$dead" ] && [ ! -e "$HOME/cage.new.$dead" ] && [ ! -e "$HOME/cage.old.$dead" ] ||
+  fail "left by a killed installer, still there: $(ls -a "$HOME" "$HOME/cage")"
+[ -d "$HOME/cage/.update.$$" ] || fail "removed the folder of an installer that's still running"
+rmdir "$HOME/cage/.update.$$"
+mv "$HOME/cage" "$HOME/cage.old.$dead"   # killed between moving the old copy aside and putting the new one in
+bash "$ROOT/install.sh" 2>"$T/err" || fail "with only the old copy: $(cat "$T/err")"
+[ "$(version)" = v9.9.13 ] && [ ! -e "$HOME/cage.old.$dead" ] && grep -q 'already the latest' "$T/err" || fail "the old copy wasn't put back: $(cat "$T/err")"
+ok "what a killed installer left goes (an old copy goes back in place); a running installer's folder stays"
+
+# a release that turns a file into a folder, then back, and drops a folder: the tree is the release's, every time
+same_as_release() { # same_as_release <tag>: ~/cage holds exactly what the release's tarball does
+  diff <(cd "$HOME/cage" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort) \
+       <(tar -tzf "$T/www/releases/download/$1/cage-$1.tar.gz" | sed 's|^cage/||; s|/$||' | grep . | LC_ALL=C sort)
+}
+echo "a file" > "$T/src/docs/extra"; mkdir -p "$T/src/docs/gone" && echo x > "$T/src/docs/gone/x.md"
+commit add -A; commit commit -qm v9.9.14
+release v9.9.14
+bash "$ROOT/install.sh" 2>"$T/err" || fail "v9.9.14: $(cat "$T/err")"
+commit rm -q docs/extra; mkdir -p "$T/src/docs/extra"; echo "in a folder" > "$T/src/docs/extra/a.md"; commit rm -rq docs/gone
+commit add -A; commit commit -qm v9.9.15
+release v9.9.15
+rc=0; RM_FAIL=docs/gone/x.md PATH="$T/mvshim:$PATH" bash "$ROOT/install.sh" 2>"$T/err" || rc=$?
+[ "$rc" = 4 ] && [ "$(version)" = v9.9.14 ] || fail "couldn't remove a dropped file: exit $rc, $(version): $(cat "$T/err")"
+bash "$ROOT/install.sh" 2>"$T/err" || fail "a file became a folder: $(cat "$T/err")"
+[ "$(version)" = v9.9.15 ] && [ -f "$HOME/cage/docs/extra/a.md" ] || fail "a file became a folder: $(cat "$T/err")"
+same_as_release v9.9.15 || fail "after a file became a folder, ~/cage isn't the release"
+commit rm -rq docs/extra; echo "a file again" > "$T/src/docs/extra"
+commit add -A; commit commit -qm v9.9.16
+release v9.9.16
+bash "$ROOT/install.sh" 2>"$T/err" || fail "a folder became a file: $(cat "$T/err")"
+[ "$(version)" = v9.9.16 ] && [ "$(cat "$HOME/cage/docs/extra")" = "a file again" ] || fail "a folder became a file: $(cat "$T/err")"
+same_as_release v9.9.16 || fail "after a folder became a file, ~/cage isn't the release"
+bash "$ROOT/install.sh" 2>"$T/err" && grep -q 'already the latest' "$T/err" || fail "after a folder became a file: $(cat "$T/err")"
+ok "a release that turns a file into a folder (or back) or drops a folder: ~/cage is exactly the new release"
+
+# a download that checks out (its checksum) but holds another version
+mkdir -p "$T/odd" && tar -xzf "$T/www/releases/download/v9.9.16/cage-v9.9.16.tar.gz" -C "$T/odd"
+echo v9.9.15 > "$T/odd/cage/VERSION"
+mkdir -p "$T/www/releases/download/v9.9.17"
+tar -czf "$T/www/releases/download/v9.9.17/cage-v9.9.17.tar.gz" -C "$T/odd" cage
+(cd "$T/www/releases/download/v9.9.17" && sha256sum cage-v9.9.17.tar.gz > SHA256SUMS)
+echo v9.9.17 > "$T/www/latest"
+bash "$ROOT/install.sh" 2>"$T/err" && fail "installed a release that says it's another version"
+grep -q "the download doesn't contain cage v9.9.17; nothing was changed" "$T/err" && [ "$(version)" = v9.9.16 ] || fail "odd version: $(cat "$T/err")"
+echo v9.9.16 > "$T/www/latest"
+ok "refuses a download whose VERSION isn't the release it was asked for"
+
 if CAGE_TEST_EUID=0 bash "$ROOT/install.sh" 2>"$T/err"; then fail "installed as root"; fi
 grep -q 'install cage as your normal user, not with sudo or as root' "$T/err" || fail "root: $(cat "$T/err")"
 CAGE_TEST_EUID=0 CAGE_ALLOW_ROOT=1 bash "$ROOT/install.sh" 2>"$T/err" || fail "CAGE_ALLOW_ROOT=1: $(cat "$T/err")"
@@ -213,10 +325,24 @@ ok "as root it stops with a plain message (CAGE_ALLOW_ROOT=1 goes ahead)"
 
 echo v9.9.9 > "$T/www/latest"   # the latest release is older than what's installed
 bash "$ROOT/install.sh" 2>"$T/err" || fail "an older latest release is an error: $(cat "$T/err")"
-grep -q 'this cage (v9.9.12) is newer than the latest release (v9.9.9), so it stays as it is' "$T/err" || fail "older latest: $(cat "$T/err")"
-[ "$(version)" = v9.9.12 ] || fail "moved to an older release on its own"
-echo v9.9.12 > "$T/www/latest"
+grep -q 'this cage (v9.9.16) is newer than the latest release (v9.9.9), so it stays as it is' "$T/err" || fail "older latest: $(cat "$T/err")"
+[ "$(version)" = v9.9.16 ] || fail "moved to an older release on its own"
 ok "never moves to an older release on its own"
+
+# a preview (v9.9.18-rc.1) comes before its release (v9.9.18), as in semver; plain sort -V says the opposite
+echo "# v9.9.18" >> "$T/src/README.md"
+commit commit -qam v9.9.18
+release v9.9.18-rc.1
+release v9.9.18
+echo v9.9.18-rc.1 > "$T/www/latest"
+CAGE_VERSION=v9.9.18-rc.1 bash "$ROOT/install.sh" 2>"$T/err" && [ "$(version)" = v9.9.18-rc.1 ] || fail "a preview: $(cat "$T/err")"
+echo v9.9.18 > "$T/www/latest"
+bash "$ROOT/install.sh" 2>"$T/err" && [ "$(version)" = v9.9.18 ] || fail "the release after its preview wasn't installed: $(cat "$T/err")"
+echo v9.9.18-rc.1 > "$T/www/latest"
+bash "$ROOT/install.sh" 2>"$T/err" || fail "$(cat "$T/err")"
+grep -q 'this cage (v9.9.18) is newer than the latest release (v9.9.18-rc.1)' "$T/err" && [ "$(version)" = v9.9.18 ] || fail "went back to a preview: $(cat "$T/err")"
+echo v9.9.18 > "$T/www/latest"
+ok "a release replaces its preview (v9.9.18-rc.1, then v9.9.18), and never the other way round"
 
 # --- your shell finds cage: zsh even without a .zshrc yet, fish, and login shells -------------------------------
 mkdir -p "$T/fish"; printf '#!/bin/sh\n' > "$T/fish/fish"; chmod +x "$T/fish/fish"
@@ -235,20 +361,26 @@ ok "PATH: a new .zshrc when zsh is your shell, fish's conf.d when fish is instal
 
 # --- a version of your choice, and going back ---------------------------------------------------------------------
 : > "$MSB_LOG"
-CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" update --to v9.9.9 2>"$T/err" || fail "update --to: $(cat "$T/err")"
-grep -q 'installed cage v9.9.9 (checksum verified)' "$T/err" && [ "$(version)" = v9.9.9 ] || fail "update --to v9.9.9: $(cat "$T/err")"
-grep -q 'cage-claude' "$MSB_LOG" || fail "update --to didn't go on to the agents"
-[ "$(ls "$CAGE_HOME/releases" | tr '\n' ' ')" = "v9.9.12 v9.9.9 " ] || fail "kept releases: $(ls "$CAGE_HOME/releases")"
+if CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" update --to v9.9.9 nosuch 2>"$T/err"; then fail "update with an unknown agent"; fi
+grep -q 'unknown agent "nosuch"' "$T/err" && [ "$(version)" = v9.9.18 ] && [ ! -s "$MSB_LOG" ] || fail "an unknown agent: $(cat "$T/err")"
+CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" update claude --to v9.9.9 2>"$T/err" || fail "update claude --to: $(cat "$T/err")"
+grep -q 'installed cage v9.9.9 (checksum verified)' "$T/err" && [ "$(version)" = v9.9.9 ] || fail "update claude --to v9.9.9: $(cat "$T/err")"
+grep -q 'cage-claude' "$MSB_LOG" && ! grep -q 'cage-codex' "$MSB_LOG" || fail "update claude --to didn't go on to (only) claude: $(cat "$MSB_LOG")"
+[ "$(ls "$CAGE_HOME/releases" | tr '\n' ' ')" = "v9.9.18 v9.9.9 " ] || fail "kept releases: $(ls "$CAGE_HOME/releases")"
 [ -f "$CAGE_HOME/releases/v9.9.9/SHA256SUMS" ] || fail "a kept release without its checksums"
 : > "$MSB_LOG"
 CAGE_RELEASES="$DEAD" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" rollback 2>"$T/err" || fail "rollback: $(cat "$T/err")"
-[ "$(version)" = v9.9.12 ] && [ "$("$HOME/.local/bin/cage" --version)" = "cage v9.9.12" ] || fail "rollback didn't go back to v9.9.12: $(cat "$T/err")"
-grep -q 'installed cage v9.9.12 (checksum verified)' "$T/err" || fail "rollback: $(cat "$T/err")"
+[ "$(version)" = v9.9.18 ] && [ "$("$HOME/.local/bin/cage" --version)" = "cage v9.9.18" ] || fail "rollback didn't go back to v9.9.18: $(cat "$T/err")"
+grep -q 'installed cage v9.9.18 (checksum verified)' "$T/err" || fail "rollback: $(cat "$T/err")"
 grep -q 'cage-claude' "$MSB_LOG" || fail "rollback didn't wake the agents"
 printf 'tampered' >> "$CAGE_HOME/releases/v9.9.9/cage-v9.9.9.tar.gz"
 if CAGE_RELEASES="$DEAD" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" rollback 2>"$T/err"; then fail "rolled back to a changed copy"; fi
-grep -q "doesn't match its checksum" "$T/err" && [ "$(version)" = v9.9.12 ] || fail "a changed kept copy: $(cat "$T/err")"
-ok "a release of your choice (cage update --to, older ones too), and cage rollback with no network; the last two are kept"
+grep -q "doesn't match its checksum" "$T/err" && [ "$(version)" = v9.9.18 ] || fail "a changed kept copy: $(cat "$T/err")"
+mv "$CAGE_HOME/releases" "$T/releases.kept"
+if "$HOME/.local/bin/cage" rollback 2>"$T/err"; then fail "rolled back with nothing kept"; fi
+grep -q "there's no earlier release on this computer" "$T/err" && grep -q 'to download one: cage update --to' "$T/err" || fail "nothing kept: $(cat "$T/err")"
+mv "$T/releases.kept" "$CAGE_HOME/releases"
+ok "a release of your choice (cage update [agents] --to, older ones too; unknown agents stop it first), and cage rollback with no network; the last two are kept"
 
 # --- uninstall ---------------------------------------------------------------------------------------------------
 mkdir -p "$HOME/cage-backups" && echo backup > "$HOME/cage-backups/cage-2026-01-01-000000.cagebackup"
