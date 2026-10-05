@@ -50,7 +50,7 @@ for f in guest/provision.sh .github/workflows/ci.yml; do
 done
 ok "cc-connect $cc everywhere:$where"
 
-msb="$(grep -oE "MSB_VERSION(=|:-)[\"']?$V" cage | grep -oE "$V" | sort -u)"
+msb="$(grep -oE "MSB_VERSION(=|:-)[\"']?$V" cage | grep -oE "$V" | sort -u || true)"
 [ -n "$msb" ] || fail "can't find cage's microsandbox version (MSB_VERSION=v...); update test/pins.sh"
 [ "$(wc -l <<<"$msb")" = 1 ] || fail "cage pins more than one microsandbox version: $(echo $msb)"
 where="$(agree microsandbox "$msb" "(MSB_VERSION(=|:-|: )[\"']?|microsandbox/releases/download/)$V")"
