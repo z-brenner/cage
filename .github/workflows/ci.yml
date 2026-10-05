@@ -39,7 +39,7 @@ jobs:
       - name: host + setup tests (bash 5) + real cc-connect config validation
         run: |
           # checked against the same SHA-256 the VMs check (guest/provision.sh)
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/cc-connect.tar.gz" https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz
+          curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/cc-connect.tar.gz" https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz
           sha="$(CAGE_PROVISION_LIB=1 bash -c '. guest/provision.sh claude && cc_connect_sha256 v1.5.0 amd64')"
           echo "$sha  $RUNNER_TEMP/cc-connect.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/cc-connect.tar.gz" -C "$RUNNER_TEMP"
