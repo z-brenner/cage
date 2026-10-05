@@ -659,13 +659,20 @@ async function askRound (q, prompt) {
     })
   } catch (e) { r.error = e.message; r.done = true; drawAnswers() }
 }
-const MAX_PROMPT = 90000
-function transcript (thread) { // the rounds so far, for a follow-up or a comparison
-  return thread.rounds.map((r, i) => `Question ${i + 1}: ${r.q}\n\n` + r.agents.map((a) => `${nameOf(a)} answered:\n${r.answers[a] || '(no answer)'}`).join('\n\n')).join('\n\n---\n\n').slice(-MAX_PROMPT)
+// How long a question can be, in UTF-8 bytes as the server counts them (server.py's MAX_ASK): each agent's CLI gets it
+// as one argument, which Linux caps at 128 KiB. In Cyrillic or Chinese, that's far fewer characters than in English.
+const MAX_ASK = 120 * 1024
+const utf8 = (s) => new TextEncoder().encode(s)
+function transcript (thread, room) { // the rounds so far, for a follow-up or a comparison: as much of the end as fits
+  const all = utf8(thread.rounds.map((r, i) => `Question ${i + 1}: ${r.q}\n\n` + r.agents.map((a) => `${nameOf(a)} answered:\n${r.answers[a] || '(no answer)'}`).join('\n\n')).join('\n\n---\n\n'))
+  if (all.length <= room) return new TextDecoder().decode(all)
+  const cut = Math.max(0, room - 3)   // the start goes, and "…" says so (a character split in two goes too)
+  return '…' + new TextDecoder().decode(all.subarray(all.length - cut)).replace(/^\uFFFD+/, '')
 }
+function withTranscript (head, thread, tail) { return head + transcript(thread, MAX_ASK - utf8(head + tail).length) + tail }
 function followUp (text) {
-  const prompt = `You and other AI assistants were asked the questions below. Their answers are included, so you can build on them or disagree.\n\n${transcript(ASK)}\n\n---\n\nFollow-up question: ${text}`
-  askRound(text, prompt)
+  askRound(text, withTranscript('You and other AI assistants were asked the questions below. Their answers are included, so you can build on them or disagree.\n\n',
+    ASK, `\n\n---\n\nFollow-up question: ${text}`))
 }
 async function compare () { // one agent reads all the answers: where they agree, where they don't
   const thread = ASK
@@ -674,9 +681,9 @@ async function compare () { // one agent reads all the answers: where they agree
   if (!by) return
   thread.compare = { by, text: '', done: false, error: '' }
   drawAnswers()
-  const prompt = `Several AI assistants answered the same question. Compare their answers for the person who asked: in a few short bullets, where they agree, where they disagree (and who is more likely right), and anything worth double-checking. Don't repeat the answers.\n\n${transcript({ rounds: [r] })}`
+  const text = withTranscript(`Several AI assistants answered the same question. Compare their answers for the person who asked: in a few short bullets, where they agree, where they disagree (and who is more likely right), and anything worth double-checking. Don't repeat the answers.\n\n`, { rounds: [r] }, '')
   try {
-    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', by], text: prompt } })
+    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', by], text } })
     watch(id, (ev) => {
       const c = thread.compare
       if (!c) return

@@ -69,7 +69,9 @@ ok('ask your agents: the awake ones answer side by side, formatted')
 fs.writeFileSync(process.env.STUB_AWAKE, '')
 await page.reload()
 await page.locator('.composer input[value=codex]:not([disabled])').waitFor({ state: 'attached', timeout: 15000 })
-await page.getByLabel('Question for your agents').fill('capital of France?')
+// in Cyrillic, two bytes a letter: with the follow-up below, more than an agent's CLI takes in one go (128 KiB), in far
+// fewer than 90,000 characters, so the earlier rounds are cut to fit by bytes
+await page.getByLabel('Question for your agents').fill('capital of France? ' + 'Подробно, пожалуйста. '.repeat(2700))
 await page.getByLabel('Question for your agents').press('Enter')
 const round1 = page.locator('.round').first()
 await round1.locator('.answer-card', { hasText: 'Codex' }).getByText('Lyon').waitFor({ timeout: 15000 })
@@ -93,7 +95,7 @@ fs.rmSync(process.env.STUB_AWAKE)
 await page.getByRole('button', { name: 'Clear' }).click()
 await page.reload()
 await page.locator('.composer input[value=codex][disabled]').waitFor({ state: 'attached', timeout: 15000 })
-ok('ask v2: where they disagree, a 20,000-character follow-up with the earlier answers, earlier questions kept in this browser')
+ok('ask v2: where they disagree, a 20,000-character follow-up with the earlier answers (cut to fit), earlier questions kept in this browser')
 
 // chat with an agent in the app: a starter, a file, a streamed answer, a file back, asking before acting
 await card.getByRole('link', { name: 'Chat', exact: true }).click()

@@ -67,6 +67,9 @@ unset SSH_CONNECTION WSL_DISTRO_NAME
 printf 'CAGE_AGENTS="claude codex"\nCAGE_TELEGRAM_ALLOW="111"\nCAGE_TELEGRAM_TOKEN_claude="123:AAA-claude"\nCAGE_TELEGRAM_BOT_claude="my_claude_bot"\n' >> "$CAGE_HOME/cage.env"
 PORT="$(free_port)"
 export CAGE_UI_PORT="$PORT"
+# questions an earlier web app handed over in files that cage never got to read (it stopped first)
+mkdir -m 700 "$CAGE_HOME/jobs" && echo 'an old question' > "$CAGE_HOME/jobs/0123456789abcdef.txt" && touch -d '1 hour ago' "$CAGE_HOME/jobs/0123456789abcdef.txt"
+echo 'a question a job is about to read' > "$CAGE_HOME/jobs/fedcba9876543210.txt"
 "$ROOT/cage" ui --no-open 2>"$T/ui.err" || fail "cage ui: $(cat "$T/ui.err")"
 SERVER="$(up_pid "$CAGE_HOME")"
 TOK="$(cat "$CAGE_HOME/ui.token")"
@@ -75,6 +78,8 @@ grep -q "running at http://127.0.0.1:$PORT/" "$T/ui.err" && ! grep -q "$TOK" "$T
   || fail "cage ui --no-open should give the address (without the token) and not claim it opened anything: $(cat "$T/ui.err")"
 [ ! -e "$OPENED" ] || fail "cage ui --no-open opened a browser"
 kill -0 "$SERVER" && grep -q "host/ui/server.py" "/proc/$SERVER/cmdline" || fail "ui.pid isn't the web app's"
+[ "$(ls "$CAGE_HOME/jobs")" = fedcba9876543210.txt ] || fail "an old question left in the jobs folder, or a new one taken: $(ls "$CAGE_HOME/jobs")"
+rm "$CAGE_HOME/jobs/fedcba9876543210.txt"
 B="http://127.0.0.1:$PORT"
 code() { curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$@"; }
 head_of() { curl --noproxy '*' -s -D - -o /dev/null "$@"; }   # a GET's headers (the app answers HEAD for the page only)
@@ -185,10 +190,18 @@ assert [e for e in said if e["t"] == "answer" and e["text"].startswith("Paris")]
 PY
 [ -z "$(ls -A "$CAGE_HOME/jobs")" ] || fail "the question was left in the jobs folder: $(ls "$CAGE_HOME/jobs")"
 [ "$(stat -c %a "$CAGE_HOME/jobs")" = 700 ] || fail "the jobs folder isn't private"
-python3 -c 'import json; print(json.dumps({"args": ["ask", "claude"], "text": "x" * 600000}))' > "$T/big.json"
-[ "$(job "@$T/big.json")" = 413 ] && grep -q "That question is too long to send" "$T/job.out" || fail "a question over 512 KB: $(cat "$T/job.out")"
+# An agent's CLI gets the question as one argument, which Linux caps at 128 KiB: 130 KiB (in Cyrillic, 66,560
+# characters) is refused in words, not left to fail in the VM. Trying the privacy mask on that much is fine (stdin).
+python3 -c 'import json; print(json.dumps({"args": ["ask", "claude"], "text": "я" * 66560}))' > "$T/big.json"
+[ "$(job "@$T/big.json")" = 413 ] && grep -q "That question is too long to send" "$T/job.out" || fail "a 130 KiB question: $(cat "$T/job.out")"
+python3 -c 'import json; print(json.dumps({"args": ["mask", "try"], "text": "я" * 66560}))' > "$T/big.json"
+[ "$(job "@$T/big.json")" = 200 ] && events "$(jid)" | tail -1 | grep -q '"code": 0' || fail "the privacy mask tried on 130 KiB: $(cat "$T/job.out")"
+python3 -c 'import json; print(json.dumps({"args": ["mask", "try"], "text": "x" * 600000}))' > "$T/big.json"
+[ "$(job "@$T/big.json")" = 413 ] && grep -q "too long to send" "$T/job.out" || fail "the privacy mask tried on 600 KB: $(cat "$T/job.out")"
 [ "$(job '{"args":["up"],"text":"hi"}')" = 400 ] && [ "$(job '{"args":["ask","claude"]}')" = 400 ] || fail "text for a command that takes none, or none for ask"
-ok "a 20,000-character follow-up goes to cage in a private file, which is gone afterwards; over 512 KB is refused in words"
+[ "$(job '{"args":["ask","claude"],"text":"my private question","cols":"wide"}')" = 400 ] || fail "a job that can't start: $(cat "$T/job.out")"
+[ -z "$(ls -A "$CAGE_HOME/jobs")" ] || fail "the question of a job that never started was left behind: $(cat "$CAGE_HOME"/jobs/*)"
+ok "a 20,000-character follow-up goes to cage in a private file, which is gone afterwards, also when the job can't start; over 128 KiB is refused in words"
 
 # Each job has a code only cage knows: what a VM prints that looks like one of cage's questions stays plain output
 [ "$(job '{"args":["logs","claude"],"title":"logs"}')" = 200 ] || fail "logs: $(cat "$T/job.out")"

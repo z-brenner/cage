@@ -68,6 +68,9 @@ COMMANDS = {
     "fallback": ["A A|off"], "voice": ["off", "on local|groq"], "mask": ["on|off A*", "add S", "rm S", "try"],
 }
 MAX_ARG, MAX_ARGS, MAX_TEXT = 131072, 512 << 10, 512 << 10   # one argument (Linux's own limit), all of them, a text
+# A question for `ask`, in bytes: in the VM, each agent's CLI gets it as one argument, which Linux caps at 128 KiB. The
+# rest is room for the privacy mask, whose placeholders can be longer than what they stand for. (app.js's MAX_ASK too)
+MAX_ASK = 120 << 10
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2",
          ".webmanifest": "application/manifest+json"}
@@ -277,6 +280,7 @@ class Job:
     def sweep(cls):
         """Forgets jobs that ended more than 10 minutes ago, and stops logs and terminals nobody is looking at."""
         now = time.time()
+        forget_questions(now)
         with cls.lock:
             for k in [k for k, j in cls.jobs.items() if j.done and now - j.ended > 600]:
                 del cls.jobs[k]
@@ -288,6 +292,22 @@ class Job:
                 j.cancel(signal.SIGKILL)   # it didn't stop when asked
             elif j.args[0] in cls.VIEWERS and not j.watchers and now - j.unwatched > 120:
                 j.cancel()
+
+
+def forget_questions(now):
+    """Removes questions handed to cage in jobs/ that are still there 10 minutes on. cage reads (and removes) one as
+    it starts, so these are from jobs that never got that far: the web app stopped first, say."""
+    try:
+        names = os.listdir(JOBS_DIR)
+    except OSError:
+        return
+    for name in names:
+        f = os.path.join(JOBS_DIR, name)
+        try:
+            if name.endswith(".txt") and now - os.lstat(f).st_mtime > 600:
+                os.unlink(f)
+        except OSError:
+            pass
 
 
 def safe_name(name):
@@ -794,9 +814,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if parts[2] == "input":
                     if "raw" in b:
                         job.write(base64.b64decode(b["raw"]))
-                    else:   # an answer: a page that opens the job later sees its question was answered (not with what)
-                        job.write((str(b.get("text", "")).replace("\n", " ") + "\n").encode())
+                    else:   # an answer: a page that opens the job later sees its question was answered (not with what).
+                        # That goes first, so it always comes before whatever cage says next (maybe its next question).
                         job.add({"t": "input"})
+                        job.write((str(b.get("text", "")).replace("\n", " ") + "\n").encode())
                 elif parts[2] == "resize":
                     job.resize(max(20, min(400, int(b["cols"]))), max(5, min(200, int(b["rows"]))))
                 elif parts[2] == "cancel":
@@ -810,6 +831,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """POST /api/jobs: a cage command the page runs, checked against what the page does (COMMANDS)."""
         args = b.get("args", [])
         cmd = check_args(args)
+        shown, title = args, str(b.get("title") or "")[:120]
+        cols = max(20, min(400, int(b.get("cols") or 100)))
         if cmd == "restore":   # a backup's settings run as code here: only cage's own backups folder
             where, f = os.path.realpath(State.backups() or "/nonexistent"), os.path.realpath(args[1])
             if not (f.startswith(where + os.sep) and f.endswith(".cagebackup") and os.path.isfile(f)):
@@ -825,8 +848,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not at or not isinstance(text, str) or "\0" in text:
                 raise Refused(400, "only a question for ask, or text to try the privacy mask on, goes in \"text\"")
             data = text.encode("utf-8")
-            if len(data) > MAX_TEXT:
-                raise Refused(413, "That question is too long to send.")
+            if len(data) > (MAX_ASK if cmd == "ask" else MAX_TEXT):
+                raise Refused(413, "That question is too long to send." if cmd == "ask" else "That’s too long to send.")
             os.makedirs(JOBS_DIR, mode=0o700, exist_ok=True)
             text_file = os.path.join(JOBS_DIR, secrets.token_hex(8) + ".txt")
             with open(os.open(text_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as fh:
@@ -834,8 +857,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             args = args[:at] + ["--text-file", text_file] + args[at:]
         Job.sweep()
         State.stale()
-        cols = max(20, min(400, int(b.get("cols") or 100)))
-        return self.send(200, {"id": Job(args, cols, str(b.get("title") or "")[:120], text_file, b["args"]).id})
+        try:
+            job = Job(args, cols, title, text_file, shown)
+        except BaseException:   # cage never started, so nothing else will remove the question
+            if text_file:
+                os.unlink(text_file)
+            raise
+        return self.send(200, {"id": job.id})
 
     def chat(self, method, agent, what, query):
         with Chat(agent) as c:
@@ -1077,5 +1105,6 @@ def write_pid():
 if __name__ == "__main__":
     server = Server(("127.0.0.1", PORT), Handler)
     write_pid()
+    forget_questions(time.time())
     threading.Thread(target=restart_when_updated, daemon=True).start()
     server.serve_forever()
