@@ -1,0 +1,445 @@
+{
+"terms": [
+"Contoso Ltd",
+"Tailspin Toys"
+],
+"cases": [
+{
+"text": "Pls loop in m.rossi@studio-legale.it and l.bianchi@studio-legale.it",
+"labels": [
+[
+"EMAIL",
+"m.rossi@studio-legale.it"
+],
+[
+"EMAIL",
+"l.bianchi@studio-legale.it"
+]
+]
+},
+{
+"text": "Reply-To: noreply+ticket-4821@help.example.com",
+"labels": [
+[
+"EMAIL",
+"noreply+ticket-4821@help.example.com"
+]
+]
+},
+{
+"text": "Her Gmail is priya.k.sharma1990@gmail.com btw",
+"labels": [
+[
+"EMAIL",
+"priya.k.sharma1990@gmail.com"
+]
+]
+},
+{
+"text": "WhatsApp me on +44 7400 123456 or landline 0118 496 0123",
+"labels": [
+[
+"PHONE",
+"+44 7400 123456"
+],
+[
+"PHONE",
+"0118 496 0123"
+]
+]
+},
+{
+"text": "Nummer: 0151 23456789 (privat)",
+"labels": [
+[
+"PHONE",
+"0151 23456789"
+]
+]
+},
+{
+"text": "call (646) 555-0187 x12",
+"labels": [
+[
+"PHONE",
+"(646) 555-0187"
+]
+]
+},
+{
+"text": "His cell: 312.555.0144.",
+"labels": [
+[
+"PHONE",
+"312.555.0144"
+]
+]
+},
+{
+"text": "Kontakt +43 1 5338000",
+"labels": [
+[
+"PHONE",
+"+43 1 5338000"
+]
+]
+},
+{
+"text": "Bureau: 01 44 55 66 77",
+"labels": [
+[
+"PHONE",
+"01 44 55 66 77"
+]
+]
+},
+{
+"text": "+1 212 555 0100 is the front desk",
+"labels": [
+[
+"PHONE",
+"+1 212 555 0100"
+]
+]
+},
+{
+"text": "Mobile: +46 70 123 45 67",
+"labels": [
+[
+"PHONE",
+"+46 70 123 45 67"
+]
+]
+},
+{
+"text": "ring 0800 123 4567 free",
+"labels": [
+[
+"PHONE",
+"0800 123 4567"
+]
+]
+},
+{
+"text": "Telefon 089/12345678",
+"labels": [
+[
+"PHONE",
+"089/12345678"
+]
+]
+},
+{
+"text": "My card number is 5105 1051 0510 5100, CVC 737",
+"labels": [
+[
+"CARD",
+"5105 1051 0510 5100"
+]
+]
+},
+{
+"text": "use 378282246310005 (amex test)",
+"labels": [
+[
+"CARD",
+"378282246310005"
+]
+]
+},
+{
+"text": "Visa 4012-8888-8888-1881 exp 03/28",
+"labels": [
+[
+"CARD",
+"4012-8888-8888-1881"
+]
+]
+},
+{
+"text": "Überweisung an AT61 1904 3002 3457 3201",
+"labels": [
+[
+"IBAN",
+"AT61 1904 3002 3457 3201"
+]
+]
+},
+{
+"text": "IBAN PL61109010140000071219812874",
+"labels": [
+[
+"IBAN",
+"PL61109010140000071219812874"
+]
+]
+},
+{
+"text": "iban: ie29 aibk 9311 5212 3456 78",
+"labels": [
+[
+"IBAN",
+"ie29 aibk 9311 5212 3456 78"
+]
+]
+},
+{
+"text": "Her SSN is 219-09-9999.",
+"labels": [
+[
+"SSN",
+"219-09-9999"
+]
+]
+},
+{
+"text": "mysql://root:ed1wPw7X8bbG@10.0.0.5/prod",
+"labels": [
+[
+"SECRET",
+"ed1wPw7X8bbG"
+]
+]
+},
+{
+"text": "the wifi password is EuRtCu6hF8",
+"labels": [
+[
+"SECRET",
+"EuRtCu6hF8"
+]
+]
+},
+{
+"text": "my server is at 81.2.69.160 (home)",
+"labels": [
+[
+"IP",
+"81.2.69.160"
+]
+]
+},
+{
+"text": "device b8:27:eb:12:34:56 on the LAN",
+"labels": [
+[
+"MAC",
+"b8:27:eb:12:34:56"
+]
+]
+},
+{
+"text": "Birthday: March 3, 1985",
+"labels": [
+[
+"DOB",
+"March 3, 1985"
+]
+]
+},
+{
+"text": "geb. 14.07.1979 in Köln",
+"labels": [
+[
+"DOB",
+"14.07.1979"
+]
+]
+},
+{
+"text": "passport number: X1234567",
+"labels": [
+[
+"PASSPORT",
+"X1234567"
+]
+]
+},
+{
+"text": "Deliver to 742 Evergreen Terrace, Springfield",
+"labels": [
+[
+"ADDRESS",
+"742 Evergreen Terrace, Springfield"
+]
+]
+},
+{
+"text": "Office: 350 Fifth Avenue, New York, NY 10118",
+"labels": [
+[
+"ADDRESS",
+"350 Fifth Avenue, New York, NY 10118"
+]
+]
+},
+{
+"text": "Anschrift: Hauptstraße 5, 80331 München",
+"labels": [
+[
+"ADDRESS",
+"Hauptstraße 5, 80331 München"
+]
+]
+},
+{
+"text": "Payroll for Contoso Ltd and Tailspin Toys",
+"labels": [
+[
+"TERM",
+"Contoso Ltd"
+],
+[
+"TERM",
+"Tailspin Toys"
+]
+]
+},
+{
+"text": "CONTOSO LTD's board met",
+"labels": [
+[
+"TERM",
+"CONTOSO LTD"
+]
+]
+},
+{
+"text": "mail ana@contoso-ltd.com re Contoso Ltd",
+"labels": [
+[
+"EMAIL",
+"ana@contoso-ltd.com"
+],
+[
+"TERM",
+"Contoso Ltd"
+]
+]
+},
+{
+"text": "The Q3 board pack: revenue 4.2M, EBITDA 1.1M, headcount 212, churn 3.4%.",
+"labels": []
+},
+{
+"text": "Traceback (most recent call last):\n  File \"app.py\", line 1234, in <module>\nValueError: 404 not found",
+"labels": []
+},
+{
+"text": "2026-10-05T08:15:30.123Z INFO request_id=7f3a9c21 latency_ms=153 status=200",
+"labels": []
+},
+{
+"text": "git log: 3f2a9d1 Merge pull request #1452 from org/feature-x",
+"labels": []
+},
+{
+"text": "pip install numpy==1.26.4 pandas==2.2.3 torch==2.4.1+cu121",
+"labels": []
+},
+{
+"text": "SELECT * FROM orders WHERE id IN (100234, 100235, 100236) LIMIT 50;",
+"labels": []
+},
+{
+"text": "Prices: 1 299,00 € / 2 499,00 € / 12 999,00 €",
+"labels": []
+},
+{
+"text": "ID card template: [EMAIL_1] placeholder in docs",
+"labels": []
+},
+{
+"text": "call the function with 3 args; phone home is a metaphor",
+"labels": []
+},
+{
+"text": "Flight LH 400 departs 13:45 from gate B 12 22 33",
+"labels": []
+},
+{
+"text": "serial no. 0045-2231-998, lot 2026-07-14",
+"labels": []
+},
+{
+"text": "ratio 16:9, resolution 1920 1080, fps 59.94",
+"labels": []
+},
+{
+"text": "GPS 51.5074 N, 0.1278 W; altitude 35 m; bearing 270",
+"labels": []
+},
+{
+"text": "sha1 da39a3ee5e6b4b0d3255bfef95601890afd80709 matches",
+"labels": []
+},
+{
+"text": "Kubernetes pod web-7d9f8c6b5-x2x9k restarted 3 times",
+"labels": []
+},
+{
+"text": "Ticket JIRA-12345 and PROJ-6789 are blockers",
+"labels": []
+},
+{
+"text": "version 10.15.7 build 19H2, Xcode 15.4 (15F31d)",
+"labels": []
+},
+{
+"text": "the answer is 4111 apples and 1111 oranges",
+"labels": []
+},
+{
+"text": "Population: 8 336 817 (NYC 2020)",
+"labels": []
+},
+{
+"text": "Zoom meeting ID 812 3456 7890, passcode 123456",
+"labels": []
+},
+{
+"text": "Matrix [[1, 2], [3, 4]] and list [10, 20, 30]",
+"labels": []
+},
+{
+"text": "CSS: margin: 0 12px 24px 0; z-index: 1000",
+"labels": []
+},
+{
+"text": "timestamps 1728112345 1728112399 1728112455",
+"labels": []
+},
+{
+"text": "Order 2026-0001234 total 129.99 USD",
+"labels": []
+},
+{
+"text": "API returned {\"count\": 1234567890123, \"page\": 2}",
+"labels": []
+},
+{
+"text": "the 2024 report vs the 2023 report, pages 12-34",
+"labels": []
+},
+{
+"text": "Use port 5432 for Postgres and 6379 for Redis",
+"labels": []
+},
+{
+"text": "ISO 27001, SOC 2 Type II, GDPR Art. 32",
+"labels": []
+},
+{
+"text": "hex color #1a2b3c and #ffffff, rgba(0, 0, 0, 0.5)",
+"labels": []
+},
+{
+"text": "Run `npm test -- --grep 'user@domain'` locally",
+"labels": []
+},
+{
+"text": "The token count was 128000 and max output 64000",
+"labels": []
+}
+]
+}

@@ -1,0 +1,1751 @@
+{
+"terms": [
+"Acme Corp",
+"Jane Doe",
+"Project Falcon",
+"Zoë Müller",
+"C++ Partners",
+"AT&T",
+"#ProjectX"
+],
+"cases": [
+{
+"text": "Please reply to Jane Doe <jane.doe@acme-corp.com> by Friday.",
+"labels": [
+[
+"EMAIL",
+"jane.doe@acme-corp.com"
+],
+[
+"TERM",
+"Jane Doe"
+]
+]
+},
+{
+"text": "cc: <bob+invoices@sub.example.co.uk>, <ops@example.io>",
+"labels": [
+[
+"EMAIL",
+"bob+invoices@sub.example.co.uk"
+],
+[
+"EMAIL",
+"ops@example.io"
+]
+]
+},
+{
+"text": "mailto:carol@example.org?subject=hi",
+"labels": [
+[
+"EMAIL",
+"carol@example.org"
+]
+]
+},
+{
+"text": "Write to FIRST.LAST@EXAMPLE.COM.",
+"labels": [
+[
+"EMAIL",
+"FIRST.LAST@EXAMPLE.COM"
+]
+]
+},
+{
+"text": "{\"email\":\"frank@example.net\",\"name\":\"Frank\"}",
+"labels": [
+[
+"EMAIL",
+"frank@example.net"
+]
+]
+},
+{
+"text": "emails: alice@example.com,bob@example.com;carol@example.com",
+"labels": [
+[
+"EMAIL",
+"alice@example.com"
+],
+[
+"EMAIL",
+"bob@example.com"
+],
+[
+"EMAIL",
+"carol@example.com"
+]
+]
+},
+{
+"text": "(dave_99@mail.example.travel)",
+"labels": [
+[
+"EMAIL",
+"dave_99@mail.example.travel"
+]
+]
+},
+{
+"text": "contact o'brien@example.ie today",
+"labels": [
+[
+"EMAIL",
+"o'brien@example.ie"
+]
+]
+},
+{
+"text": "Kontakt: josé.garcía@exämple.de",
+"labels": [
+[
+"EMAIL",
+"josé.garcía@exämple.de"
+]
+]
+},
+{
+"text": "my address is eve at example dot com",
+"labels": [
+[
+"EMAIL",
+"eve at example dot com"
+]
+]
+},
+{
+"text": "URL-encoded: to=frank%40example.net&x=1",
+"labels": [
+[
+"EMAIL",
+"frank%40example.net"
+]
+]
+},
+{
+"text": "> On Mon, Oct 5, 2026, Grace Hopper <grace@navy.example.mil> wrote:",
+"labels": [
+[
+"EMAIL",
+"grace@navy.example.mil"
+]
+]
+},
+{
+"text": "Send the deck to heidi.klum-schmidt@firma-gmbh.de and wait.",
+"labels": [
+[
+"EMAIL",
+"heidi.klum-schmidt@firma-gmbh.de"
+]
+]
+},
+{
+"text": "From: \"Ivan\" <ivan@example.museum>",
+"labels": [
+[
+"EMAIL",
+"ivan@example.museum"
+]
+]
+},
+{
+"text": "Reach me at judy@example.com.",
+"labels": [
+[
+"EMAIL",
+"judy@example.com"
+]
+]
+},
+{
+"text": "Email:mallory@example.co",
+"labels": [
+[
+"EMAIL",
+"mallory@example.co"
+]
+]
+},
+{
+"text": "The list is team-all@groups.example.com (moderated).",
+"labels": [
+[
+"EMAIL",
+"team-all@groups.example.com"
+]
+]
+},
+{
+"text": "email ME: Oscar@Example.Com!",
+"labels": [
+[
+"EMAIL",
+"Oscar@Example.Com"
+]
+]
+},
+{
+"text": "git clone git@github.com:acme/repo.git",
+"labels": []
+},
+{
+"text": "Use the icon@2x.png and logo@3x.webp assets.",
+"labels": []
+},
+{
+"text": "npm i @scope/pkg@1.2.3 and decorate with @property",
+"labels": []
+},
+{
+"text": "docker pull node@sha256:4c1e997385b8fb4ad4d1d3c7e5af7ff3f882e7d7",
+"labels": []
+},
+{
+"text": "ping @alice and @bob in #general",
+"labels": []
+},
+{
+"text": "Call me at +1 (415) 555-0132 after 5.",
+"labels": [
+[
+"PHONE",
+"+1 (415) 555-0132"
+]
+]
+},
+{
+"text": "office 415-555-0132, cell 415.555.0199",
+"labels": [
+[
+"PHONE",
+"415-555-0132"
+],
+[
+"PHONE",
+"415.555.0199"
+]
+]
+},
+{
+"text": "Phone: (212) 555-0147",
+"labels": [
+[
+"PHONE",
+"(212) 555-0147"
+]
+]
+},
+{
+"text": "Tel. +1-800-555-0199 (toll free)",
+"labels": [
+[
+"PHONE",
+"+1-800-555-0199"
+]
+]
+},
+{
+"text": "whatsapp +14155550132",
+"labels": [
+[
+"PHONE",
+"+14155550132"
+]
+]
+},
+{
+"text": "tel:+14155550132",
+"labels": [
+[
+"PHONE",
+"+14155550132"
+]
+]
+},
+{
+"text": "Phone: 4155550132",
+"labels": [
+[
+"PHONE",
+"4155550132"
+]
+]
+},
+{
+"text": "London office: +44 20 7946 0958",
+"labels": [
+[
+"PHONE",
+"+44 20 7946 0958"
+]
+]
+},
+{
+"text": "UK: +44 (0)20 7946 0958",
+"labels": [
+[
+"PHONE",
+"+44 (0)20 7946 0958"
+]
+]
+},
+{
+"text": "mobile 07700 900123",
+"labels": [
+[
+"PHONE",
+"07700 900123"
+]
+]
+},
+{
+"text": "my mobile is +44 7700 900123",
+"labels": [
+[
+"PHONE",
+"+44 7700 900123"
+]
+]
+},
+{
+"text": "+44 7911 123456 is Tom's",
+"labels": [
+[
+"PHONE",
+"+44 7911 123456"
+]
+]
+},
+{
+"text": "Berlin: +49 30 12345678",
+"labels": [
+[
+"PHONE",
+"+49 30 12345678"
+]
+]
+},
+{
+"text": "Handy: +49 151 23456789",
+"labels": [
+[
+"PHONE",
+"+49 151 23456789"
+]
+]
+},
+{
+"text": "Tel.: 030 12345678",
+"labels": [
+[
+"PHONE",
+"030 12345678"
+]
+]
+},
+{
+"text": "Mumbai: +91 98765 43210",
+"labels": [
+[
+"PHONE",
+"+91 98765 43210"
+]
+]
+},
+{
+"text": "call +91-9876543210 now",
+"labels": [
+[
+"PHONE",
+"+91-9876543210"
+]
+]
+},
+{
+"text": "India +91 9876543210",
+"labels": [
+[
+"PHONE",
+"+91 9876543210"
+]
+]
+},
+{
+"text": "Paris: +33 1 23 45 67 89",
+"labels": [
+[
+"PHONE",
+"+33 1 23 45 67 89"
+]
+]
+},
+{
+"text": "portable 06 12 34 56 78",
+"labels": [
+[
+"PHONE",
+"06 12 34 56 78"
+]
+]
+},
+{
+"text": "Mobile FR +33 6 12 34 56 78",
+"labels": [
+[
+"PHONE",
+"+33 6 12 34 56 78"
+]
+]
+},
+{
+"text": "Sydney +61 2 9876 5432",
+"labels": [
+[
+"PHONE",
+"+61 2 9876 5432"
+]
+]
+},
+{
+"text": "Tokyo +81 3-1234-5678",
+"labels": [
+[
+"PHONE",
+"+81 3-1234-5678"
+]
+]
+},
+{
+"text": "Shanghai +86 138 0013 8000",
+"labels": [
+[
+"PHONE",
+"+86 138 0013 8000"
+]
+]
+},
+{
+"text": "São Paulo +55 11 91234-5678",
+"labels": [
+[
+"PHONE",
+"+55 11 91234-5678"
+]
+]
+},
+{
+"text": "Dublin +353 1 234 5678",
+"labels": [
+[
+"PHONE",
+"+353 1 234 5678"
+]
+]
+},
+{
+"text": "Moscow +7 495 123-45-67",
+"labels": [
+[
+"PHONE",
+"+7 495 123-45-67"
+]
+]
+},
+{
+"text": "Madrid +34 612 34 56 78",
+"labels": [
+[
+"PHONE",
+"+34 612 34 56 78"
+]
+]
+},
+{
+"text": "Rome +39 06 1234 5678",
+"labels": [
+[
+"PHONE",
+"+39 06 1234 5678"
+]
+]
+},
+{
+"text": "Amsterdam +31 6 12345678",
+"labels": [
+[
+"PHONE",
+"+31 6 12345678"
+]
+]
+},
+{
+"text": "Cape Town +27 82 123 4567",
+"labels": [
+[
+"PHONE",
+"+27 82 123 4567"
+]
+]
+},
+{
+"text": "Singapore +65 9123 4567",
+"labels": [
+[
+"PHONE",
+"+65 9123 4567"
+]
+]
+},
+{
+"text": "Tel Aviv +972 50-123-4567",
+"labels": [
+[
+"PHONE",
+"+972 50-123-4567"
+]
+]
+},
+{
+"text": "Zürich +41 44 668 18 00",
+"labels": [
+[
+"PHONE",
+"+41 44 668 18 00"
+]
+]
+},
+{
+"text": "Mexico +52 55 1234 5678",
+"labels": [
+[
+"PHONE",
+"+52 55 1234 5678"
+]
+]
+},
+{
+"text": "call 555-0132",
+"labels": [
+[
+"PHONE",
+"555-0132"
+]
+]
+},
+{
+"text": "ext: (415) 555-0132 x204",
+"labels": [
+[
+"PHONE",
+"(415) 555-0132"
+]
+]
+},
+{
+"text": "Meeting on 2026-10-01 at 14:30, follow-up 2026-10-15.",
+"labels": []
+},
+{
+"text": "Termin am 05.10.2026 um 14.30 Uhr",
+"labels": []
+},
+{
+"text": "Order #123-456-789 shipped; SKU 100-200-300.",
+"labels": []
+},
+{
+"text": "Revenue by quarter: 120 135 147 160 (in $k)",
+"labels": []
+},
+{
+"text": "Scores: 12 34 56 78 90",
+"labels": []
+},
+{
+"text": "ZIP 94103-1234, PO Box 1234",
+"labels": []
+},
+{
+"text": "Released version 2024.10.1234 today; Chrome 128.0.6613.137",
+"labels": []
+},
+{
+"text": "Server at 192.168.100.200:8080 and 10.0.0.1, gateway 172.16.254.1",
+"labels": []
+},
+{
+"text": "ISBN 978-0-306-40615-7 and ISBN-13 978-3-16-148410-0",
+"labels": []
+},
+{
+"text": "UPS tracking 1Z 999 AA1 0123 4567 84",
+"labels": []
+},
+{
+"text": "Reference 1234 5678 90 for your claim",
+"labels": []
+},
+{
+"text": "Invoice INV-2024-000123 for 1,234,567.89 USD",
+"labels": []
+},
+{
+"text": "coords 37.7749, -122.4194; elevation 52 m",
+"labels": []
+},
+{
+"text": "Windows build 10.0.22631.4317, kernel 6.18.44",
+"labels": []
+},
+{
+"text": "Run tests 100 200 300 times; timeout 30 60 90 120 seconds",
+"labels": []
+},
+{
+"text": "UUID 123e4567-e89b-12d3-a456-426614174000",
+"labels": []
+},
+{
+"text": "Table: 2021 2022 2023 2024 headcount 120 135 150 162",
+"labels": []
+},
+{
+"text": "between 9-12 and 13-17 on weekdays, 10-14 on Sat",
+"labels": []
+},
+{
+"text": "Card 4111 1111 1111 1111 exp 12/27",
+"labels": [
+[
+"CARD",
+"4111 1111 1111 1111"
+]
+]
+},
+{
+"text": "pay with 4111-1111-1111-1111",
+"labels": [
+[
+"CARD",
+"4111-1111-1111-1111"
+]
+]
+},
+{
+"text": "visa:4242424242424242",
+"labels": [
+[
+"CARD",
+"4242424242424242"
+]
+]
+},
+{
+"text": "MC 5555 5555 5555 4444",
+"labels": [
+[
+"CARD",
+"5555 5555 5555 4444"
+]
+]
+},
+{
+"text": "Amex 3782 822463 10005",
+"labels": [
+[
+"CARD",
+"3782 822463 10005"
+]
+]
+},
+{
+"text": "Discover 6011 1111 1111 1117",
+"labels": [
+[
+"CARD",
+"6011 1111 1111 1117"
+]
+]
+},
+{
+"text": "JCB 3530111333300000",
+"labels": [
+[
+"CARD",
+"3530111333300000"
+]
+]
+},
+{
+"text": "MC2 2223 0031 2200 3222",
+"labels": [
+[
+"CARD",
+"2223 0031 2200 3222"
+]
+]
+},
+{
+"text": "Diners 3056 9309 0259 04",
+"labels": [
+[
+"CARD",
+"3056 9309 0259 04"
+]
+]
+},
+{
+"text": "card: 4111.1111.1111.1111",
+"labels": [
+[
+"CARD",
+"4111.1111.1111.1111"
+]
+]
+},
+{
+"text": "UnionPay 6200000000000005",
+"labels": [
+[
+"CARD",
+"6200000000000005"
+]
+]
+},
+{
+"text": "not a card: 1234 5678 9012 3456",
+"labels": []
+},
+{
+"text": "event at ms 1727677359256 logged",
+"labels": []
+},
+{
+"text": "Discord message id 1290155625881537149",
+"labels": []
+},
+{
+"text": "tracking 9732104696325956",
+"labels": []
+},
+{
+"text": "IMEI 352099001761481",
+"labels": []
+},
+{
+"text": "see /home/agent/work/.cc-connect/attachments/1290155625881537149/report.pdf",
+"labels": []
+},
+{
+"text": "IBAN GB82 WEST 1234 5698 7654 32",
+"labels": [
+[
+"IBAN",
+"GB82 WEST 1234 5698 7654 32"
+]
+]
+},
+{
+"text": "iban:GB82WEST12345698765432",
+"labels": [
+[
+"IBAN",
+"GB82WEST12345698765432"
+]
+]
+},
+{
+"text": "DE89 3704 0044 0532 0130 00 (Commerzbank)",
+"labels": [
+[
+"IBAN",
+"DE89 3704 0044 0532 0130 00"
+]
+]
+},
+{
+"text": "Konto DE89370400440532013000",
+"labels": [
+[
+"IBAN",
+"DE89370400440532013000"
+]
+]
+},
+{
+"text": "FR14 2004 1010 0505 0001 3M02 606",
+"labels": [
+[
+"IBAN",
+"FR14 2004 1010 0505 0001 3M02 606"
+]
+]
+},
+{
+"text": "NL91 ABNA 0417 1643 00",
+"labels": [
+[
+"IBAN",
+"NL91 ABNA 0417 1643 00"
+]
+]
+},
+{
+"text": "ES91 2100 0418 4502 0005 1332",
+"labels": [
+[
+"IBAN",
+"ES91 2100 0418 4502 0005 1332"
+]
+]
+},
+{
+"text": "CH93 0076 2011 6238 5295 7",
+"labels": [
+[
+"IBAN",
+"CH93 0076 2011 6238 5295 7"
+]
+]
+},
+{
+"text": "IT60 X054 2811 1010 0000 0123 456",
+"labels": [
+[
+"IBAN",
+"IT60 X054 2811 1010 0000 0123 456"
+]
+]
+},
+{
+"text": "BE68 5390 0754 7034",
+"labels": [
+[
+"IBAN",
+"BE68 5390 0754 7034"
+]
+]
+},
+{
+"text": "NO93 8601 1117 947",
+"labels": [
+[
+"IBAN",
+"NO93 8601 1117 947"
+]
+]
+},
+{
+"text": "lowercase gb82 west 1234 5698 7654 32",
+"labels": [
+[
+"IBAN",
+"gb82 west 1234 5698 7654 32"
+]
+]
+},
+{
+"text": "IBAN: DE89-3704-0044-0532-0130-00",
+"labels": [
+[
+"IBAN",
+"DE89-3704-0044-0532-0130-00"
+]
+]
+},
+{
+"text": "sort code 20-00-00, account 12345678",
+"labels": [
+[
+"BANK",
+"20-00-00"
+],
+[
+"BANK",
+"12345678"
+]
+]
+},
+{
+"text": "routing 021000021 account 000123456789",
+"labels": [
+[
+"BANK",
+"021000021"
+],
+[
+"BANK",
+"000123456789"
+]
+]
+},
+{
+"text": "Model GB82 is new; part DE12 ABC",
+"labels": []
+},
+{
+"text": "SSN 123-45-6789",
+"labels": [
+[
+"SSN",
+"123-45-6789"
+]
+]
+},
+{
+"text": "ssn: 078-05-1120",
+"labels": [
+[
+"SSN",
+"078-05-1120"
+]
+]
+},
+{
+"text": "SSN: 123 45 6789",
+"labels": [
+[
+"SSN",
+"123 45 6789"
+]
+]
+},
+{
+"text": "social security number 123456789",
+"labels": [
+[
+"SSN",
+"123456789"
+]
+]
+},
+{
+"text": "UK NI number QQ 12 34 56 C",
+"labels": [
+[
+"NATID",
+"QQ 12 34 56 C"
+]
+]
+},
+{
+"text": "SIN 046 454 286",
+"labels": [
+[
+"NATID",
+"046 454 286"
+]
+]
+},
+{
+"text": "Aadhaar 2345 6789 0123",
+"labels": [
+[
+"NATID",
+"2345 6789 0123"
+]
+]
+},
+{
+"text": "PAN ABCDE1234F",
+"labels": [
+[
+"NATID",
+"ABCDE1234F"
+]
+]
+},
+{
+"text": "Steuer-ID 12 345 678 903",
+"labels": [
+[
+"NATID",
+"12 345 678 903"
+]
+]
+},
+{
+"text": "Version 2.0-45-6789? no: build 2026-10-0001",
+"labels": []
+},
+{
+"text": "wallet private key 0x161a9cf8169b1a83bdceca5ffb82d2d59a32a99ed5ebe1bd812cb504e1427bbc",
+"labels": [
+[
+"SECRET",
+"0x161a9cf8169b1a83bdceca5ffb82d2d59a32a99ed5ebe1bd812cb504e1427bbc"
+]
+]
+},
+{
+"text": "my password is hunter2!",
+"labels": [
+[
+"SECRET",
+"hunter2!"
+]
+]
+},
+{
+"text": "login: admin / pwd=Tr0ub4dor&3",
+"labels": [
+[
+"SECRET",
+"Tr0ub4dor&3"
+]
+]
+},
+{
+"text": "DB_PASSWORD='c0rrect-h0rse-battery'",
+"labels": [
+[
+"SECRET",
+"c0rrect-h0rse-battery"
+]
+]
+},
+{
+"text": "postgres://admin:S3cr3tP4ss@db.example.com:5432/app",
+"labels": [
+[
+"SECRET",
+"S3cr3tP4ss"
+]
+]
+},
+{
+"text": "https://user:hunter2@example.com/path",
+"labels": [
+[
+"SECRET",
+"hunter2"
+]
+]
+},
+{
+"text": "mongodb+srv://svc:p@ss!word@cluster0.example.net/db",
+"labels": [
+[
+"SECRET",
+"p@ss!word"
+]
+]
+},
+{
+"text": "redis://:pa$$w0rd@redis.example.com:6379",
+"labels": [
+[
+"SECRET",
+"pa$$w0rd"
+]
+]
+},
+{
+"text": "seed phrase: abandon ability able about above absent absorb abstract absurd abuse access accident",
+"labels": [
+[
+"SECRET",
+"abandon ability able about above absent absorb abstract absurd abuse access accident"
+]
+]
+},
+{
+"text": "the sk-learn docs and task-runner-config-file-for-testing-purposes",
+"labels": []
+},
+{
+"text": "commit 4c1e997385b8fb4ad4d1d3c7e5af7ff3f882e7d7 and sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+"labels": []
+},
+{
+"text": "placeholder $MSB_GITHUB_TOKEN stays as is",
+"labels": []
+},
+{
+"text": "CSS class sk-button-primary-large-rounded-variant",
+"labels": []
+},
+{
+"text": "see https://example.com/docs/getting-started-with-the-api-reference",
+"labels": []
+},
+{
+"text": "my home IP is 203.0.113.42",
+"labels": [
+[
+"IP",
+"203.0.113.42"
+]
+]
+},
+{
+"text": "client 198.51.100.7 hit the WAF",
+"labels": [
+[
+"IP",
+"198.51.100.7"
+]
+]
+},
+{
+"text": "IPv6 2001:db8:85a3::8a2e:370:7334 is mine",
+"labels": [
+[
+"IPV6",
+"2001:db8:85a3::8a2e:370:7334"
+]
+]
+},
+{
+"text": "laptop MAC 00:1A:2B:3C:4D:5E",
+"labels": [
+[
+"MAC",
+"00:1A:2B:3C:4D:5E"
+]
+]
+},
+{
+"text": "MAC 00-1a-2b-3c-4d-5e on the badge reader",
+"labels": [
+[
+"MAC",
+"00-1a-2b-3c-4d-5e"
+]
+]
+},
+{
+"text": "BTC bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+"labels": [
+[
+"CRYPTO",
+"bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+]
+]
+},
+{
+"text": "DOB: 04/12/1987",
+"labels": [
+[
+"DOB",
+"04/12/1987"
+]
+]
+},
+{
+"text": "Date of birth: 1987-03-12",
+"labels": [
+[
+"DOB",
+"1987-03-12"
+]
+]
+},
+{
+"text": "She was born on 12 March 1987 in Leeds.",
+"labels": [
+[
+"DOB",
+"12 March 1987"
+]
+]
+},
+{
+"text": "Passport no. 123456789 (US)",
+"labels": [
+[
+"PASSPORT",
+"123456789"
+]
+]
+},
+{
+"text": "Reisepass C01X00T47",
+"labels": [
+[
+"PASSPORT",
+"C01X00T47"
+]
+]
+},
+{
+"text": "Ship to 221B Baker Street, London NW1 6XE",
+"labels": [
+[
+"ADDRESS",
+"221B Baker Street, London NW1 6XE"
+]
+]
+},
+{
+"text": "HQ: 1600 Amphitheatre Parkway, Mountain View, CA 94043",
+"labels": [
+[
+"ADDRESS",
+"1600 Amphitheatre Parkway, Mountain View, CA 94043"
+]
+]
+},
+{
+"text": "Driver's license D1234567 (CA)",
+"labels": [
+[
+"NATID",
+"D1234567"
+]
+]
+},
+{
+"text": "Medicare 1EG4-TE5-MK73",
+"labels": [
+[
+"NATID",
+"1EG4-TE5-MK73"
+]
+]
+},
+{
+"text": "Draft a reply to ACME CORP about the renewal.",
+"labels": [
+[
+"TERM",
+"ACME CORP"
+]
+]
+},
+{
+"text": "acme corp's Q3 numbers",
+"labels": [
+[
+"TERM",
+"acme corp"
+]
+]
+},
+{
+"text": "Project Falcon kickoff with Zoë Müller",
+"labels": [
+[
+"TERM",
+"Project Falcon"
+],
+[
+"TERM",
+"Zoë Müller"
+]
+]
+},
+{
+"text": "ZOË MÜLLER signed",
+"labels": [
+[
+"TERM",
+"ZOË MÜLLER"
+]
+]
+},
+{
+"text": "C++ Partners and AT&T are clients",
+"labels": [
+[
+"TERM",
+"C++ Partners"
+],
+[
+"TERM",
+"AT&T"
+]
+]
+},
+{
+"text": "Acme  Corp (double space) and Acme\nCorp (line break)",
+"labels": [
+[
+"TERM",
+"Acme  Corp"
+],
+[
+"TERM",
+"Acme\nCorp"
+]
+]
+},
+{
+"text": "Doe, Jane will join",
+"labels": [
+[
+"TERM",
+"Doe, Jane"
+]
+]
+},
+{
+"text": "#AcmeCorp trending",
+"labels": [
+[
+"TERM",
+"AcmeCorp"
+]
+]
+},
+{
+"text": "jane.doe@acme-corp.com is Jane Doe",
+"labels": [
+[
+"EMAIL",
+"jane.doe@acme-corp.com"
+],
+[
+"TERM",
+"Jane Doe"
+]
+]
+},
+{
+"text": "Acmeco and Falconry are different words",
+"labels": []
+},
+{
+"text": "Hi team,\nplease wire €12,500 to IBAN DE89 3704 0044 0532 0130 00 (ref INV-2026-0042) and confirm with Jane Doe at jane.doe@acme-corp.com or +49 151 23456789. Thanks!",
+"labels": [
+[
+"IBAN",
+"DE89 3704 0044 0532 0130 00"
+],
+[
+"TERM",
+"Jane Doe"
+],
+[
+"EMAIL",
+"jane.doe@acme-corp.com"
+],
+[
+"PHONE",
+"+49 151 23456789"
+]
+]
+},
+{
+"text": "Customer: Ana Lima, DOB 1990-07-21, card 5555 5555 5555 4444, phone +55 11 91234-5678, ana.lima@example.com.br",
+"labels": [
+[
+"DOB",
+"1990-07-21"
+],
+[
+"CARD",
+"5555 5555 5555 4444"
+],
+[
+"PHONE",
+"+55 11 91234-5678"
+],
+[
+"EMAIL",
+"ana.lima@example.com.br"
+]
+]
+},
+{
+"text": "| name | email | phone |\n|---|---|---|\n| Bob | bob@example.com | 020 7946 0958 |\n| Ann | ann@example.com | 0161 496 0000 |",
+"labels": [
+[
+"EMAIL",
+"bob@example.com"
+],
+[
+"PHONE",
+"020 7946 0958"
+],
+[
+"EMAIL",
+"ann@example.com"
+],
+[
+"PHONE",
+"0161 496 0000"
+]
+]
+},
+{
+"text": "name,email,phone\nBob,bob@example.com,+442079460958\nAnn,ann@example.com,+441614960000",
+"labels": [
+[
+"EMAIL",
+"bob@example.com"
+],
+[
+"PHONE",
+"+442079460958"
+],
+[
+"EMAIL",
+"ann@example.com"
+],
+[
+"PHONE",
+"+441614960000"
+]
+]
+},
+{
+"text": "Release notes v3.2.1 (2026-10-05): fixed #4521, bumped deps 1.4.2 -> 1.5.0, see PR 1234.",
+"labels": []
+},
+{
+"text": "The meeting is 10/05/2026 10:00-11:30 in room 4.12, dial-in code 123 456 789#",
+"labels": [
+[
+"AMBIG",
+"123 456 789"
+]
+]
+},
+{
+"text": "Quarterly KPIs: 1,204 users; 98.6% uptime; p95 120 ms; NPS 42; MRR $48,200.",
+"labels": []
+},
+{
+"text": "I'm writing about invoice 2026-0915-0042 dated 15.09.2026 for €1.234,56.",
+"labels": []
+},
+{
+"text": "Call me on 0049 30 12345678 or 0044 20 7946 0958",
+"labels": [
+[
+"PHONE",
+"0049 30 12345678"
+],
+[
+"PHONE",
+"0044 20 7946 0958"
+]
+]
+},
+{
+"text": "Tel. 030/1234567 (Zentrale)",
+"labels": [
+[
+"PHONE",
+"030/1234567"
+]
+]
+},
+{
+"text": "Fax: 0221/98765432",
+"labels": [
+[
+"PHONE",
+"0221/98765432"
+]
+]
+},
+{
+"text": "Rechnung 2024/0123 vom 05/10/2026, Seite 1/12",
+"labels": []
+},
+{
+"text": "secret commit da39a3ee5e6b4b0d3255bfef95601890afd80709 was reverted",
+"labels": []
+},
+{
+"text": "ok, my password is S3cure!pass now",
+"labels": [
+[
+"SECRET",
+"S3cure!pass"
+]
+]
+},
+{
+"text": "The token is invalid, and your password is required.",
+"labels": []
+},
+{
+"text": "the secret is simple: ship it",
+"labels": []
+},
+{
+"text": "compass: northwest; bypass=enabled",
+"labels": []
+},
+{
+"text": "password = os.environ[\"DB_PASSWORD\"]\ntoken = get_token(user)",
+"labels": []
+},
+{
+"text": "cards 4111 1111 1111 1111 5555 5555 5555 4444 on file",
+"labels": [
+[
+"CARD",
+"4111 1111 1111 1111"
+],
+[
+"CARD",
+"5555 5555 5555 4444"
+]
+]
+},
+{
+"text": "card 4012 8888 8888 1881 123 (cvv)",
+"labels": [
+[
+"CARD",
+"4012 8888 8888 1881"
+]
+]
+},
+{
+"text": "Visa 4242 4242 4242 4242 09/29",
+"labels": [
+[
+"CARD",
+"4242 4242 4242 4242"
+]
+]
+},
+{
+"text": "forward it to git@example.org please",
+"labels": [
+[
+"EMAIL",
+"git@example.org"
+]
+]
+},
+{
+"text": "git remote add origin git@gitlab.example.com:team/app.git",
+"labels": []
+},
+{
+"text": "Kontakt: zoë.müller@example.de",
+"labels": [
+[
+"EMAIL",
+"zoë.müller@example.de"
+]
+]
+},
+{
+"text": "call me on 2026-10-05 14:30 or later",
+"labels": []
+},
+{
+"text": "we'll call 2024 2025 the transition years",
+"labels": []
+},
+{
+"text": "Serial AB12 0456 7890 12 is out of warranty",
+"labels": []
+},
+{
+"text": "Update #ProjectX status before Friday",
+"labels": [
+[
+"TERM",
+"#ProjectX"
+]
+]
+},
+{
+"text": "acme_corp and ACME-CORP are the same client as AcmeCorp",
+"labels": [
+[
+"TERM",
+"acme_corp"
+],
+[
+"TERM",
+"ACME-CORP"
+],
+[
+"TERM",
+"AcmeCorp"
+]
+]
+},
+{
+"text": "wifi: CoffeeShop pw: latte4life",
+"labels": [
+[
+"SECRET",
+"latte4life"
+]
+]
+},
+{
+"text": "pw: Tr0ub4dor&3",
+"labels": [
+[
+"SECRET",
+"Tr0ub4dor&3"
+]
+]
+},
+{
+"text": "curl -u admin:S3cretPass https://api.example.com/v1/items",
+"labels": [
+[
+"SECRET",
+"S3cretPass"
+]
+]
+},
+{
+"text": "curl -s --user \"ops:Pa55word\" https://status.example.net",
+"labels": [
+[
+"SECRET",
+"Pa55word"
+]
+]
+},
+{
+"text": "mysql --password=Hunter2! --host db.internal app",
+"labels": [
+[
+"SECRET",
+"Hunter2!"
+]
+]
+},
+{
+"text": "deploy-tool --token 9f8e7d6c5b4a39281706 --env prod",
+"labels": [
+[
+"SECRET",
+"9f8e7d6c5b4a39281706"
+]
+]
+},
+{
+"text": "Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==",
+"labels": [
+[
+"SECRET",
+"dXNlcjpwYXNzd29yZDEyMw=="
+]
+]
+},
+{
+"text": "docker run -u 1000:1000 -v $PWD:/w image",
+"labels": []
+},
+{
+"text": "sudo -u www-data:www-data php artisan migrate",
+"labels": []
+},
+{
+"text": "restic backup --password-file /run/secrets/restic ~/work",
+"labels": []
+},
+{
+"text": "gh auth login --token $GITHUB_TOKEN",
+"labels": []
+},
+{
+"text": "curl -u \"$API_USER:$API_PASS\" https://api.example.com",
+"labels": []
+},
+{
+"text": "WWW-Authenticate: Basic realm=\"Restricted\"",
+"labels": []
+},
+{
+"text": "the basic idea: keep the pw in the vault",
+"labels": []
+},
+{
+"text": "Text me at 555 0100 ext 22",
+"labels": [
+[
+"PHONE",
+"555 0100"
+]
+]
+},
+{
+"text": "call me on 4155550132 after six",
+"labels": [
+[
+"PHONE",
+"4155550132"
+]
+]
+},
+{
+"text": "call count: 12345678 this month",
+"labels": []
+},
+{
+"text": "SMS sent: 1 234 567 in Q3",
+"labels": []
+},
+{
+"text": "Revenue per call: 1234567.89",
+"labels": []
+},
+{
+"text": "Call ID 99031277 lasted 41 minutes",
+"labels": []
+},
+{
+"text": "curl https://api.example.com/v1/items \\\n  -u admin:S3cretPass99 \\\n  -d 'name=widget'",
+"labels": [
+[
+"SECRET",
+"S3cretPass99"
+]
+]
+},
+{
+"text": "curl \"https://api.example.com/v1/items\" ^\r\n  -u ops:Win-Pass42 ^\r\n  -H \"Accept: application/json\"",
+"labels": [
+[
+"SECRET",
+"Win-Pass42"
+]
+]
+},
+{
+"text": "vault-cli login --password Tr1cky-pass --user ops",
+"labels": [
+[
+"SECRET",
+"Tr1cky-pass"
+]
+]
+},
+{
+"text": "curl -fsSL https://get.example.sh | sh\ndocker run -u app:app-group registry.example/img",
+"labels": []
+},
+{
+"text": "X-Debug: Basic aGVsbG8gd29ybGQ=",
+"labels": []
+},
+{
+"text": "Her new 19-digit Visa is 4111 1111 1111 1111 003, exp 09/29",
+"labels": [
+[
+"CARD",
+"4111 1111 1111 1111 003"
+]
+]
+},
+{
+"text": "the review is on 05.10.2026 09.30 in room 4",
+"labels": []
+}
+],
+"known_misses": [
+[
+"EMAIL",
+"eve at example dot com"
+]
+]
+}

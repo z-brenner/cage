@@ -546,12 +546,16 @@ port = \"9830\"
   # Cursor asks before it uses an MCP server, and headless nobody can answer: once you've connected apps for it
   # (connector_plan runs first), approve them.
   if [ "$a" = cursor ] && [ -s "$dir/connectors.list" ]; then cmd="$cmd --approve-mcps"; fi
-  if mask_on "$a"; then   # the privacy mask runs the CLI (guest/mask.py)
-    cmd="python3 /cage/mask.py ${cmd:-$a}"
-    ( umask 077; cat "$MASK_TERMS" 2>/dev/null > "$dir/mask.terms" || true; : > "$dir/mask.on" )
+  if mask_on "$a"; then   # the privacy mask runs the CLI (guest/mask.py); mask.on also tells memory.sh its kinds
+    v="$(mask_cmd)" || die "CAGE_MASK_TYPES in $CAGE_ENV names a kind the mask doesn't know (it knows: $MASK_KINDS)"
+    cmd="$v ${cmd:-$a}"
+    ( umask 077; mask_types > "$dir/mask.on" )
   else
-    rm -f "$dir/mask.terms" "$dir/mask.on"
+    rm -f "$dir/mask.on"
   fi
+  # Your terms go to a masked agent, and to one that /all or a stand-in can pass what you told a masked agent: its
+  # own mask.py hides them there (ask_agent). Nowhere else: they'd tell that AI company who you keep private.
+  if mask_terms_for "$a"; then ( umask 077; cat "$MASK_TERMS" 2>/dev/null > "$dir/mask.terms" || true ); else rm -f "$dir/mask.terms"; fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
   if [ "$a" = claude ] && [ "$(cvar APPROVE "$a")" = on ] && [ "$CAGE_MODE" = yolo ]; then
     tools="allowed_tools = [$(printf '"%s",' $CLAUDE_INSIDE | sed 's/,$//')]"
@@ -2575,13 +2579,34 @@ ask_script() { # the agent's CLI answering one question ($1): read-only, no apps
   esac
 }
 
-ask_agent() { # ask_agent <agent> <question>: its answer on stdout (empty if it couldn't)
-  local script
-  script="$(ask_script "$1")"
-  if mask_on "$1"; then script="exec python3 /cage/mask.py ${script#exec }"; fi   # its privacy mask applies here too
-  timeout "$ASK_TIMEOUT" "$MSB" exec --no-tty -u agent -e HOME=/home/agent -w /home/agent/work "$(vm "$1")" -- \
-    bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
-      PATH="/usr/local/bin:/usr/bin:/bin"; '"$script" _ "$2" 2>/dev/null | head -c 12000
+ask_agent() { # ask_agent <from> <to> <question>: <to>'s answer on stdout (empty if it couldn't); <from> is the agent
+  # whose chat it came from, or empty (cage ask)
+  local from="$1" to="$2" script m id f n=0
+  script="$(ask_script "$to")"
+  # Its own privacy mask applies here, and so does the asking agent's: what you told a masked agent stays masked when
+  # /all or a stand-in passes it on. The target's mask.py hides it, with that VM's map, and unmasks the answer.
+  if mask_on "$from" || mask_on "$to"; then
+    m="$(mask_cmd)" || m="python3 /cage/mask.py"
+    script="exec $m ${script#exec }"
+  fi
+  # The question goes in a file in the VM's read-only /cage-config, like deliver()'s messages: on a command line,
+  # anyone on this computer could read it with ps. The VM reads it as root, then runs the CLI as its own user.
+  # A new file every time (set -C): two relays to one agent in the same second never swap questions.
+  mkdir -p "$CAGE_HOME/agents/$to/replies"
+  while :; do
+    id="$(date +%s)-$$-$RANDOM"
+    f="$CAGE_HOME/agents/$to/replies/$id.q"
+    ( umask 077; set -C; printf '%s' "$3" > "$f" ) 2>/dev/null && break
+    n=$((n + 1)); [ "$n" -lt 20 ] || return 0
+  done
+  # A CLI that fails (signed out, out of quota, too slow) or says more than 12 KB still ends here, so the question
+  # never stays on disk: `|| true`, as under set -e (cmd_ask) a failed pipeline would leave before the rm.
+  timeout "$ASK_TIMEOUT" "$MSB" exec --no-tty -w /home/agent/work "$(vm "$to")" -- bash -c 'q="$(cat "$1")" || exit 1
+      exec runuser -u agent -- env -i HOME=/home/agent USER=agent LOGNAME=agent SHELL=/bin/bash LANG=C.UTF-8 \
+        PATH=/usr/local/bin:/usr/bin:/bin TERM=xterm-256color bash -c "$2" _ "$q"' _ "/cage-config/replies/$id.q" \
+    'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
+      '"$script" 2>/dev/null | head -c 12000 || true
+  rm -f "$f"
 }
 
 deliver() { # deliver <agent> <session key> <text>: a message into that chat, from the agent's own bot
@@ -2603,7 +2628,7 @@ ask_dispatch() { # ask_dispatch <from> <session key> <question>: the other awake
   refresh_running
   for a in $CAGE_AGENTS; do
     [ "$a" != "$from" ] && agent_awake "$a" || continue
-    ( ans="$(ask_agent "$a" "$q")"
+    ( ans="$(ask_agent "$from" "$a" "$q")"
       [ -n "$ans" ] || ans="(no answer: it may be signed out, busy, or out of quota)"
       deliver "$from" "$key" "↪ $(agent_name "$a"):"$'\n\n'"$ans" ) &
   done
@@ -2620,7 +2645,7 @@ The recent conversation, oldest first (\"Agent\" is $(agent_name "$from")):
 $4
 
 Reply to the user's last message."
-  ans="$(ask_agent "$to" "$q")"
+  ans="$(ask_agent "$from" "$to" "$q")"
   [ -n "$ans" ] || ans="(no answer: it may be signed out, busy, or out of quota too)"
   deliver "$from" "$3" "↪ $(agent_name "$from") is out of quota for now, so $(agent_name "$to") answered:"$'\n\n'"$ans"
 }
@@ -2681,7 +2706,7 @@ cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
     agent_awake "$a" || { warn "$(agent_name "$a") is asleep, so it wasn't asked"; continue; }
     n=$((n + 1))
     asked+=("$a")
-    ( ask_agent "$a" "$q" > "$tmp/$a"; : > "$tmp/$a.done" ) &
+    ( ask_agent "" "$a" "$q" > "$tmp/$a" || true; : > "$tmp/$a.done" ) &   # done even if it failed: the app waits for it
   done
   [ "$n" -gt 0 ] || { rm -rf "$tmp"; die "no agent is awake: cage up"; }
   if [ -n "$PROTO" ]; then   # the web app shows the answers side by side, each as soon as it's in
@@ -2707,7 +2732,8 @@ cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
   for a in "${who[@]}"; do
     [ -f "$tmp/$a" ] || continue
     printf '\n  %s %s%s%s\n' "$(face "$a" ready)" "$C_B" "$(agent_name "$a")" "$C_0"
-    if [ -s "$tmp/$a" ]; then sed 's/^/    /' "$tmp/$a"; else printf '    %s(no answer: signed out, busy, or out of quota?)%s\n' "$C_DIM" "$C_0"; fi
+    # an answer is the VM's text: without terminal control codes, it can't rewrite the screen or set the clipboard
+    if [ -s "$tmp/$a" ]; then safe_text < "$tmp/$a" | sed 's/^/    /'; else printf '    %s(no answer: signed out, busy, or out of quota?)%s\n' "$C_DIM" "$C_0"; fi
   done
   printf '\n'
   rm -rf "$tmp"
@@ -2858,18 +2884,45 @@ voice_config() { # voice_config <agent>: its [speech] block, and the settings fo
 # --- privacy mask -------------------------------------------------------------------------------------------------
 # Optional, per agent (`cage mask on`): guest/mask.py sits between cc-connect and the agent's CLI and swaps
 # sensitive values in your messages (emails, phone and card numbers, IBANs, keys, your own terms) for tokens like
-# [EMAIL_1] before they reach the model, and back again in what the agent says to you.
+# [EMAIL_1] before they reach the model, and back again in what the agent says to you. Your About me (about-me.md)
+# and your notes' names and titles are masked the same way (guest/memory.sh). What the agent opens with its tools
+# (files, notes, web pages, your apps) is not. Each VM keeps the real values (its map) until 90 days unused, or until
+# `cage mask forget`. CAGE_MASK_TYPES picks the kinds (default: email phone card iban ssn secret term; also: ip mac
+# crypto dob passport id bank address).
 MASK_TERMS="$CAGE_HOME/mask.terms"
-mask_on() { [[ " ${CAGE_MASK:-} " == *" $1 "* ]]; }
+MASK_KINDS="email phone card iban ssn secret term ip mac crypto dob passport id bank address"
+mask_on() { [ -n "$1" ] && [[ " ${CAGE_MASK:-} " == *" $1 "* ]]; }   # (no agent, like cage ask's source: off)
+mask_terms_for() { # mask_terms_for <agent>: does its VM need your terms (its own mask, or a relay from a masked agent)?
+  local m
+  mask_on "$1" && return 0
+  for m in ${CAGE_MASK:-}; do
+    [ "$m" != "$1" ] || continue
+    [ "${CAGE_ASK_ALL:-off}" = on ] && return 0       # /all from the masked agent's chat asks this one
+    [ "$(cvar FALLBACK "$m")" = "$1" ] && return 0    # it stands in for the masked agent
+  done
+  return 1
+}
+mask_types() { # the kinds CAGE_MASK_TYPES names, comma-separated (empty: the mask's own default); false on an unknown one
+  local t list="" v="${CAGE_MASK_TYPES:-}"
+  for t in ${v//,/ }; do
+    case " $MASK_KINDS " in *" $t "*) list="$list${list:+,}$t" ;; *) return 1 ;; esac
+  done
+  printf '%s' "$list"
+}
+mask_cmd() { # the privacy mask's command in a VM, before the CLI it runs
+  local t
+  t="$(mask_types)" || return 1
+  printf 'python3 /cage/mask.py%s' "${t:+ --types $t}"
+}
 
-cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>"]
+cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>" | forget]
   load_env
   local sub="${1:-}" a cur new t
   shift || true
   case "$sub" in
     "")
       say "privacy mask: ${C_B}${CAGE_MASK:-off}${C_0}"
-      hint "cage mask on [agents] · cage mask add \"Client name\" · cage mask try \"text\" · cage mask off"
+      hint "cage mask on [agents] · cage mask add \"Client name\" · cage mask try \"text\" · cage mask forget · cage mask off"
       return 0 ;;
     on|off)
       local who=("$@")
@@ -2883,7 +2936,10 @@ cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>"]
       done
       set_env CAGE_MASK "$cur"; CAGE_MASK="$cur"
       if [ "$sub" = on ]; then
-        ok "privacy mask on for ${who[*]}: emails, phone and card numbers, IBANs, keys and your terms reach the model as tokens"
+        ok "privacy mask on for ${who[*]}: in what you type, your About me and your notes' names and titles, emails, phone and card numbers, bank details, keys and your terms reach the AI company as placeholders like [EMAIL_1]"
+        hint "not covered: files and pictures you send, notes and web pages the agent opens, and app results reach the AI company as they are; voice notes go to Groq as they are (with cage voice groq)"
+        hint "anyone who can chat with the agent can ask it about masked values, and so can a web page or app result it reads: its replies show the real values"
+        hint "the real values are kept in the agent's VM, so something that tells the agent to look there can find them"
         hint "the agent can't use a masked value itself (it only sees [EMAIL_1]); add your own terms: cage mask add \"…\""
       else
         ok "privacy mask off for ${who[*]}"
@@ -2902,11 +2958,30 @@ cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>"]
     try)
       [ -n "${1:-}" ] || die "usage: cage mask try \"<text>\""
       command -v python3 >/dev/null 2>&1 || die "this needs python3 on this computer"
+      mask_types >/dev/null || die "CAGE_MASK_TYPES in $CAGE_ENV names a kind the mask doesn't know (it knows: $MASK_KINDS)"
       t="$(mktemp -d)"
       say "what the AI vendor would get:"
-      block "$(printf '%s' "$*" | CAGE_MASK_MAP="$t/map.json" CAGE_MASK_TERMS="$MASK_TERMS" python3 "$CAGE_ROOT/guest/mask.py" --mask)"
-      rm -rf "$t" ;;
-    *) die "usage: cage mask [on|off [agents] | add|rm <term> | list | try \"<text>\"]" ;;
+      new="$(printf '%s' "$*" | CAGE_MASK_MAP="$t/map.json" CAGE_MASK_TERMS="$MASK_TERMS" CAGE_MASK_TYPES="${CAGE_MASK_TYPES:-}" \
+        python3 "$CAGE_ROOT/guest/mask.py" --mask)"
+      block "$new"
+      rm -rf "$t"
+      [[ "$new" != *"〔"* && "$new" != *"〘"* ]] || hint "〔EMAIL_1〕: a placeholder you typed goes as it is, so it can't reveal a real value" ;;
+    forget)   # each VM keeps the real values behind its placeholders (its map): drop them, but not the numbers used,
+      # so an old placeholder can't come to mean someone new (guest/mask.py)
+      find_msb || die "microsandbox isn't installed: run cage"
+      refresh_running
+      for a in $CAGE_AGENTS; do
+        exists "$a" || continue
+        if ! agent_awake "$a"; then warn "$(agent_name "$a") is asleep, so it still keeps its masked values: cage up $a, then cage mask forget"; continue; fi
+        # and its notes get placeholders afresh (guest/memory.sh)
+        if t="$("$MSB" exec --no-tty "$(vm "$a")" -- bash -c 'f=/home/agent/.cage/mask/map.json; if [ -e "$f" ]; then runuser -u agent -- flock "$f.lock" rm -f "$f" || exit 1; echo forgot; fi; bash /cage/memory.sh "$1" >/dev/null' _ "$a" 2>/dev/null)"; then
+          if [ "$t" = forgot ]; then ok "$(agent_name "$a") forgot the values behind its placeholders"; else say "$(agent_name "$a") had no masked values"; fi
+        else
+          warn "couldn't reach $(agent_name "$a"); try again in a moment"
+        fi
+      done
+      hint "start new conversations (/new): older ones still mention placeholders that now mean nothing" ;;
+    *) die "usage: cage mask [on|off [agents] | add|rm <term> | list | try \"<text>\" | forget]" ;;
   esac
 }
 
