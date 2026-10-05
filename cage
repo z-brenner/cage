@@ -2341,6 +2341,12 @@ up_one() {
     "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" 2>"$2"
 }
 
+msb_said() { # msb_said <file>: why msb didn't start a VM, from what it printed: its error and the lines under it
+  # (without its warnings or its own advice to run msb logs), text only
+  grep -v '^[[:space:]]*warn' "$1" | sed -e 's/^[[:space:]]*//' -e 's/^error: *//' -e 's/^→ *//' -e 's/^other: *//' |
+    grep -v -e '^$' -e '^run .*msb logs' | safe_text | head -n 4 | cut -c1-200 || true
+}
+
 msb_private() { # microsandbox keeps each agent's home volume (its logins, its work) here: for your eyes only
   local m="${MSB_HOME:-$HOME/.microsandbox}" d
   for d in "$m" "$m/volumes" "$m/db"; do
@@ -2355,7 +2361,7 @@ cmd_up() {
   msb_private
   brain_init "${AGENTS[@]}"
   if oauth_any; then oauth_refresh_all 1800; fi
-  local a rc err said started=() failed=()
+  local a rc err said more started=() failed=()
   err="$(mktemp)"
   for a in "${AGENTS[@]}"; do
     : > "$err"
@@ -2369,8 +2375,10 @@ cmd_up() {
       [ "$UI" = 1 ] || ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"
     else
       failed+=("$a")
-      said="$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;s/^error: *//;p;q;}' "$err" | safe_text | cut -c1-200)"
+      said="$(msb_said "$err")"
+      more="$(printf '%s\n' "$said" | sed 1d)" said="$(printf '%s\n' "$said" | head -n 1)"
       bad "couldn't start $a${said:+: $said}"
+      if [ -n "$more" ]; then block "$more"; fi
       if [ -n "$said" ]; then hint "cage logs $a"; fi
     fi
   done
@@ -2505,7 +2513,7 @@ vm_there() { # vm_there <agent> [awake]: stops, in plain words, when microsandbo
 }
 
 cmd_logs() { # cage logs <agent> [--tail N | -f]: the last lines its VM printed (200 unless you say), or follow along
-  local a="" n=200 follow=0 usage="usage: cage logs <agent> [--tail N | -f]"
+  local a="" n=200 follow=0 out usage="usage: cage logs <agent> [--tail N | -f]"
   [ -z "$PROTO" ] || follow=1   # the app's activity log is a live view
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -2520,7 +2528,12 @@ cmd_logs() { # cage logs <agent> [--tail N | -f]: the last lines its VM printed 
   check_agent "$a"
   vm_there "$a"
   if [ $follow = 1 ]; then exec "$MSB" logs --tail "$n" -f "$(vm "$a")"; fi
-  exec "$MSB" logs --tail "$n" "$(vm "$a")"
+  out="$("$MSB" logs --tail "$n" "$(vm "$a")")"
+  if [ -n "$out" ]; then printf '%s\n' "$out"; return 0; fi
+  # A VM that never got going printed nothing itself. Why it stopped is in what microsandbox noted about it.
+  say "$a's VM hasn't printed anything; here's what microsandbox noted about it:"
+  out="$("$MSB" logs --source system --tail "$n" "$(vm "$a")")"
+  if [ -n "$out" ]; then printf '%s\n' "$out"; else say "nothing yet"; fi
 }
 cmd_shell() {
   [ -n "${1:-}" ] || die "usage: cage shell <agent>"

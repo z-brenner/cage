@@ -21,8 +21,12 @@ cat > "$T/bin/msb" <<'EOF'
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
-if [ "$cmd" = run ] && [ -n "${MSB_FAIL_RUN:-}" ]; then   # msb refuses to start that VM
-  case " $* " in *" --name $MSB_FAIL_RUN "*) echo "error: failed to allocate 4G of memory" >&2; exit 1 ;; esac
+if [ "$cmd" = run ] && [ -n "${MSB_FAIL_RUN:-}" ]; then   # that VM doesn't start (in msb 0.7.5's words)
+  case " $* " in *" --name $MSB_FAIL_RUN "*)
+    printf 'warn: sandbox %s already exists; creation flags ignored\nerror: failed to start "%s"\n' "$MSB_FAIL_RUN" "$MSB_FAIL_RUN" >&2
+    printf '  → other: sandbox process exited (signal: 6 (SIGABRT)) before agent relay became available\n' >&2
+    printf '  → run `msb logs --source system %s` for full diagnostics\n' "$MSB_FAIL_RUN" >&2; exit 1 ;;
+  esac
 fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
 if [ "$cmd" = stop ] && [ "$1" = -t ] && [ -n "${MSB_STOP_STUCK:-}" ]; then   # that VM doesn't stop within the time given
@@ -791,7 +795,13 @@ ok "voice notes through Groq: the key reaches VMs only while that's on, is repla
   : > "$MSB_LOG"
   rc=0; MSB_FAIL_RUN=cage-claude "$ROOT/cage" up </dev/null 2>"$T/b.err" || rc=$?
   [ $rc = 1 ] || fail "up said all is well with an agent that didn't start (exit $rc): $(cat "$T/b.err")"
-  grep -q "couldn't start claude: failed to allocate 4G of memory" "$T/b.err" && grep -q 'cage logs claude' "$T/b.err" || fail "no plain message: $(cat "$T/b.err")"
+  grep -q "couldn't start claude: failed to start \"cage-claude\"" "$T/b.err" && grep -q 'cage logs claude' "$T/b.err" \
+    && grep -q '^ *sandbox process exited (signal: 6 (SIGABRT)) before agent relay became available$' "$T/b.err" || fail "no plain message: $(cat "$T/b.err")"
+  if grep -q 'creation flags\|msb logs' "$T/b.err"; then fail "msb's warnings or advice shown as why: $(cat "$T/b.err")"; fi
+  # the VM never printed a thing; cage logs then shows what microsandbox noted about it
+  echo cage-claude > "$T/b.vms"; printf 'thread main panicked: Error creating the Kvm object: Error(2)\n' > "$T/b.syslog"
+  out="$(MSB_EXISTING="$T/b.vms" MSB_SYSLOG="$T/b.syslog" "$ROOT/cage" logs claude 2>&1)"
+  grep -q "claude's VM hasn't printed anything" <<<"$out" && grep -q 'Error creating the Kvm object' <<<"$out" || fail "cage logs for a VM that never started: $out"
   for a in codex cursor; do grep -q -- "--name | cage-$a |" "$MSB_LOG" || fail "$a wasn't started after claude failed: $(cat "$T/b.err")"; done
   for _ in $(seq 20); do pgrep -f -- "$ROOT/cage _refresh" >/dev/null && break; sleep 0.2; done
   pgrep -f -- "$ROOT/cage _refresh" >/dev/null || fail "the background helper wasn't started"
