@@ -403,6 +403,7 @@ fi
 ok "/all, stand-ins and voice notes: hooks, the /all command, local speech-to-text, the outbox mount"
 
 # guest/hook.sh as cc-connect runs it: everything in environment variables
+pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `ask-all on` started would race `cage _outbox` below)
 O="$CAGE_HOME/outbox/claude"
 hook() { env -i HOME="$T/vmhome" PATH="$PATH" CAGE_OUTBOX="$O" CC_HOOK_SESSION_KEY="telegram:111:111" "$@" bash "$ROOT/guest/hook.sh" ask fallback; }
 hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="hi there"
