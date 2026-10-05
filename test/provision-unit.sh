@@ -3,6 +3,7 @@
 # with their functions loaded on their own (CAGE_PROVISION_LIB=1, CAGE_ENTRY_LIB=1) and stub apt-get, node, npm and
 # curl first on PATH: apt's time limits hold even where bash ignores set -e, Playwright never runs apt itself,
 # cc-connect must match its checksum, and `cage update` falls back to the cache. Needs GNU coreutils (Linux).
+# shellcheck disable=SC2034  # the cases below set provision.sh's own variables, for its functions
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"

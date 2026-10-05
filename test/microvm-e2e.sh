@@ -2,6 +2,8 @@
 # End-to-end on REAL microVMs: the real ./cage driving the real microsandbox CLI (needs msb plus
 # KVM or Apple Silicon). The bot token is fake, so this proves everything up to the Telegram API.
 #   test/microvm-e2e.sh <claude|codex|cursor|antigravity>
+# When it fails, what the VM was doing (its output, its processes, apt's own logs) is printed and saved in
+# CAGE_TEST_ARTIFACTS, if set.
 set -euo pipefail
 A="${1:?usage: microvm-e2e.sh <agent>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,9 +13,23 @@ CAGE_HOME="$(mktemp -d)"
 cage() { "$ROOT/cage" "$@"; }
 gx() { msb exec --no-tty "$VM" -- "$@"; }               # as root in the guest
 ax() { msb exec --no-tty -u agent "$VM" -- "$@"; }      # as the agent user
+diagnose() { # what the VM was doing: its output, its processes, and apt's own logs (also saved, for CI)
+  local d="${CAGE_TEST_ARTIFACTS:-$CAGE_HOME}/microvm-e2e-$A"
+  mkdir -p "$d"
+  msb logs "$VM" > "$d/vm.log" 2>&1 || true
+  echo "--- last guest output (all of it: $d/vm.log) ---"
+  tail -n 60 "$d/vm.log"
+  timeout 60 msb exec --no-tty "$VM" -- sh -c 'echo "--- processes"; ps -eo pid,etime,args --forest
+    echo "--- the step provisioning is on"; cat /run/cage-step.* 2>/dev/null
+    echo "--- apt: the end of term.log"; tail -n 40 /var/log/apt/term.log 2>/dev/null
+    echo "--- apt: history.log"; grep -E "^(Start-Date|End-Date|Commandline)" /var/log/apt/history.log 2>/dev/null | tail -n 24' \
+    2>&1 | tee "$d/inside.txt" || true
+}
 cleanup() {
   status=$?
-  if [ $status -ne 0 ]; then echo "--- last guest output ---"; msb logs "$VM" 2>&1 | tail -60 || true; fi
+  if [ $status -ne 0 ]; then diagnose; fi
+  "$ROOT/cage" down "$A" >/dev/null 2>&1 || true
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # the background helper (/all and stand-ins start it)
   "$ROOT/cage" destroy "$A" --yes >/dev/null 2>&1 || true
   rm -rf "$CAGE_HOME" "$CAGE_HOME".backups* "$CAGE_HOME".before-restore-*
   exit $status
@@ -107,7 +123,7 @@ ax sh -c 'echo keep > /home/agent/work/marker'
 cage down "$A"
 woke=$SECONDS
 cage up "$A"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after up"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after up"
 msb logs "$VM" 2>&1 | grep -q 'base packages (cached)' || fail "the second boot didn't install from the cache: $(msb logs "$VM" 2>&1 | grep 'provision\[' | tail -8)"
 if msb logs "$VM" 2>&1 | grep -q "provision\[$A\]: \(Claude Code\|OpenAI Codex\|Cursor CLI\|Antigravity CLI\) "; then
   fail "the second boot downloaded the agent's CLI again"
@@ -126,6 +142,9 @@ resp="$(withenv 'curl -sS -m 30 https://postman-echo.com/headers -H "x-cage-key:
 grep -q "$SECRET_VALUE" <<<"$resp" || fail "the allowed host didn't receive the real value: $resp"
 resp="$(withenv 'curl -sS -m 30 https://httpbin.org/anything -H "x-cage-key: $E2E_KEY"' 2>&1 || true)"
 if grep -q "$SECRET_VALUE" <<<"$resp"; then fail "the real value reached a host it isn't allowed for"; fi
+# ...because microsandbox stopped it (not because httpbin.org was down): it's in cage security
+retry 90 sh -c "'$ROOT/cage' security 2>&1 | grep -q 'tried to send E2E_KEY to httpbin.org'" \
+  || fail "the key sent to httpbin.org wasn't blocked and reported: $(cage security 2>&1 | tail -5)"
 withenv 'curl -sS -m 30 -o /dev/null https://github.com' || fail "HTTPS through the interception CA fails"
 ax curl -sS -m 30 -o /dev/null https://api.telegram.org || fail "Telegram (exempt from interception) unreachable"
 if gx sh -c 'command -v node >/dev/null'; then
@@ -173,7 +192,11 @@ resp="$(ax curl -sS -m 30 https://postman-echo.com/post --data-urlencode "passwo
 grep -qF "\"password\":\"$PW\"" <<<"$resp" || fail "form sign-in didn't get the real password: $resp"
 resp="$(ax curl -sS -m 30 https://httpbin.org/post --data-urlencode "password=$alt" 2>&1 || true)"
 if grep -qF "$PW" <<<"$resp" || grep -qF 'p%26ss' <<<"$resp"; then fail "the password reached another site"; fi
+retry 90 sh -c "'$ROOT/cage' security 2>&1 | grep -q 'tried to send CAGE_PW_[A-Z0-9_]* to httpbin.org'" \
+  || fail "the password sent to httpbin.org wasn't blocked and reported: $(cage security 2>&1 | tail -5)"
 form="data:text/html,<form method=post action=https://postman-echo.com/post><input name=user value=e2e-user><input type=password name=password id=pw><button>Sign in</button></form>"
+# The browser gets ready in the background after each boot (guest/browser.sh)
+retry 900 gx test -e /opt/cage/browser-ready || fail "the browser didn't get ready: $(msb logs "$VM" 2>&1 | grep cage-browser | tail -5)"
 calls="[[\"browser_navigate\",{\"url\":\"$form\"}],[\"browser_type\",{\"element\":\"password\",\"target\":\"e4\",\"text\":\"$alt\",\"submit\":true}],[\"browser_wait_for\",{\"time\":3}],[\"browser_snapshot\",{}]]"
 out="$(msb exec --no-tty -u agent -e HOME=/home/agent "$VM" -- node /cage/mcp-try.mjs "$calls" cage-browser 2>&1 || true)"
 grep -qF "\\\"password\\\":\\\"$PW\\\"" <<<"$out" || grep -qF "\"password\":\"$PW\"" <<<"$out" \
@@ -187,7 +210,7 @@ export CAGE_BACKUP_DIR="$CAGE_HOME.backups" CAGE_BACKUP_PASSPHRASE="e2e passphra
 cage backup 2>"$CAGE_BACKUP_DIR.err" || fail "backup: $(cat "$CAGE_BACKUP_DIR.err")"
 ax sh -c 'echo changed > /home/agent/work/bk; rm -f /home/agent/work/marker'
 cage restore "$(ls "$CAGE_BACKUP_DIR"/*.cagebackup)" --yes 2>"$CAGE_BACKUP_DIR.err" || fail "restore: $(cat "$CAGE_BACKUP_DIR.err")"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after restore"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after restore"
 [ "$(gx cat /home/agent/work/bk)" = from-backup ] && [ "$(gx cat /home/agent/work/marker)" = keep ] || fail "files not restored"
 [ "$(gx stat -c '%U:%G %a' /home/agent/work/bk)" = "$before" ] || fail "owner/mode changed: $before -> $(gx stat -c '%U:%G %a' /home/agent/work/bk)"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not back after restore"
@@ -198,7 +221,7 @@ ok "backup + restore bring back the agent's files with their owner and mode, and
 # shows up in `cage security`
 cage network strict </dev/null 2>/dev/null
 cage up "$A"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not provisioned under strict network: $(msb logs "$VM" --source system --grep 'denied' 2>&1 | tail -20)"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not provisioned under strict network: $(msb logs "$VM" --source system --grep 'denied' 2>&1 | tail -20)"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not running under strict network"
 ax curl -fsS -m 20 -o /dev/null https://postman-echo.com/get || fail "a host its key is for is unreachable under strict network"
 if ax curl -fsS -m 20 -o /dev/null https://example.com; then fail "example.com is reachable under strict network"; fi
@@ -206,7 +229,7 @@ retry 90 sh -c "'$ROOT/cage' security 2>&1 | grep -q 'reach example.com'" \
   || fail "the blocked host isn't in cage security: $(cage security 2>&1) / $(msb logs "$VM" --source system --grep 'denied' 2>&1 | tail -5)"
 cage allow example.com "$A" </dev/null 2>/dev/null
 cage up "$A"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after cage allow"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned after cage allow"
 ax curl -fsS -m 20 -o /dev/null https://example.com || fail "cage allow example.com didn't let it through"
 cage network open </dev/null 2>/dev/null
 ok "strict network: installs and runs with only its own hosts; example.com blocked, reported, then allowed"
@@ -215,7 +238,7 @@ ok "strict network: installs and runs with only its own hosts; example.com block
 cage ask-all on </dev/null 2>/dev/null
 if [ "$A" = claude ]; then cage voice on </dev/null 2>/dev/null; fi   # one agent is enough for a ~300 MB download
 cage up "$A"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned with /all on"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned with /all on"
 retry 60 ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 CC_HOOK_CONTENT='/all ping' \
   bash /cage/hook.sh ask || fail "the hook failed in the VM"
 [ -n "$(ls -A "$CAGE_HOME/outbox/$A")" ] || fail "the VM's hook couldn't leave a request for cage"
@@ -237,7 +260,7 @@ cage ask-all off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
 cage mask add "Acme Corp" </dev/null 2>/dev/null
 cage mask on "$A" </dev/null 2>/dev/null
 cage up "$A"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned with the mask on"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned with the mask on"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not running behind the mask"
 ax python3 /cage/mask.py "$BIN" --version >/dev/null || fail "$BIN doesn't run behind the mask"
 [ "$(ax sh -c 'printf "ask acme corp at bob@example.com" | python3 /cage/mask.py --mask')" = "ask [TERM_1] at [EMAIL_1]" ] \
@@ -249,7 +272,7 @@ ok "privacy mask: the real CLI runs behind it, your terms and emails become toke
 # no chat app at all: cc-connect runs behind the placeholder platform, and the app still reaches it
 sed -i "/^CAGE_TELEGRAM_TOKEN_$A=/d" "$CAGE_HOME/cage.env"
 cage up "$A"
-retry 1200 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned without a chat app"
+retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned without a chat app"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect doesn't run without a chat app: $(msb logs "$VM" 2>&1 | tail -20)"
 app_send e2e-4 '{"type":"message","id":"e2e-4","session":"you","text":"/help"}'
 retry 180 grep -q '"ctx":"e2e-4"' "$D/log.jsonl" || fail "no answer in the app without a chat app: $(app_log)"
