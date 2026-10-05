@@ -62,12 +62,17 @@ test("cc-connect's management API: only scheduled tasks and status", () => {
 })
 
 test('every kind of message the relay handles is declared to cc-connect', () => {
-  // cc-connect v1.5.0 (platform/bridge/bridge.go) sends these only to an adapter that registered the capability
+  // Everything cc-connect v1.5.0 sends an adapter (platform/bridge/bridge.go), besides register_ack and pong...
+  const sent = ['reply', 'card', 'buttons', 'update_message', 'preview_start', 'delete_message', 'typing_start',
+    'typing_stop', 'audio', 'video', 'image', 'file']
+  // ...and the capability it needs first. Only a reply goes to every adapter.
   const needs = { buttons: 'buttons', card: 'card', update_message: 'update_message', preview_start: 'preview',
     delete_message: 'delete_message', typing_start: 'typing', typing_stop: 'typing', audio: 'audio', video: 'video',
     image: 'image', file: 'file' }
-  for (const [type, cap] of Object.entries(needs)) {
-    if (handles(type)) assert.ok(CAPABILITIES.includes(cap), `the relay handles ${type} but doesn't declare ${cap}`)
+  for (const type of sent) {
+    if (!handles(type) || type === 'reply') continue
+    assert.ok(needs[type], `the relay handles ${type}: add the capability cc-connect needs for it to this test`)
+    assert.ok(CAPABILITIES.includes(needs[type]), `the relay handles ${type} but doesn't declare ${needs[type]}`)
   }
   for (const type of ['reply', 'video', 'preview_start', 'image']) assert.ok(handles(type), type)
   assert.ok(!handles('something_new'))

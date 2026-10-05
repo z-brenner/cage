@@ -175,6 +175,21 @@ test("a write that fails is reported once, and the relay keeps going", async (t)
   await r.logged((e) => e.t === 'reply' && e.text === 'back')
 })
 
+test("a file from the agent that can't be saved is said in the chat, and the relay keeps going", async (t) => {
+  const r = await relay(t)
+  await r.bridge.frame((m) => m.type === 'register')
+  fs.rmSync(path.join(r.dir, 'files'), { recursive: true })
+  fs.writeFileSync(path.join(r.dir, 'files'), '')   // files/ as a file: nothing can be written in it
+  const c = r.bridge.last()
+  c.send({ type: 'file', session_key: 'app:you:you', file_name: 'report.pdf', data: Buffer.from('%PDF').toString('base64') })
+  const e = await r.logged((x) => x.t === 'error')
+  assert.equal(e.text, "The agent sent report.pdf, but it couldn't be saved on your computer.")
+  assert.ok(!r.log().some((x) => x.t === 'file'), 'no file entry for a file that isn\'t there')
+  c.send({ type: 'reply', session_key: 'app:you:you', reply_ctx: 'c', content: 'still here' })
+  await r.logged((x) => x.t === 'reply' && x.text === 'still here')
+  assert.ok(r.alive())
+})
+
 test('the work folder and scheduled tasks are answered while messages wait for cc-connect, and messages keep their order', async (t) => {
   const mgmt = http.createServer((req, res) => res.end(JSON.stringify({ ok: true, path: req.url, auth: req.headers.authorization })))
   await new Promise((resolve) => mgmt.listen(0, '127.0.0.1', resolve))
