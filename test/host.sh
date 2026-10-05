@@ -775,6 +775,11 @@ ok "up: an agent that can't start is named, with why; the others start, and the 
   pid="$(cat "$CAGE_HOME/refresh.pid")"
   "$P/cage" ask-all on </dev/null >/dev/null 2>&1
   [ "$(pgrep -fc -- "$re" || true)" = 1 ] && [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid" ] || fail "a second helper started"
+  # an update replacing cage: half-written, the helper waits; whole again (and new), it carries on as the new one
+  cp "$P/cage" "$T/c.cage"; { head -c 2000 "$T/c.cage"; printf '\nif\n'; } > "$P/cage"
+  sleep 4; kill -0 "$pid" 2>/dev/null || fail "the helper died while cage was being replaced"
+  { cat "$T/c.cage"; echo '# a newer cage'; } > "$P/cage"
+  sleep 4; kill -0 "$pid" 2>/dev/null && [ "$(pgrep -fc -- "$re" || true)" = 1 ] || { pkill -f -- "$re"; fail "the helper didn't carry on after an update"; }
   d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"; mkdir -p "$d"
   printf ask > "$d/kind"; printf 'telegram:1:1' > "$d/session"; printf 'what is 2+2?' > "$d/text"
   for _ in $(seq 40); do [ ! -d "$d" ] && grep -q 'answer from cage-codex to: what is 2+2?' "$T/c.sent" 2>/dev/null && break; sleep 0.2; done

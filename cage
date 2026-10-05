@@ -1289,15 +1289,17 @@ refresher_stop() { helper_stop refresh; }
 # events; every 5 minutes: app sign-ins. Changed settings, or a new cage after an update, start it afresh, so it
 # never works from old ones; and if another helper took over this CAGE_HOME, it goes.
 refresher_loop() {
-  local i=0 sums
+  local i=0 sums now
   load_env
   find_msb || true
   trap 'exit 0' TERM INT
   echo $$ > "$CAGE_HOME/refresh.pid"
-  sums="$(cksum < "$CAGE_ENV" 2>/dev/null; cksum < "$CAGE_ROOT/cage" 2>/dev/null)"
+  sums="$(cksum 2>/dev/null < "$CAGE_ENV" || true; cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
   while :; do
     [ "$(cat "$CAGE_HOME/refresh.pid" 2>/dev/null || true)" = $$ ] || exit 0
-    [ "$(cksum < "$CAGE_ENV" 2>/dev/null; cksum < "$CAGE_ROOT/cage" 2>/dev/null)" = "$sums" ] || exec "$CAGE_ROOT/cage" _refresh
+    # (a cage that's still being replaced by an update, and doesn't read as whole yet, is waited for)
+    now="$(cksum 2>/dev/null < "$CAGE_ENV" || true; cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
+    if [ "$now" != "$sums" ] && bash -n "$CAGE_ROOT/cage" 2>/dev/null; then exec "$CAGE_ROOT/cage" _refresh; fi
     outbox_process || true
     [ $((i % 20)) != 0 ] || events_harvest || true
     [ $((i % 100)) != 0 ] || oauth_refresh_all 900 || true
