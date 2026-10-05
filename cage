@@ -3891,13 +3891,14 @@ cmd_backup() {
   # Agents can keep running: files they change meanwhile are saved as tar finds them. Each agent's in-VM file
   # owners and modes live in extended attributes on the volume (user.*), so those come along. Left out: logs,
   # what cage makes again (msb), and what belongs to this computer only: the web app's key, whether cage starts at
-  # login (a new computer has no login item for it), and the helpers' pids and locks.
+  # login (a new computer has no login item for it), the helpers' pids and locks, and the copies of cage's own
+  # releases that `cage rollback` goes back to (they're the cage installed here, not your agents').
   (umask 077; : > "$out.part")
   set +e
   "$TAR" -c --xattrs --xattrs-include='user.*' \
       --exclude=./refresh.log --exclude=./autostart.log --exclude=./msb \
       --exclude=./ui.token --exclude=./autostart --exclude=./refresh.pid --exclude=./keepalive.pid \
-      --exclude=./.refresh.lock --exclude=./cage.env.lock \
+      --exclude=./.refresh.lock --exclude=./cage.env.lock --exclude=./releases --exclude=./msb-install.log \
       --exclude='cage-*-home/.cache/ms-playwright' --exclude='cage-*-home/.npm' --exclude='cage-*-home/.cache/pip' \
       --exclude='cage-*-home/.cache/cage-voice' \
       --transform='s,^\.\(/\|$\),config/,S' --transform='s,^cage-,volumes/cage-,S' \
@@ -4003,10 +4004,11 @@ cmd_restore() {
   refresher_stop
   old="$CAGE_HOME.before-restore-$(date +%Y%m%d-%H%M%S)"
   mkdir -m 700 "$old" && mkdir "$old/volumes"
-  # What belongs to this computer stays as it is: the web app's key (so the open page keeps working) and whether
-  # cage starts at login. Pids and locks were another computer's (or another time's).
-  ( cd "$stage/config" && rm -rf ui.token autostart refresh.pid keepalive.pid .refresh.lock cage.env.lock )
-  for d in ui.token autostart; do if [ -e "$CAGE_HOME/$d" ]; then cp -p "$CAGE_HOME/$d" "$stage/config/$d"; fi; done
+  # What belongs to this computer stays as it is: the web app's key (so the open page keeps working), whether
+  # cage starts at login, and the releases `cage rollback` goes back to (of the cage installed here). Pids, locks
+  # and microsandbox's install log were another computer's (or another time's).
+  ( cd "$stage/config" && rm -rf ui.token autostart refresh.pid keepalive.pid .refresh.lock cage.env.lock releases msb-install.log )
+  for d in ui.token autostart releases; do if [ -e "$CAGE_HOME/$d" ]; then cp -pR "$CAGE_HOME/$d" "$stage/config/$d"; fi; done
   if [ -e "$CAGE_HOME" ]; then mv "$CAGE_HOME" "$old/config"; fi
   mv "$stage/config" "$CAGE_HOME"
   for d in "$stage"/volumes/*; do

@@ -675,6 +675,9 @@ echo "300MB of browser" > "$V/.cache/ms-playwright/chromium/big"
 echo "codex-login" > "$T/volumes/cage-codex-home/.codex/auth.json"
 python3 -c "import os,sys; os.setxattr(sys.argv[1], 'user.containers.override_stat', b'1000:1000:0100600')" "$V/.claude/.credentials.json" 2>/dev/null && xattrs=1 || xattrs=0
 export CAGE_BACKUP_DIR="$T/backups"
+# the cage installed here: the releases cage rollback goes back to, and microsandbox's install log (cage fix)
+mkdir -p "$CAGE_HOME/releases/v0.3.0" && echo "this computer's cage" > "$CAGE_HOME/releases/v0.3.0/cage-v0.3.0.tar.gz"
+echo "installed msb" > "$CAGE_HOME/msb-install.log"
 if CAGE_BACKUP_PASSPHRASE=short cage backup 2>"$T/err"; then fail "accepted a 5-character passphrase"; fi
 CAGE_BACKUP_PASSPHRASE="correct horse battery" cage backup 2>"$T/err" || fail "backup: $(cat "$T/err")"
 bk="$(ls "$T/backups"/cage-*.cagebackup)"
@@ -685,8 +688,10 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass pass:"correct horse batte
 grep -qx 'manifest.json' "$T/members" && grep -qx 'config/cage.env' "$T/members" && grep -qx 'volumes/cage-claude-home/work/notes.md' "$T/members" \
   || fail "unexpected layout: $(head -20 "$T/members")"
 if grep -q 'ms-playwright\|config/msb/' "$T/members"; then fail "backup has caches or generated files"; fi
-if grep -qx 'config/ui.token\|config/autostart\|config/refresh.pid' "$T/members"; then fail "backup has this computer's own files: $(grep -x 'config/[a-z.]*' "$T/members")"; fi
-ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches)"
+if grep -qx 'config/ui.token\|config/autostart\|config/refresh.pid\|config/msb-install.log' "$T/members" || grep -q '^config/releases' "$T/members"; then
+  fail "backup has this computer's own files: $(grep -e '^config/releases' -e '^config/\(ui.token\|autostart\|refresh.pid\|msb-install.log\)$' "$T/members" | head -n 3)"
+fi
+ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches, nor the cage installed here)"
 
 # restore: on top of changed settings and a wiped volume; a wrong passphrase changes nothing
 cp "$CAGE_HOME/cage.env" "$T/env.saved"
@@ -706,9 +711,11 @@ if [ "$xattrs" = 1 ]; then
     || fail "the in-VM owner and mode (xattr) didn't come back"
 fi
 ls -d "$CAGE_HOME".before-restore-*/volumes/cage-claude-home >/dev/null || fail "what was there before wasn't kept"
+[ "$(cat "$CAGE_HOME/releases/v0.3.0/cage-v0.3.0.tar.gz")" = "this computer's cage" ] || fail "restore lost the releases cage rollback goes back to"
+rm -rf "$CAGE_HOME/releases"
 grep -q '^stop | -t | 30 | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-claude |' "$MSB_LOG" || fail "agents not stopped, then woken: $(cat "$MSB_LOG")"
 rm -rf "$CAGE_HOME".before-restore-*
-ok "restore: settings and volumes back (owners, links), old copy kept, agents woken; wrong passphrase refused"
+ok "restore: settings and volumes back (owners, links), old copy kept, this computer's releases kept, agents woken; wrong passphrase refused"
 
 # --- folders a VM can write: the host never acts through what it plants there. Each case runs in its own CAGE_HOME.
 fresh() { block_watch; export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/cage" init 2>/dev/null; }
