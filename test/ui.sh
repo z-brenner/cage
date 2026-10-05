@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 # Tests cage's web app (host/ui/server.py and host/ui/static) against a stub msb: who may use it (the token, this
-# computer only, which commands), and, in a real headless browser, the page itself (test/ui.test.mjs).
+# computer only, which commands), and, in a real headless browser, the page itself (test/ui.browser.mjs, with
+# test/fixtures/fake-vm.mjs playing an agent's VM).
 # Needs node and the playwright package (PLAYWRIGHT_MODULE=/path/to/node_modules/playwright if it isn't global).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-SERVER=""
-VM="" SERVER2=""
-trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; [ -z "$SERVER2" ] || kill "$SERVER2" 2>/dev/null; [ -z "$SERVER3" ] || kill "$SERVER3" 2>/dev/null; [ -z "$VM" ] || kill "$VM" 2>/dev/null; rm -rf "$T"' EXIT
+SERVER="" SERVER2="" SERVER3="" VM=""
+cleanup() { # whatever the tests started, also when one fails halfway
+  local p h
+  for p in $SERVER $SERVER2 $SERVER3 $VM; do kill "$p" 2>/dev/null || true; done
+  pkill -f "$T/bin/msb" 2>/dev/null || true   # the stub msb, in a job a failed test left behind
+  # the background helper some settings start: by its pid file, or by the CAGE_HOME it runs with (these tests' only)
+  for h in "$T"/*/refresh.pid; do if [ -s "$h" ]; then kill "$(cat "$h")" 2>/dev/null || true; fi; done
+  for p in $(pgrep -f "cage _refresh" 2>/dev/null || true); do
+    # (no pipe into grep -q: under pipefail, its early exit can fail the test of a match it found)
+    if grep -qz "^CAGE_HOME=$T/" "/proc/$p/environ" 2>/dev/null; then kill "$p" 2>/dev/null || true; fi
+  done
+  rm -rf "$T"
+}
+trap cleanup EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -42,7 +54,7 @@ TOK="$(cat "$CAGE_HOME/ui.token")"
 [ "$(stat -c %a "$CAGE_HOME/ui.token")" = 600 ] && [ "${#TOK}" = 48 ] || fail "token file"
 grep -q "http://127.0.0.1:$PORT/#$TOK" "$T/ui.err" || fail "cage ui didn't give the address: $(cat "$T/ui.err")"
 B="http://127.0.0.1:$PORT"
-code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+code() { curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$@"; }
 [ "$(code "$B/api/state")" = 401 ] || fail "state without the token"
 [ "$(code -H "X-Cage-Token: nope" "$B/api/state")" = 401 ] || fail "state with a wrong token"
 [ "$(code -H "X-Cage-Token: $TOK" -H "Host: evil.example:$PORT" "$B/api/state")" = 403 ] || fail "another host name (DNS rebinding)"
@@ -50,8 +62,8 @@ code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 [ "$(code -X POST -H "X-Cage-Token: $TOK" -d '{"args":["_state"]}' "$B/api/jobs")" = 403 ] || fail "an internal command"
 [ "$(code -X POST -H "X-Cage-Token: $TOK" -d '{"args":["init"]}' "$B/api/jobs")" = 403 ] || fail "a command the app doesn't use"
 [ "$(code "$B/../../cage.env")" = 404 ] && [ "$(code "$B/%2e%2e/%2e%2e/cage")" = 404 ] || fail "files outside the page"
-curl -sI "$B/" | grep -qi "content-security-policy: default-src 'self'" || fail "no content security policy"
-curl -s -H "X-Cage-Token: $TOK" "$B/api/state" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["configured"] and d["agents"][0]["state"] == "ready", d' \
+curl --noproxy '*' -sI "$B/" | grep -qi "content-security-policy: default-src 'self'" || fail "no content security policy"
+curl --noproxy '*' -s -H "X-Cage-Token: $TOK" "$B/api/state" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["configured"] and d["agents"][0]["state"] == "ready", d' \
   || fail "state"
 ok "only this computer, with the token, and only cage's own commands; a strict content security policy"
 
@@ -65,13 +77,13 @@ ln -s "$T/elsewhere" "$A/cursor/in"
 H=(-H "X-Cage-Token: $TOK")
 [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-evil.png")" = 404 ] || fail "followed a link out of the chat folder"
 [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=files/../../cage.env")" = 404 ] && [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=../cage.env")" = 404 ] || fail "a path out of the chat folder"
-curl -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-page.html" | grep -qi '^content-disposition: attachment' || fail "an agent's page shown in the app"
-curl -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^content-type: image/png' || fail "pictures are shown"
+curl --noproxy '*' -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-page.html" | grep -qi '^content-disposition: attachment' || fail "an agent's page shown in the app"
+curl --noproxy '*' -sI "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^content-type: image/png' || fail "pictures are shown"
 [ "$(code "${H[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
 [ "$(code "${H[@]}" "$B/api/chat/evil/history")" = 400 ] || fail "not an agent"
 rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
 ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
-curl -sI "$B/manifest.webmanifest" | grep -qi '^content-type: application/manifest+json' && curl -s "$B/manifest.webmanifest" | python3 -c 'import json,sys; m=json.load(sys.stdin); assert m["name"] == "cage" and m["display"] == "standalone"' \
+curl --noproxy '*' -sI "$B/manifest.webmanifest" | grep -qi '^content-type: application/manifest+json' && curl --noproxy '*' -s "$B/manifest.webmanifest" | python3 -c 'import json,sys; m=json.load(sys.stdin); assert m["name"] == "cage" and m["display"] == "standalone"' \
   && [ "$(code "$B/sw.js")" = 200 ] && [ "$(code "$B/icon-maskable.png")" = 200 ] || fail "installable as an app"
 ok "installable as an app: a manifest, icons and a service worker"
 
@@ -99,7 +111,7 @@ CAGE_HOME="$T/fresh" CAGE_MSB="$T/bin2/msb" CAGE_UI_PORT="$PORT2" STUB_SIGNED="$
 SERVER2="$(pgrep -f "host/ui/server.py" -n || true)"
 B2="http://127.0.0.1:$PORT2"
 TOK2="$(cat "$T/fresh/ui.token")"
-node "$ROOT/test/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
+node "$ROOT/test/fixtures/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
 
 # An installed release (a VERSION file), for updating while the app is open: the server restarts itself with the new
 # code once nothing is running, and the page reloads to get the new page
@@ -109,7 +121,7 @@ CAGE_UI_PORT="$PORT3" "$T/inst/cage" ui --no-open 2>/dev/null || fail "the insta
 SERVER3="$(pgrep -f "$T/inst/host/ui/server.py" -n || true)"
 
 if command -v node >/dev/null 2>&1; then
-  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" STUB_AWAKE="$T/codex-awake" node "$ROOT/test/ui.test.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" "http://127.0.0.1:$PORT3" "$T/inst" \
+  PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g 2>/dev/null)/playwright}" STUB_AWAKE="$T/codex-awake" node "$ROOT/test/ui.browser.mjs" "$B" "$TOK" "$CAGE_HOME" "$T/work" "$B2" "$TOK2" "$T/fresh" "http://127.0.0.1:$PORT3" "$T/inst" \
     || fail "the web app in a browser (above)"
   ok "the web app in a real browser"
 fi

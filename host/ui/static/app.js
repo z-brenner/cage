@@ -1465,6 +1465,7 @@ function liveConnect (force) {
   const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? -1)).join(',')
   const es = new EventSource(`/api/chat/stream?from=${encodeURIComponent(from)}&token=${encodeURIComponent(TOKEN)}`)
   LIVE.es = es
+  es.onopen = () => { document.body.dataset.live = 'on' }
   es.onmessage = (m) => {
     const d = JSON.parse(m.data)
     if (d.reset) {
@@ -1477,7 +1478,7 @@ function liveConnect (force) {
     if (CHAT && CHAT.agent === d.a) chatLive(CHAT, d)
     heard(d.a, d.e)
   }
-  es.onerror = () => { es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
+  es.onerror = () => { document.body.dataset.live = 'off'; es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
 }
 function heard (agent, e) {
   if ((e.session || 'you') !== 'you' || !['reply', 'buttons', 'card', 'file'].includes(e.t)) return

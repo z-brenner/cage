@@ -1,7 +1,7 @@
 // Drives cage's web app in a real (headless) browser against a stub msb: the page, its token, a question with a
-// hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one (test/fake-vm.mjs plays
-// its VM), the phone layout, and that nothing works without the token.
-//   node test/ui.test.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token> <its home>
+// hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one
+// (test/fixtures/fake-vm.mjs plays its VM), the phone layout, and that nothing works without the token.
+//   node test/ui.browser.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token> <its home>
 //     <an installed release's url> <its folder>
 // (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
 import fs from 'node:fs'
@@ -15,8 +15,11 @@ let pass = 0
 const ok = (m) => { pass++; console.log('ok - ' + m) }
 const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
 
+// the same page whatever this computer's language, time zone or animation settings (dates and times are in en-US)
 const browser = await chromium.launch(process.env.CAGE_TEST_CHROME ? { executablePath: process.env.CAGE_TEST_CHROME } : {})
-const page = await browser.newPage()
+const fresh = () => browser.newContext({ locale: 'en-US', timezoneId: 'UTC', reducedMotion: 'reduce' })
+const ctx = await fresh()
+const page = await ctx.newPage()
 const errors = []
 page.on('pageerror', (e) => errors.push(e.message))
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
@@ -212,7 +215,7 @@ if (await page.locator('dialog#palette[open]').count()) fail('the palette stayed
 ok('Ctrl+K jumps to a page by name')
 
 // setting up a fresh computer: checks, picking agents, signing in by device code, about you
-const p2 = await browser.newPage()
+const p2 = await (await fresh()).newPage()
 p2.on('pageerror', (e) => errors.push(e.message))
 await p2.goto(base2 + '/#' + token2)
 await p2.getByRole('button', { name: 'Set up cage' }).click()
@@ -257,7 +260,7 @@ await notify.waitFor({ state: 'attached', timeout: 15000 })
 await notify.click({ force: true })
 await page.waitForFunction(() => localStorage.getItem('cage-notify') === 'on', null, { timeout: 10000 })
 await page.goto(base + '/#home')
-await page.waitForTimeout(1000)   // the live stream is connected
+await page.waitForFunction(() => document.body.dataset.live === 'on', null, { timeout: 15000 })   // the live stream is connected
 fs.appendFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'Your **report** is ready' }) + '\n')
 await page.waitForFunction(() => window.__notes.some((n) => n.title === 'Claude Code' && n.body === 'Your report is ready'), null, { timeout: 15000 })
 const badge = page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.badge.unread')
@@ -269,7 +272,7 @@ if (await badge.count()) fail('the unread mark stayed after opening the chat')
 ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
 
 // updating while the app is open: the server restarts with the new code, and the page reloads with the new page
-const p3 = await browser.newPage()
+const p3 = await ctx.newPage()
 p3.on('pageerror', (e) => errors.push(e.message))
 await p3.goto(base3 + '/#' + token)
 await p3.locator('#version', { hasText: 'cage v1.0.0' }).waitFor({ timeout: 15000 })
@@ -286,16 +289,14 @@ await p3.close()
 ok('updating while the app is open: the server restarts with its new code, and the page reloads')
 
 // on a phone: the sidebar is a menu
+const offscreen = () => page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().right <= 0, null, { timeout: 5000 })
 await page.setViewportSize({ width: 390, height: 844 })
-await page.waitForTimeout(300)
-if ((await page.locator('#sidebar').boundingBox()).x >= 0) fail('the sidebar covers the page on a phone')
+await offscreen().catch(() => fail('the sidebar covers the page on a phone'))
 await page.getByRole('button', { name: 'Menu' }).click()
-await page.waitForTimeout(400)
-if ((await page.locator('#sidebar').boundingBox()).x < 0) fail('the menu does not open')
+await page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().x >= 0, null, { timeout: 5000 }).catch(() => fail('the menu does not open'))
 await page.locator('#nav').getByRole('link', { name: 'Settings' }).click()
 await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 10000 })
-await page.waitForTimeout(400)
-if ((await page.locator('#sidebar').boundingBox()).x >= 0) fail('the menu stays open after picking a page')
+await offscreen().catch(() => fail('the menu stays open after picking a page'))
 ok('on a phone, the sidebar is a menu that closes when you pick a page')
 
 if (errors.length) fail('page errors: ' + errors.join(' | '))

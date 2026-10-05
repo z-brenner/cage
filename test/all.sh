@@ -37,12 +37,11 @@ js_parses() { # every script parses: the VM's, the web app's, the tests' (and th
 python_compiles() { # every Python file compiles (the bytecode goes to a temp folder, not next to the sources)
   PYTHONPYCACHEPREFIX="$T/pycache" python3 -m py_compile host/*.py host/ui/*.py guest/*.py test/*.py
 }
-# node's own test runner on every test/*.test.mjs but the browser test (the ui suite runs that one), then each Python
-# unit test, test/*_test.py
+# node's own test runner on every test/*.test.mjs (the browser test, test/ui.browser.mjs, is the ui suite's), then each
+# Python unit test, test/*_test.py
 unit_tests() {
-  local f files=() rc=0
-  for f in test/*.test.mjs; do [ "$f" = test/ui.test.mjs ] || files+=("$f"); done
-  node --test "${files[@]}" || rc=1
+  local f rc=0
+  node --test test/*.test.mjs || rc=1
   for f in test/*_test.py; do echo "# $f"; PYTHONPYCACHEPREFIX="$T/pycache" python3 "$f" || rc=1; done
   return $rc
 }

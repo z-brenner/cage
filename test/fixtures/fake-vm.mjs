@@ -1,5 +1,5 @@
 // Plays an agent's VM for the web app's tests: what guest/app.mjs and cc-connect would write to its chat folder.
-//   node test/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
+//   node test/fixtures/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
 // A message gets a streamed reply; "email" asks before acting; "/usage" answers with a card; files come back; scheduled
 // tasks live in cron.json, and running one answers in the chat.
 import fs from 'node:fs'
