@@ -866,7 +866,7 @@ const before409 = errors.length
 await waits.getByRole('button', { name: 'Allow' }).click()
 await page.locator('#toasts .toast', { hasText: 'It isn’t waiting for that any more. Open its chat to see what it’s doing.' }).waitFor({ timeout: 5000 })
 errors.splice(before409, errors.length, ...errors.slice(before409).filter((m) => !/status of 409/.test(m)))   // (refused: that's the point)
-await page.evaluate(() => { window.loadActivity = window.__loadActivity })
+await page.evaluate(() => { window.loadActivity = window.__loadActivity; return loadActivity() })   // (not at the next refresh, in 6 s)
 await waits.getByText('Run a command on its own computer: rm -rf ~/work/old').waitFor({ timeout: 10000 })
 if (allowed() !== allowedThen) fail('Allow on Home said yes to something it did not show')
 const wontSend = () => (fs.readFileSync(claudeLog, 'utf8').match(/Okay, I won’t send it\./g) || []).length
@@ -874,7 +874,9 @@ const wontSendBefore = wontSend()
 await waits.getByRole('button', { name: 'Deny' }).click()
 await waits.waitFor({ state: 'detached', timeout: 10000 })
 for (let i = 0; i < 100 && wontSend() === wontSendBefore; i++) await page.waitForTimeout(100)
-// what it asked and answered came while you were on Home: unread, until you open its chat
+// what it asked and answered came while you were on Home: unread, until you open its chat (once the page has all of
+// it: an answer that came after you left the chat again would be unread, rightly)
+await page.waitForFunction((n) => LIVE.offsets.claude >= n, fs.statSync(claudeLog).size, { timeout: 10000 })
 const unreadClaude = page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.badge.unread')
 await unreadClaude.waitFor({ timeout: 10000 })
 await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
@@ -896,6 +898,7 @@ ok('plan usage on Home: bars from the /usage card (amber under 20%, red at 0), a
 
 // what came while the page was closed is still unread when it opens again, and isn't notified twice
 await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+if (await badge.count()) fail('unread before the test, already: ' + await badge.innerText())
 fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'While you were away' }) + '\n')
 await badge.getByText('1').waitFor({ timeout: 10000 })
 await page.reload()
