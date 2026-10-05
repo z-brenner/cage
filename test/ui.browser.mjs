@@ -244,10 +244,18 @@ ok('a new chat log keeps the conversation on screen, also after a reload; a link
 // Stop while it works: the button by "working…", or Esc with nothing typed (cc-connect's /stop), but not Esc while you write
 const stops = () => (fs.readFileSync(path.join(dir, 'log.jsonl'), 'utf8').match(/"t":"you"[^\n]*"text":"\/stop"/g) || []).length
 const busy = () => fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'typing', session: 'you', on: true }) + '\n')
+// (a picture you attached for your next message stays for it: Stop goes on its own, as with a picture cc-connect would
+// take "/stop" for a message to the agent, and not stop it)
+await chat.locator('input[type=file]').setInputFiles({ name: 'screenshot.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64') })
+await chat.locator('.attached .chip:not(.busy)', { hasText: 'screenshot.png' }).waitFor({ timeout: 10000 })
 busy()
 await chat.locator('.typing').getByRole('button', { name: 'Stop' }).click()
 await chat.locator('.chat-divider', { hasText: 'You stopped it' }).waitFor({ timeout: 10000 })
 await chat.locator('.typing').waitFor({ state: 'hidden', timeout: 10000 })
+const stopped = fs.readFileSync(path.join(dir, 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.t === 'you' && e.text === '/stop').pop()
+if (stopped.files.length) fail('Stop went with the picture you attached: ' + JSON.stringify(stopped.files))
+if (!(await chat.locator('.attached .chip', { hasText: 'screenshot.png' }).count())) fail('Stop took away the picture you attached')
+await chat.getByRole('button', { name: 'Remove screenshot.png' }).click()
 busy()
 await chat.locator('.typing').waitFor({ state: 'visible', timeout: 10000 })
 await chat.locator('textarea').fill('not done yet')

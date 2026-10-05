@@ -1515,12 +1515,14 @@ function drawAttached (C) {
   C.chips.replaceChildren(...C.attached.map((f) => h('span', { class: 'chip' + (f.uploading ? ' busy' : '') }, f.uploading ? h('span', { class: 'spinner' }) : icon(isPicture(f.name) ? 'image' : 'paperclip'), f.name,
     h('button', { type: 'button', class: 'chip-x', 'aria-label': 'Remove ' + f.name, onclick: () => { C.attached.splice(C.attached.indexOf(f), 1); drawAttached(C) } }, icon('x')))))
 }
+// What you wrote, with the files you attached; or `text` (a command: /stop, /new) on its own, which leaves what you're
+// writing as it is. With a picture, cc-connect wouldn't even read "/stop" as a command: it would go to the agent.
 async function chatSend (C, text) {
   const a = agentOf(C.agent)
   const msg = text !== undefined ? text : C.ta.value
-  const files = C.attached.filter((f) => !f.uploading && f.path)
+  const files = text === undefined ? C.attached.filter((f) => !f.uploading && f.path) : []
   if (!msg.trim() && !files.length) return
-  if (C.attached.some((f) => f.uploading) || DOWN) return
+  if ((text === undefined && C.attached.some((f) => f.uploading)) || DOWN) return
   if (text === undefined && pickBlank(C.ta)) { toast(`Fill in ${blanksLeft(msg)[0]} first.`, 'info'); return }
   if (!a.enabled || a.state === 'login') { drawChatState(C, true); return }
   try {
