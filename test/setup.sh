@@ -9,12 +9,16 @@ cleanup() { [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
-ok() { pass=$((pass + 1)); echo "ok - $*"; }
+# bash 3.2 (macOS's) carries on after a block in ( … ) fails: such a block leaves a mark (block_watch), and the next
+# ok stops the run there
+ok() { [ ! -e "$T/failed" ] || exit 1; pass=$((pass + 1)); echo "ok - $*"; }
+block_watch() { trap '[ $? = 0 ] || : > "$T/failed"' EXIT; }   # first thing in a ( … ) block
 
 # --- mock Telegram Bot API: tokens "<n>:GOOD<x>" are valid; one pending message from user 4242
 cat > "$T/mock.py" <<'PY'
-import http.server, json, re, sys
+import http.server, json, os, re, sys
 log = open(sys.argv[2], "a")
+PWN = "$(touch " + os.environ["PWNED"] + ")"   # what a hostile service puts in an id or a name
 OWNER = {"id": 4242, "is_bot": False, "first_name": "Zack"}
 MANAGED = [{"update_id": 900 + i, "managed_bot": {"user": OWNER, "bot": {"id": bid, "is_bot": True, "first_name": n, "username": u}}}
            for i, (bid, n, u) in enumerate([(1001, "Claude", "dot_claude_bot"), (1002, "Codex", "dot_codex_bot")])]
@@ -32,7 +36,7 @@ class H(http.server.BaseHTTPRequestHandler):
             ok = self.auth().startswith("Bearer xapp-GOOD")
             return self.reply(200, {"ok": True, "url": "wss://x"} if ok else {"ok": False, "error": "invalid_auth"})
         if method == "users.lookupByEmail":
-            uid = {"zack%40acme.com": "U0ZACK", "amy%40acme.com": "U0AMY"}.get(self.path.split("email=")[-1])
+            uid = {"zack%40acme.com": "U0ZACK", "amy%40acme.com": "U0AMY", "evil%40acme.com": "U0EVIL" + PWN}.get(self.path.split("email=")[-1])
             return self.reply(200, {"ok": True, "user": {"id": uid, "name": "x"}} if uid else {"ok": False, "error": "users_not_found"})
         self.reply(404, {"ok": False})
     def discord(self, body):  # Discord REST: tokens with GOOD in them work; replies spaced like Discord's
@@ -42,6 +46,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(401, {"message": "401: Unauthorized", "code": 0}, spaced=True)
         if path == "/applications/@me" and self.command == "PATCH":
             DISCORD_APP["flags"] = json.loads(body)["flags"]
+        if path == "/applications/@me" and "HOSTILE" in self.auth():
+            return self.reply(200, dict(DISCORD_APP, owner={"id": "4242" + PWN}), spaced=True)
         if path == "/applications/@me":
             return self.reply(200, DISCORD_APP, spaced=True)
         if path == "/users/@me/guilds":
@@ -71,7 +77,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
         if method == "getMe":
             name = token.split(":GOOD")[1] or "x"
-            return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot", "username": "dot_" + name + "_bot",
+            return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot",
+                                                           "username": "dot" + PWN + "_bot" if name == "evil" else "dot_" + name + "_bot",
                                                            "can_manage_bots": name == "mgr"}})
         if method == "getUpdates" and "allowed_updates" in self.path:  # the manager bot: one managed_bot update per tap
             offset = int((re.search(r"offset=(\d+)", self.path) or [0, 0])[1])
@@ -99,7 +106,7 @@ s = http.server.HTTPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(s.server_port))
 s.serve_forever()
 PY
-python3 "$T/mock.py" "$T/port" "$T/requests.log" &
+PWNED="$T/PWNED" python3 "$T/mock.py" "$T/port" "$T/requests.log" &
 MOCK_PID=$!
 for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
 [ -s "$T/port" ] || fail "mock server did not start"
@@ -182,24 +189,81 @@ python3 - "$plist" "$ROOT/cage" "$CAGE_HOME" <<'PY' || fail "bad LaunchAgent pli
 import plistlib, sys
 p = plistlib.load(open(sys.argv[1], "rb"))
 assert p["Label"] == "dev.cage.up"
-assert p["ProgramArguments"] == [sys.argv[2], "up"], p["ProgramArguments"]
+assert p["ProgramArguments"] == [sys.argv[2], "_autostart"], p["ProgramArguments"]
 assert p["RunAtLoad"] is True
+assert p["AbandonProcessGroup"] is True   # the web app and the background helper outlive _autostart
 assert p["EnvironmentVariables"]["CAGE_HOME"] == sys.argv[3]
 assert "/opt/homebrew/bin" in p["EnvironmentVariables"]["PATH"]
 PY
-grep -q "launchctl bootstrap gui/$(id -u) $plist" "$T/os.log" || fail "LaunchAgent not bootstrapped: $(cat "$T/os.log")"
+# loaded at the next login, like on Linux and Windows: loading it now would run it now, in the middle of things
+if grep -q "launchctl bootstrap" "$T/os.log"; then fail "turning autostart on ran it right away: $(cat "$T/os.log")"; fi
 PATH="$T/bin:$PATH" FAKE_UNAME=Darwin cage autostart off 2>/dev/null
 [ ! -e "$plist" ] || fail "plist not removed"
-ok "autostart on/off installs and removes a valid macOS LaunchAgent"
+grep -q "launchctl bootout gui/$(id -u) $plist" "$T/os.log" || fail "LaunchAgent not unloaded: $(cat "$T/os.log")"
+ok "autostart on/off installs and removes a valid macOS LaunchAgent, which wakes agents at the next login"
 
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart on 2>/dev/null
 unit="$HOME/.config/systemd/user/cage-up.service"
-grep -qx "ExecStart=\"$ROOT/cage\" up" "$unit" || fail "unit ExecStart: $(cat "$unit")"
+grep -qx "ExecStart=\"$ROOT/cage\" _autostart" "$unit" || fail "unit ExecStart: $(cat "$unit")"   # never restarts an awake agent
 grep -qx 'WantedBy=default.target' "$unit" || fail "unit WantedBy"
+# a oneshot unit's leftovers are killed when it ends: the web app and the background helper must outlive _autostart
+grep -qx 'KillMode=process' "$unit" && grep -qx 'RemainAfterExit=yes' "$unit" || fail "unit would kill what _autostart starts: $(cat "$unit")"
 grep -q 'systemctl --user enable cage-up.service' "$T/os.log" || fail "unit not enabled"
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart off 2>/dev/null
 [ ! -e "$unit" ] || fail "unit not removed"
 ok "autostart on/off installs and removes a systemd user unit"
+
+# --- the guided setup in a terminal (a Mac here): you pick where to chat, the app or Telegram, and starting at login
+# is asked once, at the end; a no leaves nothing behind
+mkdir -p "$T/obin"
+printf '#!/bin/sh\ncase "$1" in -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$T/obin/uname"
+printf '#!/bin/sh\necho "msb $*" >> "%s/onb.log"\ncase "$1" in --version) cat "%s/onb.msb" 2>/dev/null || echo "msb 0.7.5" ;; inspect) exit 1 ;; esac\nexit 0\n' "$T" "$T" > "$T/obin/msb"
+for tool in launchctl systemctl; do printf '#!/bin/sh\necho "%s $*" >> "%s/onb.log"\n' "$tool" "$T" > "$T/obin/$tool"; done
+chmod +x "$T/obin"/*
+( block_watch; export CAGE_HOME="$T/onb-tg" HOME="$T/onb-tg-home" PATH="$T/obin:$PATH"
+  mkdir -p "$HOME"; : > "$T/onb.log"
+  printf '%s\n' 2 y n n n '100:GOODclaude' y Zack '' '' n | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (Telegram): $(tail -5 "$T/onb.err")"
+  grep -q 'A Telegram bot for each agent' "$T/onb.err" && grep -q 'say hi on Telegram' "$T/onb.err" || fail "onboarding (Telegram): $(cat "$T/onb.err")"
+  grep -qx 'CAGE_TELEGRAM_TOKEN_claude="100:GOODclaude"' "$CAGE_HOME/cage.env" && grep -q 'run .*--name cage-claude' "$T/onb.log" || fail "claude wasn't set up and woken: $(cat "$T/onb.log")"
+  [ ! -e "$HOME/Library/LaunchAgents/dev.cage.up.plist" ] && [ ! -e "$HOME/.config/systemd/user/cage-up.service" ] && [ ! -e "$CAGE_HOME/autostart" ] \
+    || fail "start-at-login was turned on although you said no"
+  if grep -q 'launchctl bootstrap\|systemctl --user enable' "$T/onb.log"; then fail "start-at-login ran before you were asked: $(cat "$T/onb.log")"; fi )
+( block_watch; export CAGE_HOME="$T/onb-app" HOME="$T/onb-app-home" PATH="$T/obin:$PATH"
+  mkdir -p "$HOME"; : > "$T/onb.log"; : > "$T/requests.log"
+  printf '%s\n' 1 n y n n '' '' '' y | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (app): $(tail -5 "$T/onb.err")"
+  grep -q 'say hi in the app' "$T/onb.err" && grep -q 'Codex is one of your agents' "$T/onb.err" || fail "onboarding (app): $(cat "$T/onb.err")"
+  sed -n '/This computer/,$p' "$T/onb.err" > "$T/onb.after"   # what comes after the choice
+  if grep -qi 'telegram\|bot' "$T/onb.after"; then fail "the app's setup talks about Telegram or bots: $(grep -i 'telegram\|bot' "$T/onb.after")"; fi
+  [ ! -s "$T/requests.log" ] || fail "the app's setup called Telegram: $(cat "$T/requests.log")"
+  grep -qx 'CAGE_AGENTS="codex"' "$CAGE_HOME/cage.env" && [ -d "$CAGE_HOME/app/codex" ] && grep -q 'run .*--name cage-codex' "$T/onb.log" || fail "codex isn't in the app: $(cat "$CAGE_HOME/cage.env")"
+  [ -e "$HOME/Library/LaunchAgents/dev.cage.up.plist" ] && [ -e "$CAGE_HOME/autostart" ] || fail "start-at-login wasn't turned on although you said yes" )
+ok "guided setup: the app or Telegram, as you choose; start-at-login only when you say yes, asked once at the end"
+
+# a microsandbox too old for cage: the guided setup installs the one cage is tested with first, as cage fix does
+cat > "$T/onb-installer.sh" <<'EOF'
+#!/bin/sh
+# stands in for https://install.microsandbox.dev (scripts/install-msb.sh pins its version)
+get_latest_version() {
+    VERSION=v9.9.9
+}
+main() {
+    get_latest_version
+    mkdir -p "$MSB_HOME/bin"
+    printf '#!/bin/sh\necho "msb %s"\n' "${VERSION#v}" > "$MSB_HOME/bin/msb"
+    chmod +x "$MSB_HOME/bin/msb"
+    rm -f "$ONB_MSB"   # the msb on PATH is the new one now
+}
+main "$@"
+EOF
+( block_watch; export CAGE_HOME="$T/onb-old" HOME="$T/onb-old-home" PATH="$T/obin:$PATH" CAGE_MSB_INSTALLER="$T/onb-installer.sh" ONB_MSB="$T/onb.msb"
+  export MSB_HOME="$HOME/.microsandbox"
+  mkdir -p "$HOME"; : > "$T/onb.log"; echo "msb 0.7.4" > "$T/onb.msb"
+  pin="$(sed -n 's/^CAGE_MSB_VERSION=v//p' "$ROOT/cage")"
+  printf '%s\n' 1 y n y n n '' '' '' n | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding with an old msb: $(tail -5 "$T/onb.err")"
+  grep -q "microsandbox 0.7.4 is too old for cage. Install microsandbox $pin now" "$T/onb.err" && grep -q "✓ microsandbox $pin" "$T/onb.err" ||
+    fail "the guided setup didn't replace an old msb: $(cat "$T/onb.err")"
+  [ ! -e "$T/onb.msb" ] && grep -q 'run .*--name cage-codex' "$T/onb.log" || fail "codex wasn't woken with the new msb: $(cat "$T/onb.log")" )
+ok "guided setup: a microsandbox too old for cage is replaced by the one cage is tested with, first"
 
 # --- Windows (WSL 2): autostart is the per-user Run key (no admin); doctor explains WSL-specific KVM problems
 : > "$T/os.log"
@@ -322,5 +386,36 @@ out="$(cage chat 2>&1)"; grep -q 'codex .*WhatsApp (your own number)' <<<"$out" 
 cage chat rm whatsapp codex 2>/dev/null && PATH="$T/msbbin:$PATH" cage up codex 2>/dev/null
 [ ! -e "$CAGE_HOME/agents/codex/whatsapp.env" ] && grep -qx '\[bridge\]' "$cx" || fail "whatsapp not removed (or the app's bridge went with it)"
 ok "whatsapp: spare or own number, owner-only, bridge and adapter settings for the VM, removable"
+
+# --- hostile replies from a chat service (or something posing as one): ids and names that would be shell code in
+# cage.env are refused before anything is saved, so nothing ever runs
+( block_watch; export CAGE_HOME="$T/hostile"
+  cage init 2>/dev/null
+  if printf '%s\n' 'MTAwMDAwMDAwMDAwMDAwMDAw.GOODHOSTILE.cccccccccccccccccccccccccccc' | cage chat add discord claude 2>"$T/h.err"; then
+    fail "saved a Discord app whose owner id is shell code"
+  fi
+  grep -q "who owns that app" "$T/h.err" || fail "unclear refusal: $(cat "$T/h.err")"
+  printf '%s\n' 'xoxb-GOOD-1234567890' 'xapp-GOOD-1234567890' 'evil@acme.com' 'zack@acme.com' | cage chat add slack codex 2>/dev/null \
+    || fail "chat add slack"
+  printf '%s\n' '666:GOODevil' '667:GOODhost' 'y' | cage setup antigravity 2>/dev/null || fail "setup"
+  e="$CAGE_HOME/cage.env"
+  grep -qxF 'CAGE_SLACK_OWNER_codex="U0ZACK"' "$e" && grep -qxF 'CAGE_TELEGRAM_BOT_antigravity="dot_host_bot"' "$e" || fail "hostile replies: $(cat "$e")"
+  if grep -q 'DISCORD\|EVIL\|touch' "$e"; then fail "a hostile value was saved: $(cat "$e")"; fi
+  cage chat >/dev/null 2>&1
+  [ ! -e "$T/PWNED" ] || fail "a command from an API reply ran" )
+ok "hostile chat-service replies: an owner id, a user id or a bot name that would be shell code is never saved"
+
+# the others you let talk to a Slack agent (asked on a terminal only): an id that would be shell code is skipped, and
+# the rest are saved
+if script --version 2>&1 | grep -q util-linux; then
+  ( block_watch; export CAGE_HOME="$T/hostile2"
+    cage init 2>/dev/null
+    printf '%s\n' 'xoxb-GOOD-1234567890' 'xapp-GOOD-1234567890' 'zack@acme.com' 'evil@acme.com, amy@acme.com' 'y' |
+      TERM=xterm-256color timeout 60 script -qfec "$ROOT/cage chat add slack claude" /dev/null > "$T/h2.out" 2>&1 || fail "chat add slack: $(cat -v "$T/h2.out")"
+    grep -q 'skipped evil@acme.com' "$T/h2.out" && grep -qxF 'CAGE_SLACK_ALLOW_claude="U0ZACK,U0AMY"' "$CAGE_HOME/cage.env" \
+      || fail "others on the Slack allow list: $(grep SLACK_ALLOW "$CAGE_HOME/cage.env"; cat -v "$T/h2.out" | tail -5)"
+    [ ! -e "$T/PWNED" ] || fail "a command from an API reply ran" )
+  ok "Slack: someone else's id that would be shell code is skipped; the others you name are let in"
+fi
 
 echo "all $pass setup tests passed"

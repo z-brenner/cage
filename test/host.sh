@@ -8,7 +8,10 @@ trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null || true; pkill -f -- 
 unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
-ok() { pass=$((pass + 1)); echo "ok - $*"; }
+# bash 3.2 (macOS's) carries on after a block in ( … ) fails: such a block leaves a mark (block_watch), and the next
+# ok stops the run there
+ok() { [ ! -e "$T/failed" ] || exit 1; pass=$((pass + 1)); echo "ok - $*"; }
+block_watch() { trap '[ $? = 0 ] || : > "$T/failed"' EXIT; }   # first thing in a ( … ) block
 
 # stub msb: logs one call per line (args separated by ' | '); `inspect` succeeds only for names in $T/existing,
 # `ps` lists the names in $T/running (default: the existing ones)
@@ -19,7 +22,21 @@ if [ "$1" = --version ]; then cat "$MSB_STUB_VERSION" 2>/dev/null || echo "msb 0
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
+if [ "$cmd" = run ] && [ -n "${MSB_FAIL_RUN:-}" ]; then   # that VM doesn't start (in msb 0.7.5's words)
+  case " $* " in *" --name $MSB_FAIL_RUN "*)
+    printf 'warn: sandbox %s already exists; creation flags ignored\nerror: failed to start "%s"\n' "$MSB_FAIL_RUN" "$MSB_FAIL_RUN" >&2
+    printf '  → other: sandbox process exited (signal: 6 (SIGABRT)) before agent relay became available\n' >&2
+    printf '  → run `msb logs --source system %s` for full diagnostics\n' "$MSB_FAIL_RUN" >&2; exit 1 ;;
+  esac
+fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
+if [ "$cmd" = stop ] && [ "$1" = -t ] && [ -n "${MSB_STOP_STUCK:-}" ]; then   # that VM doesn't stop within the time given
+  case " $* " in *" $MSB_STOP_STUCK "*) echo "error: timed out waiting for $MSB_STOP_STUCK to stop" >&2; exit 1 ;; esac
+fi
+if [ "$cmd" = rm ]; then   # like msb: removing a sandbox that isn't there is an error
+  n="${!#}"; grep -qx "$n" "$MSB_EXISTING" 2>/dev/null || { echo "error: sandbox not found: $n" >&2; exit 1; }
+  { grep -vx "$n" "$MSB_EXISTING" || true; } > "$MSB_EXISTING.new"; mv "$MSB_EXISTING.new" "$MSB_EXISTING"
+fi
 if [ "$cmd" = exec ]; then
   vmname=""; for x in "$@"; do case "$x" in cage-*) vmname="$x"; break ;; esac; done
   case "$*" in
@@ -36,13 +53,16 @@ if [ "$cmd" = exec ]; then
         long) head -c 200000 /dev/zero | tr '\0' x; exit $? ;;     # more than cage reads: it stops, so this gets SIGPIPE
       esac
       printf 'answer from %s to: %s' "$vmname" "$q" ;;
+    *'cat ~/.cage/whatsapp/status.json'*)   # WhatsApp's status, as the VM wrote it: $MSB_WA_STATUS.1 once, then $MSB_WA_STATUS
+      if [ -e "${MSB_WA_STATUS:-}.1" ]; then cat "$MSB_WA_STATUS.1"; rm -f "$MSB_WA_STATUS.1"; else cat "${MSB_WA_STATUS:-/dev/null}"; fi ;;
   esac
 fi
-if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; esac; exit 0; fi
+if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; *) cat "${MSB_VMLOG:-/dev/null}" ;; esac; exit 0; fi
 if [ "$cmd" = volume ]; then   # named volumes are folders under $MSB_VOLUMES
   case "$1" in
     inspect) [ -d "$MSB_VOLUMES/$2" ] || exit 1; printf 'Name:           %s\nKind:           dir\nPath:           %s\n' "$2" "$MSB_VOLUMES/$2" ;;
     create) mkdir -p "$MSB_VOLUMES/$2" && echo "$2" ;;
+    rm) [ -d "$MSB_VOLUMES/$2" ] || { echo "error: volume not found: $2" >&2; exit 1; }; rm -rf "${MSB_VOLUMES:?}/$2" ;;
   esac
 fi
 exit 0
@@ -52,6 +72,7 @@ chmod +x "$T/bin/msb"
 REAL_CURL="$(command -v curl)"; export REAL_CURL MSB_STUB_VERSION="$T/msb.version"
 ln -s "$ROOT/test/fake-curl.sh" "$T/bin/curl"
 export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" MSB_VOLUMES="$T/volumes" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
+export MSB_HOME="$T/msbhome"   # never your own ~/.microsandbox
 : > "$MSB_EXISTING"
 cage() { "$ROOT/cage" "$@"; }
 
@@ -71,7 +92,7 @@ grep -A3 '^\[bridge\]$' "$f" | grep -q "^token = \"$tok\"$" && grep -A3 '^\[mana
 grep -q '^type = "line"$' "$f" && grep -q '^allow_from = "nobody"$' "$f" && grep -q '^admin_from = "you"$' "$f" || fail "placeholder platform: $(cat "$f")"
 grep -qx "APP_TOKEN=$tok" "$CAGE_HOME/agents/claude/app.env" || fail "app.env"
 [ "$(stat -c %a "$CAGE_HOME/app")" = 700 ] && [ "$(stat -c %a "$CAGE_HOME/app/claude/in")" = 777 ] || fail "chat folder modes"
-grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "--mount-dir | $CAGE_HOME/app/claude:/cage-app" || fail "chat folder not mounted"
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "--mount-dir | $CAGE_HOME/app/claude:/cage-app:quota=2G,nosuid,nodev |" || fail "chat folder not mounted (with a size limit)"
 [ "$(cat "$CAGE_HOME/agents/claude/app.token")" = "$tok" ] || fail "app token changed"
 ok "no chat app needed: the app talks to the agent through cc-connect's bridge, behind a placeholder platform"
 : > "$MSB_LOG"
@@ -108,7 +129,7 @@ ok "renders one cc-connect config per agent with the right type, mode and cmd"
 
 line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
 for want in "-d" "--mount-named | cage-claude-home:/home/agent" "--mount-dir | $ROOT/guest:/cage:ro" "--mount-dir | $CAGE_HOME/agents/claude:/cage-config:ro" \
-            "--mount-dir | $CAGE_HOME/brain/memory:/memory:ro" "--mount-dir | $CAGE_HOME/brain/inbox/claude:/memory-inbox" \
+            "--mount-dir | $CAGE_HOME/brain/memory:/memory:ro" "--mount-dir | $CAGE_HOME/brain/inbox/claude:/memory-inbox:quota=16M,nosuid,nodev |" \
             "-c | 2" "-m | 4G" "--root-disk | 16G" "--label | app=cage" "ubuntu:24.04 | -- | /bin/bash | /cage/entry.sh | claude"; do
   [[ "$line" == *"$want"* ]] || fail "msb run for claude lacks '$want': $line"
 done
@@ -167,14 +188,21 @@ grep -q '^mode = "default"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail 
 grep -q '^mode = "default"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "ask mode cursor"
 ok "CAGE_MODE=ask makes agents ask in chat before each tool call"
 
-# destroy guards
+# destroy: needs an explicit flag; --keep-login keeps the login volume. Each part goes on its own, so --yes after
+# --keep-login (the VM is gone already), or with no settings file at all, still deletes the login and files.
 if cage destroy claude 2>/dev/null; then fail "destroy without flag succeeded"; fi
-: > "$MSB_LOG"; cage destroy claude --keep-login 2>/dev/null
+echo cage-claude > "$MSB_EXISTING"; mkdir -p "$MSB_VOLUMES/cage-claude-home/work" "$MSB_VOLUMES/cage-claude-cache"
+: > "$MSB_LOG"; cage destroy claude --keep-login 2>"$T/err" || fail "destroy --keep-login: $(cat "$T/err")"
 grep -qx 'rm | --force | cage-claude' "$MSB_LOG" || fail "destroy --keep-login"
-grep -q 'volume' "$MSB_LOG" && fail "--keep-login removed the volume"
-: > "$MSB_LOG"; cage destroy claude --yes 2>/dev/null
-grep -qx 'volume | rm | cage-claude-home' "$MSB_LOG" || fail "destroy --yes kept the volume"
-ok "destroy needs an explicit flag; --keep-login keeps the login volume"
+grep -q 'volume | rm' "$MSB_LOG" && fail "--keep-login removed the volume"
+: > "$MSB_LOG"; cage destroy claude --yes 2>"$T/err" || fail "destroy --yes after --keep-login: $(cat "$T/err")"
+grep -q '^rm ' "$MSB_LOG" && fail "removed a VM that wasn't there"
+[ ! -e "$MSB_VOLUMES/cage-claude-home" ] && [ ! -e "$MSB_VOLUMES/cage-claude-cache" ] || fail "destroy --yes kept the volumes: $(cat "$T/err")"
+grep -q 'claude had no cage' "$T/err" && grep -q "deleted claude's login and files" "$T/err" || fail "destroy --yes: $(cat "$T/err")"
+echo cage-claude > "$MSB_EXISTING"; mkdir -p "$MSB_VOLUMES/cage-claude-home"
+CAGE_ENV="$T/no-such.env" cage destroy claude --yes 2>"$T/err" || fail "destroy without a settings file: $(cat "$T/err")"
+[ ! -s "$MSB_EXISTING" ] && [ ! -e "$MSB_VOLUMES/cage-claude-home" ] || fail "destroy without a settings file left things: $(cat "$T/err")"
+ok "destroy needs an explicit flag; --keep-login keeps the login volume; --yes deletes what's there, whatever is gone already"
 
 # status: one row per agent, its face showing the state; the login probe runs inside the VM as `agent`
 printf 'cage-codex\ncage-cursor\n' > "$MSB_EXISTING"
@@ -300,7 +328,7 @@ grep -qx 'url=local:browser' "$CAGE_HOME/connectors/browser.conf" && grep -qx 'a
 cage up claude 2>/dev/null
 Y="$CAGE_HOME/msb/claude.yaml"
 grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF "    placeholder: \"$ph\"" || fail "placeholder not in the msb config: $(cat "$Y")"
-grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    substitution: {headers: true, query: false, body: true}' || fail "no body substitution for the password"
+grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    substitution: {headers: false, query: false, body: true}' || fail "password not swapped in request bodies only"
 grep -A2 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    allow: ["example.com", "*.example.com"]' || fail "password allowed elsewhere"
 M="$CAGE_HOME/agents/claude/passwords.md"
 grep -qF "example.com: sign in as \`zack@example.com\` and type \`$ph\` as the password" "$M" && grep -qF "$alt" "$M" || fail "agent not told: $(cat "$M")"
@@ -336,8 +364,9 @@ fi
 # msb installed by the official installer but not on PATH (autostart and `wsl.exe --exec` have no login shell)
 mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb"
 : > "$MSB_LOG"
-HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
-grep -qx 'stop | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
+echo cage-claude > "$T/h.running"
+env -u MSB_HOME HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" MSB_RUNNING="$T/h.running" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
+grep -qx 'stop | -t | 30 | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
 ok "finds msb in the installer's location when it isn't on PATH"
 
 # --- strict network: deny by default, only each agent's own hosts plus what you allow
@@ -398,7 +427,7 @@ grep -q '^name = "all"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "n
 grep -q '^base_url = "http://127.0.0.1:8178/v1"$' "$t" && grep -q '^provider = "openai"$' "$t" || fail "voice: no local speech-to-text"
 grep -q '^VOICE_MODE=local$' "$CAGE_HOME/agents/claude/voice.env" || fail "voice.env"
 grep -q '^command = "/bin/bash /cage/hook.sh ask"$' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex has no stand-in, only /all"
-grep '^run | .*--name | cage-claude |' "$MSB_LOG" | grep -q -- "--mount-dir | $CAGE_HOME/outbox/claude:/cage-outbox" || fail "no outbox mount"
+grep '^run | .*--name | cage-claude |' "$MSB_LOG" | grep -q -- "--mount-dir | $CAGE_HOME/outbox/claude:/cage-outbox:quota=16M,nosuid,nodev |" || fail "no outbox mount (with a size limit)"
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   out="$(HOME="$T/cc-relay" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$t" 2>&1 || true)"
   grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"
@@ -406,6 +435,7 @@ fi
 ok "/all, stand-ins and voice notes: hooks, the /all command, local speech-to-text, the outbox mount"
 
 # guest/hook.sh as cc-connect runs it: everything in environment variables
+pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `ask-all on` started would race `cage _outbox` below)
 O="$CAGE_HOME/outbox/claude"
 hook() { env -i HOME="$T/vmhome" PATH="$PATH" CAGE_OUTBOX="$O" CC_HOOK_SESSION_KEY="telegram:111:111" "$@" bash "$ROOT/guest/hook.sh" ask fallback; }
 hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="hi there"
@@ -491,7 +521,7 @@ grep -q '^mode = "bypassPermissions"$' "$c" && ! grep -q '^allowed_tools' "$c" |
 ok "asking first: Claude asks before using your apps only, the others before every action; off again"
 
 # cage add: agents to talk to in the app, no chat app needed; earlier agents are kept only if they were set up
-( export CAGE_HOME="$T/added"
+( block_watch; export CAGE_HOME="$T/added"
   "$ROOT/cage" add codex cursor </dev/null >/dev/null 2>&1 || fail "cage add"
   grep -q '^CAGE_AGENTS="codex cursor"$' "$CAGE_HOME/cage.env" || fail "added agents: $(grep CAGE_AGENTS "$CAGE_HOME/cage.env")"
   [ -d "$CAGE_HOME/app/codex/in" ] && [ -f "$CAGE_HOME/agents/cursor/cc-connect.toml" ] || fail "added agents not woken"
@@ -500,6 +530,15 @@ ok "asking first: Claude asks before using your apps only, the others before eve
   "$ROOT/cage" _state 2>/dev/null | python3 -c 'import json,sys; d={a["name"]: a for a in json.load(sys.stdin)["agents"]}
 assert d["codex"]["reachable"] and not d["codex"]["chat_apps"] and not d["antigravity"]["enabled"], d' || fail "state: reachable in the app" )
 ok "cage add: agents you chat with in the app, no bot needed; agents added before are kept"
+
+# cage add, with one agent that can't start: the others are still woken and signed in, and cage add ends in exit 1
+( block_watch; export CAGE_HOME="$T/added2" MSB_EXISTING="$T/added2.vms"
+  echo cage-codex > "$MSB_EXISTING"; : > "$MSB_LOG"; rc=0
+  printf '\n\n\n\n' | MSB_FAIL_RUN=cage-claude CAGE_PROTO=1 "$ROOT/cage" add claude codex >/dev/null 2>"$T/add2.err" || rc=$?
+  [ $rc = 1 ] && grep -q "couldn't start claude" "$T/add2.err" || fail "cage add with one that can't start: exit $rc, $(cat "$T/add2.err")"
+  grep -q '^exec .*| cage-codex |' "$MSB_LOG" || fail "codex started, but wasn't checked for a sign-in: $(cat "$T/add2.err")"
+  if grep -q '^exec .*| cage-claude |' "$MSB_LOG"; then fail "claude, which didn't start, was asked to sign in"; fi )
+ok "cage add: when one agent can't start, the others are still signed in"
 
 cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
 assert {"msb", "disk", "network"} <= set(c), c
@@ -555,6 +594,7 @@ cage ask-all off </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
 [ -e "$CAGE_HOME/agents/claude/mask.on" ] && [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "mask.on isn't per agent"
 printf 'cage-claude\ncage-codex\n' > "$T/running"
 export MSB_RUNNING="$T/running" MSB_SENT="$T/sent" MSB_PS="$T/ps"
+pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `cage up` started, without these settings, would race `cage _outbox` below)
 : > "$MSB_SENT"; : > "$MSB_PS"; : > "$MSB_LOG"; rm -f "$CAGE_HOME/outbox/.last-claude" "$CAGE_HOME/outbox/.seen"
 marker="IBAN-DE89370400440532013000-$RANDOM$RANDOM"
 d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"
@@ -660,6 +700,11 @@ echo "300MB of browser" > "$V/.cache/ms-playwright/chromium/big"
 echo "codex-login" > "$T/volumes/cage-codex-home/.codex/auth.json"
 python3 -c "import os,sys; os.setxattr(sys.argv[1], 'user.containers.override_stat', b'1000:1000:0100600')" "$V/.claude/.credentials.json" 2>/dev/null && xattrs=1 || xattrs=0
 export CAGE_BACKUP_DIR="$T/backups"
+# the cage installed here: the releases cage rollback goes back to, and microsandbox's install log (cage fix)
+mkdir -p "$CAGE_HOME/releases/v0.3.0" && echo "this computer's cage" > "$CAGE_HOME/releases/v0.3.0/cage-v0.3.0.tar.gz"
+echo "installed msb" > "$CAGE_HOME/msb-install.log"
+# the web app's own files: a question waiting for its job, the one-time pairing code, the server's pid
+mkdir -p "$CAGE_HOME/jobs" && echo "a question" > "$CAGE_HOME/jobs/0a1b.txt"; echo pair > "$CAGE_HOME/ui.pair"; echo 1 > "$CAGE_HOME/ui.pid"
 if CAGE_BACKUP_PASSPHRASE=short cage backup 2>"$T/err"; then fail "accepted a 5-character passphrase"; fi
 CAGE_BACKUP_PASSPHRASE="correct horse battery" cage backup 2>"$T/err" || fail "backup: $(cat "$T/err")"
 bk="$(ls "$T/backups"/cage-*.cagebackup)"
@@ -670,7 +715,11 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass pass:"correct horse batte
 grep -qx 'manifest.json' "$T/members" && grep -qx 'config/cage.env' "$T/members" && grep -qx 'volumes/cage-claude-home/work/notes.md' "$T/members" \
   || fail "unexpected layout: $(head -20 "$T/members")"
 if grep -q 'ms-playwright\|config/msb/' "$T/members"; then fail "backup has caches or generated files"; fi
-ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches)"
+if grep -qx 'config/ui.token\|config/autostart\|config/refresh.pid\|config/msb-install.log\|config/ui.pair\|config/ui.pid' "$T/members" ||
+   grep -q '^config/releases\|^config/jobs' "$T/members"; then
+  fail "backup has this computer's own files: $(grep -e '^config/releases' -e '^config/jobs' -e '^config/\(ui.token\|autostart\|refresh.pid\|msb-install.log\|ui.pair\|ui.pid\)$' "$T/members" | head -n 3)"
+fi
+ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches, nor the cage installed here)"
 
 # restore: on top of changed settings and a wiped volume; a wrong passphrase changes nothing
 cp "$CAGE_HOME/cage.env" "$T/env.saved"
@@ -690,9 +739,537 @@ if [ "$xattrs" = 1 ]; then
     || fail "the in-VM owner and mode (xattr) didn't come back"
 fi
 ls -d "$CAGE_HOME".before-restore-*/volumes/cage-claude-home >/dev/null || fail "what was there before wasn't kept"
-grep -q '^stop | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-claude |' "$MSB_LOG" || fail "agents not stopped, then woken: $(cat "$MSB_LOG")"
+[ "$(cat "$CAGE_HOME/releases/v0.3.0/cage-v0.3.0.tar.gz")" = "this computer's cage" ] || fail "restore lost the releases cage rollback goes back to"
+rm -rf "$CAGE_HOME/releases"
+grep -q '^stop | -t | 30 | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-claude |' "$MSB_LOG" || fail "agents not stopped, then woken: $(cat "$MSB_LOG")"
 rm -rf "$CAGE_HOME".before-restore-*
-ok "restore: settings and volumes back (owners, links), old copy kept, agents woken; wrong passphrase refused"
+ok "restore: settings and volumes back (owners, links), old copy kept, this computer's releases kept, agents woken; wrong passphrase refused"
+
+# --- folders a VM can write: the host never acts through what it plants there. Each case runs in its own CAGE_HOME.
+fresh() { block_watch; export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/cage" init 2>/dev/null; }
+
+# the chat folder's in/, out/ and files/: a link or a file in their place is removed, never chmodded through
+( fresh z
+  "$ROOT/cage" up claude 2>/dev/null
+  A="$CAGE_HOME/app/claude" S="$T/zhome/.ssh"
+  mkdir -p "$S" && chmod 700 "$S" && echo key > "$S/id" && chmod 600 "$S/id"
+  rm -rf "$A/in" "$A/out" "$A/files"
+  ln -s ../../../zhome/.ssh "$A/in" && ln -s ../../../zhome/.ssh/id "$A/files" && echo not-a-folder > "$A/out"
+  rc=0; "$ROOT/cage" up claude 2>"$T/z.err" || rc=$?
+  [ "$(stat -c %a "$S")" = 700 ] && [ "$(stat -c %a "$S/id")" = 600 ] && [ "$(cat "$S/id")" = key ] || fail "cage up chmodded through a planted link: $(stat -c '%a %n' "$S" "$S/id")"
+  [ $rc = 0 ] || fail "a planted link stopped cage up: $(cat "$T/z.err")"
+  for x in in out files; do
+    [ ! -L "$A/$x" ] && [ -d "$A/$x" ] && [ "$(stat -c %a "$A/$x")" = 777 ] || fail "$x/ isn't a fresh folder again: $(ls -la "$A")"
+  done
+  # a link put back right after cage removed one (the VM is still running then) isn't taken for the folder
+  rm -rf "$A/in" && ln -s ../../../zhome/.ssh "$A/in" && mkdir -p "$T/zbin"
+  printf '#!/bin/sh
+%s "$@"
+for a; do case "$a" in */app/claude/in) ln -s ../../../zhome/.ssh "$a" ;; esac; done
+' "$(command -v rm)" > "$T/zbin/rm"
+  chmod +x "$T/zbin/rm"; rc=0
+  PATH="$T/zbin:$PATH" "$ROOT/cage" up claude 2>"$T/z.err" || rc=$?
+  [ $rc = 1 ] && grep -q "couldn't start claude" "$T/z.err" || fail "a link put back in place of in/ went unnoticed (exit $rc): $(cat "$T/z.err")" )
+ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is removed, never followed"
+
+# memory review: a link in the inbox is removed unread; invisible characters are taken out (and you're told); a note
+# is read once, all of it shown, and exactly that is kept, even if the VM changes the file while you decide
+( fresh j
+  printf 'ghp_s3cret\n' | "$ROOT/cage" secret add GITHUB_TOKEN api.github.com claude 2>/dev/null
+  "$ROOT/cage" up codex 2>/dev/null
+  I="$CAGE_HOME/brain/inbox/codex"
+  ln -s ../../../secrets/GITHUB_TOKEN "$I/project-notes.md"
+  ln -s ../../../cage.env "$I/settings.md"
+  printf 'Zack likes\xe2\x80\x8b tea.\xe2\x80\xae end\xf3\xa0\x81\x81\n' > "$I/hidden.md"   # zero-width space, right-to-left override, a tag
+  head -c 20000 /dev/zero | tr '\0' a > "$I/huge.md"
+  # names the VM chose, with codes for your terminal (an OSC 52 sequence would set your clipboard) in them
+  ln -s ../../../cage.env "$I/link"$'\e]52;c;cHduZWQ=\a\e[2J'"FAKE.md"
+  head -c 20000 /dev/zero | tr '\0' a > "$I/big"$'\e]52;c;cHduZWQ=\a\e[2J'"FAKE.md"
+  { head -c 6000 /dev/zero | tr '\0' b; printf '\nTAIL-AFTER-6000-BYTES\n'; } > "$I/long.md"
+  printf 'y\ny\ny\ny\n' | "$ROOT/cage" memory > "$T/j.out" 2>&1 || fail "cage memory: $(cat "$T/j.out")"
+  N="$CAGE_HOME/brain/memory/notes"
+  if grep -rq 'ghp_s3cret\|CAGE_AGENTS' "$T/j.out" "$N"; then fail "a linked file was shown or kept: $(cat "$T/j.out")"; fi
+  [ ! -e "$I/project-notes.md" ] && [ ! -L "$I/project-notes.md" ] && [ -f "$CAGE_HOME/secrets/GITHUB_TOKEN" ] || fail "the link wasn't removed (or its target was)"
+  grep -qx 'Zack likes tea. end' "$N/hidden.md" || fail "invisible characters: $(od -c "$N/hidden.md" | head)"
+  if LC_ALL=C grep -q $'\xe2\x80\x8b\|\xe2\x80\xae\|\xf3\xa0' "$N/hidden.md" "$T/j.out"; then fail "invisible characters were shown or kept"; fi
+  grep -q 'took out 3 invisible characters' "$T/j.out" || fail "not told about the invisible characters: $(cat "$T/j.out")"
+  [ ! -e "$N/huge.md" ] && [ ! -e "$I/huge.md" ] && grep -q 'over 16 KB' "$T/j.out" || fail "a 20 KB note wasn't refused: $(ls "$N")"
+  if LC_ALL=C grep -q $'\e' "$T/j.out"; then fail "a name the VM chose put codes on the terminal: $(cat -v "$T/j.out")"; fi
+  grep -qF 'removed link??52?c?cHduZWQ????2JFAKE from' "$T/j.out" && grep -qF "codex's note big??52?c?cHduZWQ????2JFAKE is over 16 KB" "$T/j.out" \
+    || fail "names with codes in them: $(cat -v "$T/j.out")"
+  grep -q TAIL-AFTER-6000-BYTES "$T/j.out" && grep -q TAIL-AFTER-6000-BYTES "$N/long.md" || fail "the whole note wasn't shown"
+  printf 'the note as shown\n' > "$I/swap.md"
+  { for _ in $(seq 100); do grep -q 'Keep it' "$T/j2.out" 2>/dev/null && break; sleep 0.1; done
+    printf 'swapped in later\n' > "$I/swap.md"; printf 'y\n'; } | "$ROOT/cage" memory > "$T/j2.out" 2>&1
+  grep -q 'the note as shown' "$N/swap.md" && ! grep -q 'swapped in later' "$N/swap.md" || fail "kept something other than what was shown: $(cat "$N/swap.md")"
+  # ~/.cage reached through a link, and no `timeout` command (macOS): notes are still read
+  ln -s "$CAGE_HOME" "$T/jlink" && mkdir "$T/nt"
+  # (an empty or missing PATH folder leaves its glob as it is: skip it, or a second one would clash on a link named '*')
+  for p in ${PATH//:/ }; do for x in "$p"/*; do [ -e "$x" ] || continue; n="${x##*/}"; [ "$n" = timeout ] || [ -e "$T/nt/$n" ] || [ -L "$T/nt/$n" ] || ln -s "$x" "$T/nt/$n"; done; done
+  printf 'read through a link, without timeout\n' > "$I/linked.md"
+  printf 'y\n' | PATH="$T/nt" CAGE_HOME="$T/jlink" "$ROOT/cage" memory > "$T/j3.out" 2>&1 || fail "cage memory: $(cat "$T/j3.out")"
+  grep -q 'without timeout' "$N/linked.md" || fail "a note wasn't read with ~/.cage behind a link, or without timeout: $(cat "$T/j3.out")" )
+ok "memory review: links in the inbox removed unread, invisible characters taken out, what you see is what's kept"
+
+# links cage opens (a sign-in link comes from an app's own server): only plain web addresses, and on Windows the
+# address reaches PowerShell as data, never inside its code
+( fresh o
+  mkdir -p "$T/obin"
+  printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$*" "$CAGE_URL" >> "%s/opened.log"\n' "$T" > "$T/obin/powershell.exe"
+  printf '#!/bin/sh\nprintf "xdg-open %%s\\n" "$1" >> "%s/opened.log"\n' "$T" > "$T/obin/xdg-open"
+  chmod +x "$T/obin/powershell.exe" "$T/obin/xdg-open"
+  export PATH="$T/obin:$PATH"
+  for u in "https://auth.evil.example/authorize’; Add-Content -Path $T/pwned -Value x; ‘?a=1" 'C:\Windows\System32\calc.exe' \
+           'file:///etc/passwd' "https://x.example/a'b" 'https://x.example/a"b' 'https://x.example/a`b' 'https://x.example/a b'; do
+    # refused, and never opened (opened.log, below), but no error: the setup that asked goes on
+    WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open "$u" 2>>"$T/o.err" || fail "a refused link stopped cage: $u"
+    DISPLAY=:0 "$ROOT/cage" _open "$u" 2>>"$T/o.err" || fail "a refused link stopped cage: $u"
+  done
+  grep -q "isn't a plain web address" "$T/o.err" || fail "no warning for a refused link: $(cat "$T/o.err")"
+  WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open 'https://example.com/a?b=1&c=(2)' 2>/dev/null
+  DISPLAY=:0 "$ROOT/cage" _open 'https://example.com/x' 2>/dev/null
+  for _ in $(seq 50); do [ "$(wc -l < "$T/opened.log" 2>/dev/null || echo 0)" -ge 2 ] && break; sleep 0.1; done
+  grep -qxF -- '-NoProfile -Command Start-Process $env:CAGE_URL|https://example.com/a?b=1&c=(2)' "$T/opened.log" \
+    && grep -qxF 'xdg-open https://example.com/x' "$T/opened.log" && [ "$(wc -l < "$T/opened.log")" = 2 ] \
+    || fail "links opened: $(cat "$T/opened.log")"
+  [ ! -e "$T/pwned" ] || fail "something in a link ran"
+  out="$(env -u DISPLAY -u WAYLAND_DISPLAY "$ROOT/cage" _open 'https://example.com/y' 2>&1)"
+  grep -qF 'Open this link: https://example.com/y' <<<"$out" || fail "nothing to open it with, and the link wasn't shown: $out" )
+ok "opening links: plain web addresses only; on Windows passed to PowerShell as data; shown when nothing can open them"
+
+# settings: several cage commands at once (the web app runs them side by side) all keep their change; a value that
+# would be shell code in cage.env is never saved
+( fresh a
+  for round in 1 2 3 4 5; do
+    cp "$ROOT/cage.env.example" "$CAGE_HOME/cage.env"
+    "$ROOT/cage" fallback claude codex </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" approve codex on </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" voice off </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" network strict </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" allow h.example.com antigravity </dev/null >/dev/null 2>&1 &
+    wait
+    for k in CAGE_FALLBACK_claude CAGE_APPROVE_codex CAGE_ASK_ALL CAGE_VOICE CAGE_NETWORK CAGE_ALLOW_HOSTS_antigravity; do
+      [ "$(grep -c "^$k=" "$CAGE_HOME/cage.env")" = 1 ] || fail "round $round: $k lost (or doubled) by writers running at once: $(cat "$CAGE_HOME/cage.env")"
+    done
+  done
+  ! compgen -G "$CAGE_HOME/cage.env.*" >/dev/null || fail "a lock or temp file was left: $(ls -a "$CAGE_HOME")"
+  [ "$(stat -c %a "$CAGE_HOME/cage.env")" = 600 ] || fail "cage.env isn't 0600 any more"
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+  cp "$CAGE_HOME/cage.env" "$T/a.env"
+  for v in 'a"b' 'a$(touch '"$T"'/a.pwned)' 'a`id`' 'a\b' $'a\nCAGE_X=1'; do
+    if bash -c '. "$1" version >/dev/null; set_env CAGE_TEST "$2"' _ "$ROOT/cage" "$v" 2>/dev/null; then fail "saved the value $v"; fi
+  done
+  cmp -s "$CAGE_HOME/cage.env" "$T/a.env" && "$ROOT/cage" status >/dev/null 2>&1 && [ ! -e "$T/a.pwned" ] || fail "an unexpected value got into cage.env"
+  mkdir "$CAGE_HOME/cage.env.lock" && echo 999999 > "$CAGE_HOME/cage.env.lock/pid"   # left by a cage that died
+  timeout 20 "$ROOT/cage" ask-all off </dev/null >/dev/null 2>&1 && grep -q '^CAGE_ASK_ALL="off"' "$CAGE_HOME/cage.env" || fail "a dead cage's lock blocked settings"
+  # a dead cage's lock, and several writers at once: one of them takes it over, and they still take turns
+  for round in 1 2 3 4 5 6 7 8 9 10; do
+    printf 'CAGE_AGENTS="claude"\n' > "$CAGE_HOME/cage.env"
+    mkdir "$CAGE_HOME/cage.env.lock" && sh -c 'echo $$' > "$CAGE_HOME/cage.env.lock/pid"   # a pid that's gone
+    for k in 1 2 3 4 5 6 7 8; do bash -c '. "$1" version >/dev/null; set_env "CAGE_K$2" v' _ "$ROOT/cage" "$k" 2>>"$T/a.err" & done
+    wait
+    [ "$(grep -c '^CAGE_K' "$CAGE_HOME/cage.env")" = 8 ] && [ ! -s "$T/a.err" ] || fail "round $round: settings lost taking over a dead cage's lock: $(cat "$CAGE_HOME/cage.env" "$T/a.err")"
+  done
+  # settings that can't be saved (a full disk, a folder that isn't yours) are said to be, at once, never waited on
+  # forever; and a full disk never leaves a cut-short cage.env behind
+  mkdir -p "$T/abin" && printf '#!/bin/sh\ncase "$*" in *.lock) echo "mkdir: cannot create directory '"'"'$*'"'"': No space left on device" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$(command -v mkdir)" > "$T/abin/mkdir" && chmod +x "$T/abin/mkdir"
+  start=$SECONDS rc=0
+  PATH="$T/abin:$PATH" timeout 20 "$ROOT/cage" approve claude on </dev/null >/dev/null 2>"$T/a.err" || rc=$?
+  [ $rc = 1 ] && [ $((SECONDS - start)) -le 3 ] && grep -q "cage can't write in $CAGE_HOME (No space left on device)" "$T/a.err" \
+    || fail "settings that can't be saved: exit $rc after $((SECONDS - start)) s: $(cat "$T/a.err")"
+  cp "$ROOT/cage.env.example" "$CAGE_HOME/cage.env" && echo 'CAGE_ASK_ALL="on"' >> "$CAGE_HOME/cage.env" && cp "$CAGE_HOME/cage.env" "$T/a.env"
+  rc=0; ( ulimit -f 1; bash -c '. "$1" version >/dev/null; unset_env CAGE_ASK_ALL' _ "$ROOT/cage" ) 2>"$T/a.err" || rc=$?   # (1 KB of room)
+  [ $rc = 1 ] && cmp -s "$CAGE_HOME/cage.env" "$T/a.env" && grep -q "couldn't save your settings" "$T/a.err" \
+    || fail "a full disk cut cage.env short (exit $rc, $(wc -c < "$CAGE_HOME/cage.env") of $(wc -c < "$T/a.env") bytes): $(cat "$T/a.err")" )
+ok "settings: writers at once keep their change (a dead writer's lock too); code is refused; a full disk is said at once, never saved cut short"
+
+# text a VM wrote never reaches the terminal raw: WhatsApp's status (an OSC 52 sequence would set your clipboard)
+# and the host names in its logs
+( fresh o2
+  printf 'CAGE_AGENTS="claude"\nCAGE_WHATSAPP_MODE_claude="spare"\nCAGE_WHATSAPP_ALLOW_claude="15551234567"\n' >> "$CAGE_HOME/cage.env"
+  echo cage-claude > "$T/o2.vms"
+  export MSB_EXISTING="$T/o2.vms" MSB_RUNNING="$T/o2.vms" MSB_WA_STATUS="$T/wa.status"
+  printf '{"state":"code","code":"\033]52;c;Y3VybCBldmlsLnNoIHwgc2g=\007"}' > "$T/wa.status.1"
+  printf '{"state":"linked","me":"1\033]52;c;Y3VybCBldmlsLnNoIHwgc2g=\007"}' > "$T/wa.status"
+  printf '+1 555 123 4567\n' | "$ROOT/cage" chat link whatsapp claude > "$T/wa.out" 2>&1 || fail "chat link whatsapp: $(cat -v "$T/wa.out")"
+  if LC_ALL=C grep -q $'\033\\|\007' "$T/wa.out"; then fail "WhatsApp's status reached the terminal raw: $(cat -v "$T/wa.out")"; fi
+  grep -q 'linked' "$T/wa.out" || fail "not linked: $(cat -v "$T/wa.out")"
+  printf '2026-10-01T10:00:01.000Z DEBUG x: DNS query denied by network policy domain=evil\033]52;c;Y3VybA==\007.example\n' > "$T/o2.syslog"
+  MSB_SYSLOG="$T/o2.syslog" "$ROOT/cage" security 2>"$T/sec2.out" || fail "cage security"
+  grep -q "claude couldn't reach evil" "$T/sec2.out" || fail "event not listed: $(cat -v "$T/sec2.out")"
+  if LC_ALL=C grep -q $'\033\\|\007' "$T/sec2.out"; then fail "a host name from a VM's log reached the terminal raw: $(cat -v "$T/sec2.out")"; fi )
+ok "text a VM wrote (WhatsApp's status, host names in its logs) reaches the terminal without control codes"
+
+# WhatsApp's code to scan, drawn by qrencode on a terminal: what the VM wrote is only ever the text of the code, never
+# an option (-r <file> would draw one of your files, for you to scan with your phone)
+if script --version 2>&1 | grep -q util-linux; then
+  ( fresh qr
+    printf 'CAGE_AGENTS="claude"\nCAGE_WHATSAPP_MODE_claude="spare"\nCAGE_WHATSAPP_ALLOW_claude="15551234567"\n' >> "$CAGE_HOME/cage.env"
+    echo cage-claude > "$T/qr.vms"; mkdir -p "$T/qrbin"
+    printf '#!/bin/sh\nprintf "%%s|" "$@" >> "%s/qr.args"; echo >> "%s/qr.args"; echo QR\n' "$T" "$T" > "$T/qrbin/qrencode"; chmod +x "$T/qrbin/qrencode"
+    export MSB_EXISTING="$T/qr.vms" MSB_RUNNING="$T/qr.vms" MSB_WA_STATUS="$T/qr.status" PATH="$T/qrbin:$PATH" TERM=xterm-256color
+    printf '{"state":"linked","me":"15551234567"}' > "$T/qr.status"
+    for code in "-r$T/zhome-key" '2@Xyz+/abc==,AbC/1+x=,Q2Fn=,ZGV2'; do
+      printf '{"state":"qr","qr":"%s"}' "$code" > "$T/qr.status.1"
+      timeout 60 script -qfec "$ROOT/cage chat link whatsapp claude" /dev/null </dev/null > "$T/qr.out" 2>&1 || fail "chat link whatsapp: $(cat -v "$T/qr.out")"
+      grep -q 'linked to +15551234567' "$T/qr.out" || fail "not linked: $(cat -v "$T/qr.out")"
+    done
+    [ "$(cat "$T/qr.args")" = '-t|ANSIUTF8|-m|2|--|2@Xyz+/abc==,AbC/1+x=,Q2Fn=,ZGV2|' ] || fail "qrencode was given: $(cat "$T/qr.args")" )
+  ok "WhatsApp's code to scan reaches qrencode as text only, never as an option"
+fi
+
+# host patterns like *.anthropic.com stay patterns, whatever files are in the folder cage runs from
+( fresh h
+  mkdir -p "$T/hcwd" && cd "$T/hcwd" && touch www.anthropic.com notes.example.com www.example.org
+  printf 'ghp_x\n' | "$ROOT/cage" secret add GITHUB_TOKEN api.github.com claude 2>/dev/null || fail "secret add"
+  printf 'me@x.com\nhunter22\n' | "$ROOT/cage" password add example.com claude >/dev/null 2>&1 || fail "password add"
+  if printf 'k\n' | "$ROOT/cage" secret add MY_KEY api.anthropic.com claude 2>/dev/null; then fail "a key for claude's own service was accepted"; fi
+  "$ROOT/cage" up claude 2>/dev/null
+  Y="$CAGE_HOME/msb/claude.yaml"
+  grep -q '^    bypass: \["api.telegram.org", "anthropic.com", "\*.anthropic.com", ' "$Y" || fail "TLS bypass: $(grep bypass "$Y")"
+  grep -A2 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    allow: ["example.com", "*.example.com"]' || fail "password hosts: $(cat "$Y")"
+  "$ROOT/cage" allow '*.example.org' claude </dev/null 2>/dev/null && "$ROOT/cage" allow x.example.net claude </dev/null 2>/dev/null
+  "$ROOT/cage" allow rm x.example.net claude </dev/null 2>/dev/null
+  grep -qxF 'CAGE_ALLOW_HOSTS_claude="*.example.org"' "$CAGE_HOME/cage.env" || fail "allow list: $(grep ALLOW_HOSTS "$CAGE_HOME/cage.env")"
+  out="$("$ROOT/cage" allow rm nope.example.net claude </dev/null 2>&1)"
+  grep -q "nope.example.net wasn't on the allow list" <<<"$out" || fail "allow rm of a host that wasn't there: $out" )
+ok "host lists: *.patterns stay patterns in configs and checks, whatever is in the current folder; allow rm says when nothing changed"
+
+# website sign-ins: two sites whose names come out the same keep their own sign-ins; passwords with accents are
+# form-encoded byte by byte (bash 3.2 reads bytes over 127 as negative numbers)
+( fresh i
+  printf 'alice@a.com\npw-for-my-site\n' | "$ROOT/cage" password add my-site.com claude >/dev/null 2>&1 || fail "password add my-site.com"
+  printf 'bob@b.com\npw-for-my.site\n' | "$ROOT/cage" password add my.site.com claude >/dev/null 2>&1 || fail "password add my.site.com"
+  pw_of() { f="$(grep -lxF "site=$1" "$CAGE_HOME"/secrets/CAGE_PW_*.conf | xargs grep -Lx 'variant=form')"; cat "${f%.conf}"; }
+  [ "$(pw_of my-site.com)" = pw-for-my-site ] && [ "$(pw_of my.site.com)" = pw-for-my.site ] || fail "one site's sign-in replaced the other's: $(ls "$CAGE_HOME/secrets")"
+  out="$("$ROOT/cage" password 2>&1)"
+  grep -q 'my-site.com .*alice@a.com' <<<"$out" && grep -q 'my.site.com .*bob@b.com' <<<"$out" || fail "password list: $out"
+  printf 'bob2@b.com\npw-two\n' | "$ROOT/cage" password add my.site.com claude >/dev/null 2>&1
+  [ "$(grep -lxF 'site=my.site.com' "$CAGE_HOME"/secrets/CAGE_PW_*.conf | wc -l)" = 1 ] && [ "$(pw_of my.site.com)" = pw-two ] || fail "a new password for a site made a second entry"
+  "$ROOT/cage" password rm my.site.com </dev/null >/dev/null 2>&1 || fail "password rm my.site.com"
+  [ "$(pw_of my-site.com)" = pw-for-my-site ] && ! grep -qlxF 'site=my.site.com' "$CAGE_HOME"/secrets/CAGE_PW_*.conf || fail "password rm removed the wrong site"
+  printf 'z@x.com\np\303\244ssw\303\266rd&x=1 \303\274\342\202\254\n' | "$ROOT/cage" password add umlaut.example claude >/dev/null 2>&1 || fail "password add"
+  [ "$(cat "$CAGE_HOME/secrets/CAGE_PW_UMLAUT_EXAMPLE_F")" = 'p%C3%A4ssw%C3%B6rd%26x%3D1%20%C3%BC%E2%82%AC' ] || fail "form encoding: $(cat "$CAGE_HOME/secrets/CAGE_PW_UMLAUT_EXAMPLE_F")" )
+ok "website sign-ins: sites with look-alike names keep their own; found by site to list and remove; accents form-encoded right"
+
+# voice notes through Groq: its key goes to the VMs only while that's on, can be replaced, and can be deleted
+( fresh u
+  printf 'gsk_abcdefghijklmnopqrstuvwxyz\n' | "$ROOT/cage" voice on groq >/dev/null 2>&1 || fail "voice on groq"
+  "$ROOT/cage" up claude 2>/dev/null
+  grep -qx '  VOICE_GROQ_KEY:' "$CAGE_HOME/msb/claude.yaml" || fail "the Groq key wasn't handed on for voice notes"
+  "$ROOT/cage" voice off </dev/null >/dev/null 2>&1 && "$ROOT/cage" up claude 2>/dev/null
+  if grep -qs 'VOICE_GROQ_KEY' "$CAGE_HOME/msb/claude.yaml" "$CAGE_HOME/agents/claude/secrets.md"; then fail "voice off, but the VM still gets the Groq key"; fi
+  "$ROOT/cage" voice on groq </dev/null >/dev/null 2>&1 || fail "voice on groq with a key saved before"
+  [ "$(cat "$CAGE_HOME/secrets/VOICE_GROQ_KEY")" = gsk_abcdefghijklmnopqrstuvwxyz ] || fail "the key changed without asking"
+  printf 'y\ngsk_NEWNEWNEWNEWNEWNEWNEWNEW\nn\n' | CAGE_PROTO=1 "$ROOT/cage" voice on groq >/dev/null 2>"$T/u.err" || fail "replacing the key: $(cat "$T/u.err")"
+  grep -q '"t":"confirm","text":"You saved a Groq key before' "$T/u.err" && [ "$(cat "$CAGE_HOME/secrets/VOICE_GROQ_KEY")" = gsk_NEWNEWNEWNEWNEWNEWNEWNEW ] \
+    || fail "the Groq key couldn't be replaced: $(cat "$T/u.err")"
+  "$ROOT/cage" secret rm VOICE_GROQ_KEY </dev/null >/dev/null 2>&1 && [ ! -e "$CAGE_HOME/secrets/VOICE_GROQ_KEY" ] || fail "the Groq key couldn't be deleted" )
+ok "voice notes through Groq: the key reaches VMs only while that's on, is replaced when you say so, and can be deleted"
+
+# one agent that can't start (msb refuses it, or a setting of its own is broken) doesn't keep the others asleep
+( fresh b
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+  printf 'CAGE_AGENTS="claude codex cursor"\nCAGE_ASK_ALL="on"\n' >> "$CAGE_HOME/cage.env"
+  : > "$MSB_LOG"
+  rc=0; MSB_FAIL_RUN=cage-claude "$ROOT/cage" up </dev/null 2>"$T/b.err" || rc=$?
+  [ $rc = 1 ] || fail "up said all is well with an agent that didn't start (exit $rc): $(cat "$T/b.err")"
+  grep -q "couldn't start claude: failed to start \"cage-claude\"" "$T/b.err" && grep -q 'cage logs claude' "$T/b.err" \
+    && grep -q '^ *sandbox process exited (signal: 6 (SIGABRT)) before agent relay became available$' "$T/b.err" || fail "no plain message: $(cat "$T/b.err")"
+  if grep -q 'creation flags\|msb logs' "$T/b.err"; then fail "msb's warnings or advice shown as why: $(cat "$T/b.err")"; fi
+  # the VM never printed a thing; cage logs then shows what microsandbox noted about it
+  echo cage-claude > "$T/b.vms"; printf 'thread main panicked: Error creating the Kvm object: Error(2)\n' > "$T/b.syslog"
+  out="$(MSB_EXISTING="$T/b.vms" MSB_SYSLOG="$T/b.syslog" "$ROOT/cage" logs claude 2>&1)"
+  grep -q "claude's VM hasn't printed anything" <<<"$out" && grep -q 'Error creating the Kvm object' <<<"$out" || fail "cage logs for a VM that never started: $out"
+  for a in codex cursor; do grep -q -- "--name | cage-$a |" "$MSB_LOG" || fail "$a wasn't started after claude failed: $(cat "$T/b.err")"; done
+  for _ in $(seq 20); do pgrep -f -- "$ROOT/cage _refresh" >/dev/null && break; sleep 0.2; done
+  pgrep -f -- "$ROOT/cage _refresh" >/dev/null || fail "the background helper wasn't started"
+  echo 'CAGE_SLACK_BOT_TOKEN_codex="xoxb-short"' >> "$CAGE_HOME/cage.env"
+  : > "$MSB_LOG"
+  rc=0; "$ROOT/cage" up </dev/null 2>"$T/b2.err" || rc=$?
+  [ $rc = 1 ] && grep -q "codex's Slack tokens are broken" "$T/b2.err" && grep -q "couldn't start codex" "$T/b2.err" || fail "broken setting: $(cat "$T/b2.err")"
+  for a in claude cursor; do grep -q -- "--name | cage-$a |" "$MSB_LOG" || fail "$a wasn't started after codex's setting failed"; done
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+  # microsandbox's own folder (each agent's login and work is in its volumes) is yours alone
+  mkdir -p "$MSB_HOME/volumes/cage-claude-home" "$MSB_HOME/db" && chmod 755 "$MSB_HOME" "$MSB_HOME/volumes" "$MSB_HOME/db"
+  "$ROOT/cage" up claude </dev/null 2>/dev/null
+  [ "$(stat -c %a "$MSB_HOME")$(stat -c %a "$MSB_HOME/volumes")$(stat -c %a "$MSB_HOME/db")" = 700700700 ] || fail "microsandbox's folder is readable by others" )
+ok "up: an agent that can't start is named, with why; the others start, and the helper too; ~/.microsandbox is private"
+
+# the background helper: one per CAGE_HOME, wherever cage is installed (spaces and brackets too); it picks up changed
+# settings by itself, and cage down stops it
+( fresh c
+  P="$T/My Apps (2025)"; mkdir -p "$P" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$P/"
+  re="$(printf '%s' "$P/cage _refresh" | sed 's/[][()+.*^$?{}|\\]/\\&/g')"
+  helpers() { { pgrep -f -- "$re" || true; } | wc -l | tr -d ' '; }   # (busybox's pgrep has no -c)
+  printf 'CAGE_AGENTS="claude codex"\nCAGE_NETWORK="strict"\n' >> "$CAGE_HOME/cage.env"
+  printf 'cage-claude\ncage-codex\n' > "$T/c.vms"
+  export MSB_EXISTING="$T/c.vms" MSB_RUNNING="$T/c.vms" MSB_SENT="$T/c.sent"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do "$P/cage" voice off </dev/null >/dev/null 2>&1 & done; wait
+  sleep 1
+  n="$(helpers)"
+  [ "$n" = 1 ] || { pkill -f -- "$re"; fail "10 cage commands at once left $n background helpers"; }
+  pid="$(cat "$CAGE_HOME/refresh.pid")"
+  "$P/cage" ask-all on </dev/null >/dev/null 2>&1
+  [ "$(helpers)" = 1 ] && [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid" ] || fail "a second helper started"
+  # an update replacing cage: half-written, the helper waits; whole again (and new), it carries on as the new one
+  cp "$P/cage" "$T/c.cage"; { head -c 2000 "$T/c.cage"; printf '\nif\n'; } > "$P/cage"
+  sleep 4; kill -0 "$pid" 2>/dev/null || fail "the helper died while cage was being replaced"
+  { cat "$T/c.cage"; echo '# a newer cage'; } > "$P/cage"
+  sleep 4; kill -0 "$pid" 2>/dev/null && [ "$(helpers)" = 1 ] || { pkill -f -- "$re"; fail "the helper didn't carry on after an update"; }
+  d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"; mkdir -p "$d"
+  printf ask > "$d/kind"; printf 'telegram:1:1' > "$d/session"; printf 'what is 2+2?' > "$d/text"
+  for _ in $(seq 40); do [ ! -d "$d" ] && grep -q 'answer from cage-codex to: what is 2+2?' "$T/c.sent" 2>/dev/null && break; sleep 0.2; done
+  grep -q 'answer from cage-codex to: what is 2+2?' "$T/c.sent" 2>/dev/null || { pkill -f -- "$re"; fail "the helper didn't pick up /all, turned on after it started"; }
+  "$P/cage" down </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  if kill -0 "$pid" 2>/dev/null; then pkill -f -- "$re"; fail "cage down left the helper running"; fi )
+ok "the background helper: one per CAGE_HOME whatever the install path, picks up new settings itself, stops with cage down"
+
+# your other CAGE_HOMEs' helpers are theirs: a first start here, cage down here, a start here again never stops one;
+# a helper from a cage before pid files (it has no CAGE_HOME on its command line) does go when one starts
+( block_watch
+  alive() { kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" 2>/dev/null | grep -q Z; }   # (a stopped one may linger as a zombie)
+  for h in k1 k2 k3 k4; do mkdir -p "$T/$h" && CAGE_HOME="$T/$h" "$ROOT/cage" init 2>/dev/null && printf 'CAGE_AGENTS="claude"\n' >> "$T/$h/cage.env"; done
+  CAGE_HOME="$T/k2" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do [ -s "$T/k2/refresh.pid" ] && break; sleep 0.2; done
+  pb="$(cat "$T/k2/refresh.pid")"
+  CAGE_HOME="$T/k3" setsid nohup "$ROOT/cage" _refresh </dev/null >/dev/null 2>&1 &   # started the way cage used to
+  old=$!
+  sleep 0.5; alive "$pb" && alive "$old" || fail "the helpers didn't start"
+  CAGE_HOME="$T/k1" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$old" || break; sleep 0.2; done
+  if alive "$old"; then kill "$old"; fail "a helper from before pid files was left running"; fi
+  CAGE_HOME="$T/k1" "$ROOT/cage" down </dev/null >/dev/null 2>&1
+  CAGE_HOME="$T/k1" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  CAGE_HOME="$T/k4" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  sleep 1
+  alive "$pb" || fail "another CAGE_HOME's helper was stopped"
+  for h in k1 k2 k4; do kill "$(cat "$T/$h/refresh.pid")" 2>/dev/null || true; done )
+ok "the background helper: one CAGE_HOME never stops another's; one from before pid files goes"
+
+# a helper hands over to the cage an update put in its place; a cage from before pid files (cage update --to an older
+# release, cage rollback) takes over with its own code for good. Back on this cage, the next start replaces it, and
+# a helper that older cage started itself too
+( fresh o
+  P="$T/o app"; mkdir -p "$P" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$P/"
+  re="$(printf '%s' "$P/cage _refresh" | sed 's/[][()+.*^$?{}|\\]/\\&/g')"
+  helpers() { { pgrep -f -- "$re" || true; } | wc -l | tr -d ' '; }
+  one() { for _ in $(seq 25); do [ "$(helpers)" = 1 ] && return 0; sleep 0.2; done; return 1; }   # (a fork of it counts too, a moment)
+  alive() { kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" 2>/dev/null | grep -q Z; }
+  bail() { pkill -f -- "$re" 2>/dev/null || true; fail "$@"; }
+  looping() { { ps -eo ppid=,comm= 2>/dev/null || ps -o ppid=,comm=; } | awk -v p="$1" '$1 == p && $2 == "sleep" { f = 1 } END { exit !f }'; }
+  printf 'CAGE_AGENTS="claude"\nCAGE_NETWORK="strict"\n' >> "$CAGE_HOME/cage.env"
+  cp "$P/cage" "$T/o.new"
+  # (like v0.3's: no pid file, never hands over)
+  printf '#!/usr/bin/env bash\ncase "$1" in _refresh) trap "exit 0" TERM INT; while :; do sleep 1 & wait "$!"; done ;; esac\n' > "$T/o.old"
+  "$P/cage" voice off </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do [ -s "$CAGE_HOME/refresh.pid" ] && break; sleep 0.2; done
+  pid="$(cat "$CAGE_HOME/refresh.pid")"
+  for _ in $(seq 50); do looping "$pid" && break; sleep 0.2; done   # (it has read cage, and taken its checksum)
+  cat "$T/o.old" > "$P/cage"
+  for _ in $(seq 40); do [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid?" ] && break; sleep 0.2; done
+  sleep 0.5
+  [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid?" ] && alive "$pid" || bail "the helper didn't hand over to the older cage: $(cat "$CAGE_HOME/refresh.pid")"
+  cat "$T/o.new" > "$P/cage"
+  sleep 4   # (the older cage's helper never notices)
+  "$P/cage" voice off </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$pid" || break; sleep 0.2; done
+  if alive "$pid"; then bail "the helper still runs the older cage's code after an update back"; fi
+  pid2="$(cat "$CAGE_HOME/refresh.pid")"
+  [ "$pid2" != "$pid" ] && alive "$pid2" && one || bail "no fresh helper after an update back: $pid2, $(helpers) running"
+  # the older cage's cage down stopped that one, and its cage up started its own, which knows nothing of pid files
+  kill "$pid2"; for _ in $(seq 25); do alive "$pid2" || break; sleep 0.2; done
+  echo "$pid?" > "$CAGE_HOME/refresh.pid"
+  cat "$T/o.old" > "$P/cage"
+  setsid nohup "$P/cage" _refresh </dev/null >/dev/null 2>&1 &
+  old=$!
+  sleep 0.5; alive "$old" || bail "the older cage's helper didn't start"
+  cat "$T/o.new" > "$P/cage"
+  "$P/cage" voice off </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$old" || break; sleep 0.2; done
+  if alive "$old"; then bail "the helper the older cage started was left running"; fi
+  pid3="$(cat "$CAGE_HOME/refresh.pid")"
+  [[ "$pid3" =~ ^[0-9]+$ ]] && alive "$pid3" && one || bail "no fresh helper: $pid3, $(helpers) running"
+  "$P/cage" down </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$pid3" || break; sleep 0.2; done
+  if alive "$pid3"; then bail "cage down left the helper running"; fi )
+ok "the background helper: one that handed over to an older cage, or that cage's own, makes way for a fresh one back on this cage"
+
+# nobody to answer (a script, a closed pipe): cage stops at the first question instead of asking forever; and five
+# wrong answers in a row end the asking too
+( fresh g
+  echo 'CAGE_TELEGRAM_TOKEN_claude="1:abc"' >> "$CAGE_HOME/cage.env"
+  for c in "setup codex" "password add example.com claude" "chat add whatsapp claude"; do
+    start=$SECONDS rc=0
+    # shellcheck disable=SC2086
+    timeout 20 "$ROOT/cage" $c </dev/null >/dev/null 2>"$T/g.err" || rc=$?
+    [ $rc = 1 ] && [ $((SECONDS - start)) -le 3 ] || fail "cage $c with nobody to answer: exit $rc after $((SECONDS - start)) s, $(wc -l < "$T/g.err") lines"
+    grep -q "no answer (nothing is connected to cage's input)" "$T/g.err" || fail "cage $c: $(tail -3 "$T/g.err")"
+  done
+  rc=0; printf 'not-a-token\n%.0s' 1 2 3 4 5 6 7 8 | timeout 20 "$ROOT/cage" setup codex >/dev/null 2>"$T/g.err" || rc=$?
+  [ $rc = 1 ] && grep -q "that's 5 tries" "$T/g.err" && [ "$(grep -c "not a bot token" "$T/g.err")" = 5 ] || fail "five wrong answers: $(tail -3 "$T/g.err")" )
+ok "questions: with nobody to answer, cage stops at once with a plain message; five wrong answers end the asking"
+
+# a VM that stops right after it's started: cage says so in seconds (not 15 minutes of "waking up"), with its last words
+if script --version 2>&1 | grep -q util-linux; then
+  ( fresh x
+    echo cage-claude > "$T/x.vms"; : > "$T/x.running"
+    printf 'provision[7]: base packages\nkernel: Out of memory: Killed process 42\n' > "$T/x.log"
+    start=$SECONDS rc=0
+    MSB_EXISTING="$T/x.vms" MSB_RUNNING="$T/x.running" MSB_VMLOG="$T/x.log" TERM=xterm-256color \
+      timeout 60 script -qfec "$ROOT/cage up claude" /dev/null </dev/null > "$T/x.out" 2>&1 || rc=$?
+    [ $rc = 1 ] && [ $((SECONDS - start)) -lt 30 ] || fail "waited on a VM that stopped (exit $rc after $((SECONDS - start)) s)"
+    grep -q 'claude stopped while starting' "$T/x.out" && grep -q 'Out of memory' "$T/x.out" && grep -q 'cage logs claude' "$T/x.out" \
+      || fail "a VM that stopped isn't explained: $(cat -v "$T/x.out" | tail -5)" )
+  ok "a VM that stops while starting is reported in seconds, with the last it said"
+fi
+
+# backups on a computer whose tar isn't GNU tar (macOS's is bsdtar): cage says so and saves nothing, and a backup that
+# doesn't open again is never called saved, nor does it clear older ones away
+( fresh l
+  export CAGE_BACKUP_DIR="$T/lbk" CAGE_BACKUP_PASSPHRASE="correct horse battery" CAGE_BACKUP_KEEP=2
+  mkdir -p "$CAGE_BACKUP_DIR" "$T/lbin" && echo old > "$CAGE_BACKUP_DIR/cage-2026-01-01-000000.cagebackup" && echo old > "$CAGE_BACKUP_DIR/cage-2026-01-02-000000.cagebackup"
+  if command -v bsdtar >/dev/null 2>&1; then printf '#!/bin/sh\nexec bsdtar "$@"\n'; else printf '#!/bin/sh\necho "bsdtar 3.7.2 - libarchive 3.7.2"\n'; fi > "$T/lbin/tar"
+  chmod +x "$T/lbin/tar"   # macOS's tar (a script, never a link: the next shim is written over it)
+  rc=0; PATH="$T/lbin:$PATH" "$ROOT/cage" backup 2>"$T/l.err" || rc=$?
+  [ $rc = 1 ] && grep -q 'backups need GNU tar' "$T/l.err" || fail "backup with bsdtar: exit $rc, $(cat "$T/l.err")"
+  printf '#!/bin/sh\ncase "$1" in --version) echo "tar (GNU tar) 1.35" ;; -c) exit 1 ;; *) exec %s "$@" ;; esac\n' "$(command -v tar)" > "$T/lbin/tar"
+  chmod +x "$T/lbin/tar"   # says it's GNU tar, then writes nothing (exit 1, which also means "a file changed")
+  rc=0; PATH="$T/lbin:$PATH" "$ROOT/cage" backup 2>"$T/l.err" || rc=$?
+  [ $rc = 1 ] && grep -q "didn't come out whole" "$T/l.err" || fail "an empty backup counted as saved: exit $rc, $(cat "$T/l.err")"
+  [ "$(ls "$CAGE_BACKUP_DIR")" = "$(printf 'cage-2026-01-01-000000.cagebackup\ncage-2026-01-02-000000.cagebackup')" ] || fail "older backups were touched: $(ls "$CAGE_BACKUP_DIR")"
+  "$ROOT/cage" backup 2>/dev/null && [ "$(ls "$CAGE_BACKUP_DIR" | wc -l)" = 2 ] || fail "a good backup didn't prune: $(ls "$CAGE_BACKUP_DIR")" )
+ok "backup: without GNU tar it says so; one that doesn't open again isn't kept, and older ones stay"
+
+# restore: a full disk is called that (not a wrong passphrase); not enough room is caught before anything is unpacked;
+# this computer's web app key and start-at-login stay as they are
+( fresh p
+  export CAGE_BACKUP_DIR="$T/pbk" CAGE_BACKUP_PASSPHRASE="correct horse battery" HOME="$T/phome"
+  mkdir -p "$HOME" "$T/pbin" "$MSB_VOLUMES/cage-claude-home/work"
+  head -c 3000000 /dev/urandom > "$MSB_VOLUMES/cage-claude-home/work/big.bin"
+  echo token-at-backup-time > "$CAGE_HOME/ui.token"
+  "$ROOT/cage" backup 2>/dev/null || fail "backup"
+  f="$(ls "$CAGE_BACKUP_DIR"/*.cagebackup)"
+  echo 'CAGE_CPUS=7' >> "$CAGE_HOME/cage.env"
+  rc=0; ( ulimit -f 1024; "$ROOT/cage" restore "$f" --yes ) 2>"$T/p.err" || rc=$?
+  [ $rc = 1 ] && grep -q "no room left on the disk" "$T/p.err" || fail "a full disk while restoring: exit $rc, $(cat "$T/p.err")"
+  if grep -q 'passphrase' "$T/p.err"; then fail "a full disk was blamed on the passphrase: $(cat "$T/p.err")"; fi
+  grep -q 'CAGE_CPUS=7' "$CAGE_HOME/cage.env" && ! compgen -G "$T/.cage-restore.*" >/dev/null || fail "a failed restore changed things"
+  mkdir -p "$T/pdf"
+  printf '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/x 100000 99900 100 100%%%% /\\n"\n' > "$T/pdf/df"; chmod +x "$T/pdf/df"
+  rc=0; PATH="$T/pdf:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err" || rc=$?
+  [ $rc = 1 ] && grep -q 'needs about 9 MB free on this disk' "$T/p.err" || fail "no room, found before unpacking: exit $rc, $(cat "$T/p.err")"
+  if CAGE_BACKUP_PASSPHRASE=wrong-passphrase "$ROOT/cage" restore "$f" --yes 2>"$T/p.err"; then fail "restored with a wrong passphrase"; fi
+  grep -q 'passphrase is wrong' "$T/p.err" || fail "a wrong passphrase: $(cat "$T/p.err")"
+  # about 1 wrong passphrase in 256 gets past openssl (the padding happens to come out right): still called wrong
+  mkdir -p "$T/posl"
+  printf '#!/usr/bin/env bash\ncase " $* " in *" -d "*) p="$(cat <&3)"\n  [ "$p" != lucky-wrong ] || { echo "not what a backup holds"; exit 0; }\n  exec %s "$@" 3< <(printf %%s "$p") ;; esac\nexec %s "$@"\n' \
+    "$(command -v openssl)" "$(command -v openssl)" > "$T/posl/openssl" && chmod +x "$T/posl/openssl"
+  if CAGE_BACKUP_PASSPHRASE=lucky-wrong PATH="$T/posl:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err"; then fail "restored with a wrong passphrase"; fi
+  grep -q 'passphrase is wrong' "$T/p.err" || fail "a wrong passphrase openssl let through: $(cat "$T/p.err")"
+  echo token-of-the-open-page > "$CAGE_HOME/ui.token"; : > "$CAGE_HOME/autostart"
+  for t in systemctl uname; do printf '#!/bin/sh\n[ "%s" != uname ] || { echo Linux; exit 0; }\necho "%s $*" >> "%s/p.os"\n' "$t" "$t" "$T" > "$T/pbin/$t"; chmod +x "$T/pbin/$t"; done
+  PATH="$T/pbin:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err" || fail "restore: $(cat "$T/p.err")"
+  [ "$(cat "$CAGE_HOME/ui.token")" = token-of-the-open-page ] || fail "restore replaced the web app's key: $(cat "$CAGE_HOME/ui.token")"
+  [ -e "$CAGE_HOME/autostart" ] && grep -q 'systemctl --user enable cage-up.service' "$T/p.os" || fail "start-at-login wasn't made again: $(cat "$T/p.err")"
+  rm -rf "$CAGE_HOME".before-restore-* )
+ok "restore: a full disk is named, not blamed on the passphrase; room checked first; the web app's key and start-at-login stay"
+
+# down: a VM that doesn't stop in 30 s is stopped at once (and you're told); asleep ones are left alone, and with
+# nobody awake, cage says so
+( fresh d
+  printf 'cage-claude\ncage-codex\n' > "$T/d.vms"; echo cage-claude > "$T/d.running"
+  export MSB_EXISTING="$T/d.vms" MSB_RUNNING="$T/d.running"
+  : > "$MSB_LOG"
+  MSB_STOP_STUCK=cage-claude "$ROOT/cage" down 2>"$T/d.err" || fail "down: $(cat "$T/d.err")"
+  grep -qx 'stop | -t | 30 | cage-claude' "$MSB_LOG" && grep -qx 'stop | --force | cage-claude' "$MSB_LOG" || fail "down didn't stop claude by force: $(cat "$MSB_LOG")"
+  grep -q "claude didn't stop within 30 s" "$T/d.err" && grep -q 'claude is asleep' "$T/d.err" || fail "down: $(cat "$T/d.err")"
+  if grep -q 'stop .*cage-codex' "$MSB_LOG"; then fail "down stopped an agent that was asleep"; fi
+  : > "$T/d.running"
+  "$ROOT/cage" down 2>"$T/d.err" && grep -q 'everyone is already asleep' "$T/d.err" || fail "down with nobody awake: $(cat "$T/d.err")"
+  "$ROOT/cage" down codex 2>"$T/d.err" && grep -q 'codex is already asleep' "$T/d.err" || fail "down codex: $(cat "$T/d.err")" )
+ok "down: a VM that won't stop in 30 s is stopped at once; asleep ones are left alone, and cage says when nobody was awake"
+
+# everyday commands: restart; logs (the last 200 lines, or follow); shell; status --json for scripts; chat rm telegram;
+# remove (asks first, offers a backup, keeps the last agent); and plain words when microsandbox or a VM isn't there
+( fresh ev
+  printf 'CAGE_AGENTS="claude codex cursor"\nCAGE_TELEGRAM_TOKEN_claude="1:abc"\nCAGE_TELEGRAM_BOT_claude="dot_claude_bot"\nCAGE_TELEGRAM_ALLOW="4242"\n' >> "$CAGE_HOME/cage.env"
+  printf 'cage-claude\ncage-codex\ncage-cursor\n' > "$T/ev.vms"; printf 'cage-claude\ncage-codex\n' > "$T/ev.running"
+  export MSB_EXISTING="$T/ev.vms" MSB_RUNNING="$T/ev.running"
+  mkdir -p "$MSB_VOLUMES/cage-cursor-home" "$MSB_VOLUMES/cage-codex-home"
+  : > "$MSB_LOG"
+  "$ROOT/cage" restart claude 2>"$T/ev.err" && grep -q 'restarting claude' "$T/ev.err" && grep -q -- '--name | cage-claude |' "$MSB_LOG" \
+    || fail "restart: $(cat "$T/ev.err")"
+  : > "$MSB_LOG"
+  "$ROOT/cage" logs claude >/dev/null 2>&1 && grep -qx 'logs | --tail | 200 | cage-claude' "$MSB_LOG" || fail "logs: $(cat "$MSB_LOG")"
+  "$ROOT/cage" logs claude --tail 5 >/dev/null 2>&1 && grep -qx 'logs | --tail | 5 | cage-claude' "$MSB_LOG" || fail "logs --tail: $(cat "$MSB_LOG")"
+  "$ROOT/cage" logs -f claude >/dev/null 2>&1 && grep -qx 'logs | --tail | 200 | -f | cage-claude' "$MSB_LOG" || fail "logs -f: $(cat "$MSB_LOG")"
+  CAGE_PROTO=1 "$ROOT/cage" logs codex >/dev/null 2>&1 && grep -qx 'logs | --tail | 200 | -f | cage-codex' "$MSB_LOG" || fail "the app's live log: $(cat "$MSB_LOG")"
+  if out="$("$ROOT/cage" logs antigravity 2>&1)"; then fail "logs of an agent without a VM"; fi
+  grep -q 'antigravity has no cage yet: cage up antigravity' <<<"$out" || fail "logs without a VM: $out"
+  if out="$("$ROOT/cage" shell cursor </dev/null 2>&1)"; then fail "a shell in a VM that's asleep"; fi
+  grep -q 'cursor is asleep: cage up cursor' <<<"$out" || fail "shell, asleep: $out"
+  if out="$(HOME="$T/evhome" PATH=/usr/local/bin:/usr/bin:/bin "$ROOT/cage" logs claude 2>&1)"; then fail "logs without microsandbox"; fi
+  grep -q "microsandbox isn't installed; run: cage fix" <<<"$out" || fail "logs without microsandbox: $out"
+  out="$(HOME="$T/evhome" PATH=/usr/local/bin:/usr/bin:/bin "$ROOT/cage" 2>&1)"
+  grep -q "microsandbox isn't installed, so your agents can't wake up" <<<"$out" && grep -q 'install it: cage fix' <<<"$out" || fail "home without microsandbox: $out"
+  : > "$MSB_LOG"; rc=0
+  "$ROOT/cage" status --json > "$T/ev.json" 2>/dev/null || rc=$?
+  [ $rc = 1 ] && python3 - "$T/ev.json" <<'PY' || fail "status --json (exit $rc): $(cat "$T/ev.json")"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [(a["name"], a["state"]) for a in d["agents"]] == [("claude", "ready"), ("codex", "ready"), ("cursor", "asleep")], d
+assert d["needs_you"] == ["cursor is asleep: cage up cursor"], d
+PY
+  if grep -q 'source' "$MSB_LOG"; then fail "status --json went through the VMs' logs"; fi
+  cp "$T/ev.vms" "$T/ev.running"
+  "$ROOT/cage" status --json >/dev/null 2>&1 || fail "status --json said something needs you, with everyone ready"
+  grep -q '^type = "telegram"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude isn't on Telegram to begin with"
+  printf 'y\n' | CAGE_PROTO=1 "$ROOT/cage" chat rm telegram claude 2>"$T/ev.err" || fail "chat rm telegram: $(cat "$T/ev.err")"
+  if grep -q 'TELEGRAM_TOKEN_claude\|TELEGRAM_BOT_claude' "$CAGE_HOME/cage.env"; then fail "Telegram settings left behind"; fi
+  # it's awake, so it restarts (a yes) without the bot: nobody reaches it through Telegram any more
+  grep -q '"t":"ok","text":"started cage-claude' "$T/ev.err" || fail "claude wasn't restarted: $(cat "$T/ev.err")"
+  if grep -q 'telegram\|1:abc' "$CAGE_HOME/agents/claude/cc-connect.toml"; then fail "restarted with the Telegram bot still on: $(cat "$CAGE_HOME/agents/claude/cc-connect.toml")"; fi
+  if "$ROOT/cage" remove cursor </dev/null 2>"$T/ev.err"; then fail "remove deleted without asking"; fi
+  grep -q 'asks before it deletes' "$T/ev.err" && grep -qx 'cage-cursor' "$MSB_EXISTING" || fail "remove without asking: $(cat "$T/ev.err")"
+  "$ROOT/cage" remove cursor --keep-login --yes 2>"$T/ev.err" || fail "remove --keep-login: $(cat "$T/ev.err")"
+  grep -qx 'CAGE_AGENTS="claude codex"' "$CAGE_HOME/cage.env" && ! grep -qx cage-cursor "$MSB_EXISTING" && [ -d "$MSB_VOLUMES/cage-cursor-home" ] \
+    || fail "remove --keep-login: $(cat "$T/ev.err")"
+  printf 'y\ny\n' | CAGE_PROTO=1 CAGE_BACKUP_DIR="$T/evbk" CAGE_BACKUP_PASSPHRASE="correct horse battery" "$ROOT/cage" remove codex 2>"$T/ev.err" \
+    || fail "remove with a backup first: $(cat "$T/ev.err")"
+  grep -q '"t":"confirm","text":"Back everything up first?' "$T/ev.err" && ls "$T/evbk"/cage-*.cagebackup >/dev/null 2>&1 || fail "no backup offered or made: $(cat "$T/ev.err")"
+  grep -qx 'CAGE_AGENTS="claude"' "$CAGE_HOME/cage.env" && [ ! -e "$MSB_VOLUMES/cage-codex-home" ] || fail "remove: $(cat "$T/ev.err")"
+  if out="$("$ROOT/cage" remove claude --yes 2>&1)"; then fail "removed the last agent"; fi
+  grep -q 'your only agent' <<<"$out" || fail "remove the last agent: $out"
+  out="$("$ROOT/cage" 2>&1)"
+  grep -q 'all caged and happy: say hi in the app: cage ui' <<<"$out" || fail "home: $out"
+  out="$("$ROOT/cage" help 2>&1)"
+  for c in 'status \[--json\]' 'restart \[agents\]' 'logs <agent> \[-f\]' 'remove <agent>' 'version'; do grep -q "  $c" <<<"$out" || fail "help lacks $c"; done )
+ok "everyday: restart, logs (last 200 lines or -f), status --json, chat rm telegram, remove; plain words without msb or a VM"
+
+# an agent you removed passes nothing on: its privacy mask no longer sends your terms to the others (as /all from its
+# chat, or as its stand-in, did); cage mask names only your agents, and cage mask off covers the removed ones too
+( fresh mr
+  export MSB_EXISTING="$T/mr.vms"; : > "$MSB_EXISTING"
+  printf 'CAGE_AGENTS="claude codex"\nCAGE_ASK_ALL="on"\nCAGE_FALLBACK_claude="codex"\n' >> "$CAGE_HOME/cage.env"
+  "$ROOT/cage" mask add "Acme Secret Client" </dev/null 2>/dev/null
+  "$ROOT/cage" mask on claude </dev/null 2>/dev/null
+  "$ROOT/cage" up codex </dev/null 2>/dev/null
+  grep -qx 'Acme Secret Client' "$CAGE_HOME/agents/codex/mask.terms" || fail "codex has no terms, with masked claude asking it"
+  "$ROOT/cage" remove claude --yes </dev/null 2>"$T/mr.err" || fail "remove: $(cat "$T/mr.err")"
+  "$ROOT/cage" up codex </dev/null 2>/dev/null
+  [ ! -e "$CAGE_HOME/agents/codex/mask.terms" ] || fail "codex still gets your mask terms, with masked claude removed"
+  out="$("$ROOT/cage" mask 2>&1)"
+  grep -q 'privacy mask: off' <<<"$out" || fail "cage mask names a removed agent: $out"
+  "$ROOT/cage" mask on </dev/null 2>/dev/null; "$ROOT/cage" up codex </dev/null 2>/dev/null
+  grep -qx 'Acme Secret Client' "$CAGE_HOME/agents/codex/mask.terms" || fail "codex has no terms with its own mask on"
+  "$ROOT/cage" mask off </dev/null 2>/dev/null; "$ROOT/cage" up codex </dev/null 2>/dev/null
+  if grep -q '^CAGE_MASK=.*[a-z]' "$CAGE_HOME/cage.env"; then fail "cage mask off left some on: $(grep '^CAGE_MASK=' "$CAGE_HOME/cage.env")"; fi
+  [ ! -e "$CAGE_HOME/agents/codex/mask.terms" ] || fail "codex kept your terms with the mask off"
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true )
+ok "privacy mask: an agent you removed passes your terms to no one; cage mask off turns it off for removed agents too"
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
@@ -710,7 +1287,7 @@ gone() { for _ in 1 2 3 4 5; do alive || return 0; sleep 1; done; return 1; }
 export WSL_DISTRO_NAME=Ubuntu-24.04
 : > "$T/ps.log"
 "$W" up claude 2>"$T/err" || fail "up on WSL: $(cat "$T/err")"
-grep -qF "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','Ubuntu-24.04','-u','$(id -un)','--exec','$W','_keepalive'" "$T/ps.log" \
+grep -qF "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','Ubuntu-24.04','-u','$(id -un)','--exec','$W','_keepalive','$CAGE_HOME'" "$T/ps.log" \
   || fail "keepalive launch: $(cat "$T/ps.log")"
 alive || fail "keepalive is not running"
 grep -q 'hidden session keeps Ubuntu-24.04 running' "$T/err" || fail "up did not explain the keepalive: $(cat "$T/err")"
@@ -724,17 +1301,27 @@ alive || fail "down <agent> released the keepalive while other VMs may still run
 gone || fail "down did not release the keepalive"
 ok "on WSL, up holds one hidden session open; down (all agents) releases it"
 
-"$W" _autostart 2>/dev/null
-grep -q 'started cage-claude' "$CAGE_HOME/autostart.log" || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
+echo cage-codex > "$T/w.running"; : > "$MSB_LOG"
+MSB_RUNNING="$T/w.running" "$W" _autostart 2>/dev/null
+grep -q 'started cage-claude' "$CAGE_HOME/autostart.log" && grep -q 'codex is already awake' "$CAGE_HOME/autostart.log" \
+  || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
+if grep -q -- '--name | cage-codex |' "$MSB_LOG"; then fail "_autostart restarted an agent that was awake"; fi
 alive || fail "_autostart did not start the keepalive"
 "$W" down 2>/dev/null; gone || fail "keepalive left running"
-ok "the Windows-login entry point runs up, logs to autostart.log and starts the keepalive"
+ok "the Windows-login entry point wakes the agents that are asleep (never restarts one), logs to autostart.log, starts the keepalive"
+
+# a cage folder whose path Windows can't be handed (a space in it): no keepalive, and cage says why and what to do
+mkdir -p "$T/my cage" && cp "$CAGE_HOME/cage.env" "$T/my cage/"
+CAGE_HOME="$T/my cage" "$W" up claude 2>"$T/err" || fail "up with a space in CAGE_HOME: $(cat "$T/err")"
+grep -q "cage can't pass $T/my cage to Windows" "$T/err" && grep -q 'set CAGE_HOME to a path of letters' "$T/err" \
+  || fail "no keepalive, but not why: $(cat "$T/err")"
+if alive; then fail "a keepalive with a path Windows can't be handed"; fi
 
 mv "$T/bin/powershell.exe" "$T/ps.off"
 "$W" up claude 2>"$T/err"
 grep -q 'Windows interop is off' "$T/err" || fail "no warning without interop: $(cat "$T/err")"
 unset WSL_DISTRO_NAME
-ok "without Windows interop, up warns that WSL will stop the VMs"
+ok "without Windows interop, or with a cage folder Windows can't be handed, up says that WSL will stop the VMs, and why"
 
 # cage update when the internet isn't there: nothing changes, the agents keep running
 : > "$MSB_LOG"

@@ -68,7 +68,7 @@ cage down [agents]    put them to sleep
 cage login <agent>    sign an agent in to your subscription
 cage add <agents>     more agents, to chat with in the app (no bot needed)
 cage approve <a> on   it asks you before it acts in your apps (email, calendar, GitHub…)
-cage logs <agent>     watch what an agent's VM is doing
+cage logs <agent>     what an agent's VM printed lately (-f: follow along)
 cage memory           review what your agents want to remember
 cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
 cage password add …   a website sign-in they can use but never see
@@ -221,6 +221,7 @@ A backup holds your settings, bots, keys, app sign-ins and memory (`~/.cage`), p
 - Backups go to `~/cage-backups`. On Windows they go to `Documents\cage backups` instead, so they survive even if the WSL distro is removed. Set `CAGE_BACKUP_DIR` to change this.
 - The newest 10 are kept (`CAGE_BACKUP_KEEP`).
 - Agents can keep running during a backup.
+- On a Mac, backups need GNU tar: `brew install gnu-tar`.
 - `restore` puts your agents to sleep, sets aside what's there now (in `~/.cage.before-restore-…`), then wakes them up with the restored logins and files.
 
 ## Windows

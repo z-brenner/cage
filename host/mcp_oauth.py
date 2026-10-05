@@ -12,7 +12,7 @@ short-lived access token is handed on, as a microsandbox secret, so the VMs see 
                                                             (default 900): exit 0 refreshed, 3 still fresh
 Standard library only. CAGE_OPEN is the command that opens a URL in the user's browser.
 """
-import base64, hashlib, http.server, json, os, secrets, select, shlex, subprocess, sys, threading, time
+import base64, hashlib, html, http.server, json, os, secrets, select, shlex, subprocess, sys, threading, time, unicodedata
 import urllib.error, urllib.parse, urllib.request
 
 UA = "cage (+https://github.com/z-brenner/cage)"
@@ -22,19 +22,52 @@ def say(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
+def plain(text, n=300):
+    """The sign-in server's own words, for the terminal: text only, without control or format characters (an escape
+    sequence there could set your clipboard or redraw the screen)."""
+    return "".join(c for c in str(text or "") if unicodedata.category(c) not in ("Cc", "Cf"))[:n]
+
+
+def url_ok(url):
+    """A plain https address: visible ASCII, no quotes or backslashes. The sign-in server names its own addresses,
+    and cage opens one of them in the browser (on Windows through PowerShell) and sends the sign-in to others."""
+    if not isinstance(url, str) or not url or not all(33 <= ord(c) < 127 for c in url) or any(c in url for c in "'\"`\\"):
+        return False
+    try:
+        u = urllib.parse.urlsplit(url)
+        return u.scheme == "https" and bool(u.hostname) and (u.port is None or u.port > 0)
+    except ValueError:
+        return False
+
+
+class HttpsRedirects(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to another plain https address."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not url_ok(newurl):
+            raise urllib.error.HTTPError(newurl, code, f"redirect to {ascii(newurl)} refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(HttpsRedirects)
+
+
 def fetch(url, data=None, headers=None, method=None):
     """Returns (status, headers, body) without raising on HTTP errors."""
+    if not url_ok(url):
+        raise SystemExit(f"cage won't contact {ascii(url)}: it isn't a plain https address")
     h = {"User-Agent": UA, "Accept": "application/json"}
     h.update(headers or {})
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with OPENER.open(req, timeout=30) as r:
             return r.status, r.headers, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read()
 
 
 def get_json(url):
+    if not url_ok(url):  # metadata at an address cage won't use counts as no metadata
+        return None
     status, _, body = fetch(url)
     if status != 200:
         return None
@@ -78,8 +111,12 @@ def discover(mcp_url):
     if status == 200 and not servers:
         return None, None  # no sign-in needed
     servers = servers or [origin]
+    if not any(url_ok(s) for s in servers):
+        raise SystemExit(f"the sign-in server for {mcp_url} isn't at a plain https address ({ascii(servers[0])})")
     # 2. The authorization server's metadata (RFC 8414, then OpenID Connect discovery).
     for issuer in servers:
+        if not url_ok(issuer):
+            continue
         i = urllib.parse.urlsplit(issuer)
         ipath = i.path.rstrip("/")
         for m in (f"{i.scheme}://{i.netloc}/.well-known/oauth-authorization-server{ipath}",
@@ -87,6 +124,11 @@ def discover(mcp_url):
                   f"{issuer.rstrip('/')}/.well-known/openid-configuration"):
             asm = get_json(m)
             if asm and asm.get("authorization_endpoint") and asm.get("token_endpoint"):
+                # Where you sign in, where the tokens come from, where cage registers: all plain https, or nothing.
+                for k in ("authorization_endpoint", "token_endpoint", "registration_endpoint"):
+                    if k in asm and not url_ok(asm[k]):
+                        raise SystemExit(f"the sign-in server gave an address cage won't use ({k}: {ascii(asm[k])}); "
+                                         "only plain https addresses are opened or sent anything")
                 return resource, asm
     raise SystemExit(f"couldn't find how to sign in to {mcp_url} (no OAuth metadata)")
 
@@ -105,8 +147,9 @@ class Callback(http.server.BaseHTTPRequestHandler):
             return
         Callback.result = {k: v[0] for k, v in q.items()}
         ok = "code" in q
+        why = html.escape(q.get("error_description", q.get("error", [""]))[0])  # the sign-in server's words: text only
         page = ("<h2>[•|•] Signed in.</h2><p>You can close this tab and go back to cage.</p>" if ok else
-                f"<h2>[x|x] Sign-in didn't work</h2><p>{q.get('error_description', q.get('error'))[0]}</p>")
+                f"<h2>[x|x] Sign-in didn't work</h2><p>{why}</p>")
         data = f"<!doctype html><meta charset=utf-8><title>cage</title><body style='font:16px system-ui;margin:3em'>{page}".encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -206,7 +249,7 @@ def login(state_path, mcp_url, token_out):
     if result.get("state") != state_tag:
         raise SystemExit("the sign-in came back with the wrong state; try again")
     if "code" not in result:
-        raise SystemExit(f"sign-in refused: {result.get('error_description') or result.get('error')}")
+        raise SystemExit(f"sign-in refused: {plain(result.get('error_description') or result.get('error'))}")
     tok = token_request(asm, {"grant_type": "authorization_code", "code": result["code"], "redirect_uri": redirect,
                               "code_verifier": verifier, "resource": resource}, client)
     state = {"mcp_url": mcp_url, "resource": resource, "token_endpoint": asm["token_endpoint"],

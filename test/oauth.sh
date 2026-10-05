@@ -28,6 +28,21 @@ class H(http.server.BaseHTTPRequestHandler):
         base = f"https://127.0.0.1:{port}"
         if u.path == "/.well-known/oauth-protected-resource/mcp":
             return self.j(200, {"resource": f"{base}/mcp", "authorization_servers": [base]})
+        # hostile sign-in servers, each behind its own MCP address /<name>/mcp
+        if u.path.startswith("/.well-known/oauth-protected-resource/") and u.path.endswith("/mcp"):
+            name = u.path.split("/")[3]
+            issuer = f"http://127.0.0.1:{port}" if name == "http-issuer" else f"{base}/{name}"
+            return self.j(200, {"resource": f"{base}/{name}/mcp", "authorization_servers": [issuer]})
+        if u.path.startswith("/.well-known/oauth-authorization-server/"):
+            name = u.path.split("/")[3]
+            auth = {"http": f"http://127.0.0.1:{port}/authorize", "quote": f"{base}/authorize\u2019; calc; \u2018",
+                    "deny": f"{base}/authorize-deny"}[name]
+            return self.j(200, {"issuer": f"{base}/{name}", "authorization_endpoint": auth, "token_endpoint": f"{base}/token",
+                                "registration_endpoint": f"{base}/register"})
+        if u.path == "/authorize-deny":   # the server says no, with HTML and terminal codes (OSC 52: your clipboard) in its words
+            self.send_response(302); self.send_header("Location", q["redirect_uri"] + "?" + urllib.parse.urlencode(
+                {"error": "access_denied", "error_description": "<img src=x onerror=alert(1)>no\x1b]52;c;cHduZWQ=\x07\x1b[2J", "state": q["state"]}))
+            self.send_header("Content-Length", "0"); self.end_headers(); return
         if u.path == "/.well-known/oauth-authorization-server":
             return self.j(200, {"issuer": base, "authorization_endpoint": f"{base}/authorize", "token_endpoint": f"{base}/token",
                                 "registration_endpoint": f"{base}/register", "scopes_supported": ["read", "offline_access"],
@@ -45,6 +60,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if self.headers.get("Authorization", "").startswith("Bearer at-"):
                 return self.j(200, {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "mock"}}})
             return self.j(401, {"error": "unauthorized"}, [("WWW-Authenticate", f'Bearer resource_metadata="https://127.0.0.1:{port}/.well-known/oauth-protected-resource/mcp"')])
+        if u.path.endswith("/mcp") and u.path.count("/") == 2:   # /<name>/mcp: a hostile one (above)
+            return self.j(401, {"error": "unauthorized"}, [("WWW-Authenticate", f'Bearer resource_metadata="https://127.0.0.1:{port}/.well-known/oauth-protected-resource{u.path}"')])
         if u.path == "/open":   # an MCP server that needs no sign-in
             return self.j(200, {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "open"}}})
         if u.path == "/register":
@@ -103,6 +120,25 @@ PY
 if python3 "$ROOT/host/mcp_oauth.py" refresh "$S" "$K" 2>"$T/r.err"; then fail "a revoked sign-in refreshed"; fi
 grep -q 'refresh token revoked' "$T/r.err" || fail "unclear error: $(cat "$T/r.err")"
 ok "a revoked sign-in fails clearly"
+# hostile sign-in servers: anything but a plain https address is never opened or sent anything, and the server's
+# words on cage's own page are text, not HTML
+printf '#!/bin/sh\ntouch "%s/opened"\n' "$T" > "$T/no-browser"; chmod +x "$T/no-browser"
+for name in http quote http-issuer; do
+  rm -f "$T/opened"
+  if CAGE_OPEN="$T/no-browser" python3 "$ROOT/host/mcp_oauth.py" login "$T/evil.json" "https://127.0.0.1:$port/$name/mcp" "$T/evil.token" \
+       </dev/null 2>"$T/evil.err"; then fail "signed in through a hostile server ($name)"; fi
+  [ ! -e "$T/opened" ] || fail "opened a sign-in link that isn't plain https ($name): $(cat "$T/evil.err")"
+  grep -q "https address" "$T/evil.err" || fail "unclear refusal ($name): $(cat "$T/evil.err")"
+  if LC_ALL=C grep -q $'\xe2\x80' "$T/evil.err"; then fail "the server's odd characters reached the terminal: $(cat "$T/evil.err")"; fi
+done
+rm -f "$T/page.html"
+if CAGE_OPEN="$T/browser" python3 "$ROOT/host/mcp_oauth.py" login "$T/evil.json" "https://127.0.0.1:$port/deny/mcp" "$T/evil.token" \
+     </dev/null 2>"$T/evil.err"; then fail "a refused sign-in counted as signed in"; fi
+grep -q 'sign-in refused: <img src=x onerror=alert(1)>no]52;c;cHduZWQ=\[2J$' "$T/evil.err" || fail "refusal: $(cat -v "$T/evil.err")"
+if LC_ALL=C grep -q $'\e' "$T/evil.err"; then fail "the server's terminal codes reached the terminal: $(cat -v "$T/evil.err")"; fi
+grep -qF '&lt;img src=x onerror=alert(1)&gt;no' "$T/page.html" && ! grep -q '<img' "$T/page.html" || fail "the error page ran the server's HTML: $(cat "$T/page.html")"
+ok "hostile sign-in servers: only plain https addresses are opened or contacted; their words are shown as text, without codes"
+
 # --- through cage: `cage connect add NAME URL` notices the sign-in, keeps the token as a secret, renews it on `up`
 # and swaps the renewed token into running VMs (msb modify), without a restart
 mkdir -p "$T/bin"

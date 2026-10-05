@@ -64,7 +64,20 @@ while IFS= read -r -d '' x; do
   if [ "$after" = 1 ]; then cmd+=("$x"); continue; fi
   case "$prev" in
     --mount-named) v="cage-smoke-${x#cage-}"; VOLS="$VOLS ${v%%:*}"; args+=(-v "$v") ;;
-    --mount-dir) args+=(-v "$x") ;;
+    --mount-dir) # host:guest[:options]. docker -v takes ro and rw; microsandbox's own limits on a folder the VM writes
+      # (quota=…, nosuid, nodev) have no docker -v stand-in, so the container goes without them. Any other option
+      # stops the test: the container wouldn't stand in for the VM anymore.
+      m="$x" opts="" keep=""
+      case "${m##*:}" in /*) ;; *) opts="${m##*:}" m="${m%:*}" ;; esac
+      IFS=, read -r -a os <<<"$opts"
+      for o in ${os[@]+"${os[@]}"}; do
+        case "$o" in
+          ro|rw) keep="$keep${keep:+,}$o" ;;
+          quota=*|nosuid|nodev) ;;
+          *) fail "cage up gives msb a folder option the test can't pass on to docker: $o (in $x)" ;;
+        esac
+      done
+      args+=(-v "$m${keep:+:$keep}") ;;
     -e) args+=(-e "$x") ;;
     --conf) for s in $(awk '/^secrets:/ { on = 1; next } /^[a-z]/ { on = 0 } on && /^  [A-Z][A-Z0-9_]*:$/ { sub(/:$/, ""); print $1 }' "$x"); do
         args+=(-e "$s=\$MSB_$s"); done ;;
