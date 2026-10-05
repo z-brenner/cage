@@ -692,17 +692,18 @@ function attention () {
 }
 
 // An agent waiting for your OK, though you're not in its chat: the same words as its card there, Allow and Deny right
-// here, or Open to see it in the conversation first
+// here, or Open to see it in the conversation first. The answer goes with the approval it's for, so it answers that
+// one or none (server.py refuses it once the agent has moved on).
 function approvalRow (a, p) {
   const decide = (action) => async (e) => {
     const row = e.currentTarget.closest('li')
     row.querySelectorAll('button').forEach((b) => { b.disabled = true })
     try {
-      await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action] } })
+      await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action], pending: { text: p.text, at: p.at } } })
       ANSWERED[a.name] = p.at
       render()
-      activitySoon()
     } catch (err) { toast(err.message); row.querySelectorAll('button').forEach((b) => { b.disabled = false }) }
+    activitySoon()
   }
   return h('li', { class: 'attn warn approval-row' }, h('span', { class: 'attn-icon' }, icon('hand')),
     h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, approvalLine(approvalOf(p.text)), p.at ? ' · ' + when(p.at) : '')),

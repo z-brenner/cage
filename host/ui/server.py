@@ -42,7 +42,8 @@ and only pictures are shown in the page (everything else downloads).
                                         "today": {"asked","answers","files"} (from T, ms, on)}}}
   POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
-  POST /api/chat/<a>/action             {"action", "label"?}  (a button in the chat)
+  POST /api/chat/<a>/action             {"action", "label"?, "pending"?}  (a button in the chat; from Home, with the
+                                        approval it answers, as /api/activity gave it: 409 if it isn't that one now)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
   POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
                                         seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
@@ -1052,6 +1053,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("nothing to send")
                 return self.send(200, {"id": c.send({"type": "message", "session": session, "text": text, "files": files})})
             if what == "action":
+                # From Home, with the approval it showed: only while that's still the one the agent waits for. Answered
+                # since (in another window, say), it may be asking something else, which an Allow from here would say
+                # yes to.
+                if "pending" in b and activity(c, 0)["pending"] != b["pending"]:
+                    return self.send(409, {"error": "It isn’t waiting for that any more. Open its chat to see what it’s doing."})
                 return self.send(200, {"id": c.send({"type": "action", "session": session, "action": str(b.get("action", ""))[:512],
                                                      "label": str(b.get("label", ""))[:200]})})
             if what == "request":

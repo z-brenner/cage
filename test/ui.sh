@@ -305,6 +305,20 @@ assert g["last"]["text"] == "**Yesterday's** answer" and g["today"] == {"asked":
 assert c["pending"] is None and c["working"] and c["last"]["t"] == "file" and c["today"] == {"asked": 2, "answers": 1, "files": 1}, c
 assert x == {"pending": None, "last": None, "today": {"asked": 0, "answers": 0, "files": 0}, "working": False}, x   # the planted link
 PY
+# Allow on Home goes with the approval Home showed: one the agent isn't waiting for any more is refused, and nothing is sent
+python3 - "$T/activity.json" "$T/allow" <<'PY'
+import json, sys
+pending = json.load(open(sys.argv[1]))["agents"]["antigravity"]["pending"]
+for name, p in (("now", pending), ("old", dict(pending, at=pending["at"] - 1)), ("other", dict(pending, text="May I delete it?"))):
+    with open(f"{sys.argv[2]}-{name}.json", "w") as f:
+        json.dump({"action": "perm:allow", "label": "Allow", "pending": p}, f)
+PY
+allow() { curl --noproxy '*' -s -o "$T/allowed.json" -w '%{http_code}' "${H[@]}" -X POST --data-binary @"$T/allow-$1.json" "$B/api/chat/antigravity/action"; }
+for was in old other; do
+  [ "$(allow $was)" = 409 ] && grep -q "waiting for that any more" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
+    || fail "Home's Allow for an approval it isn't waiting for ($was): $(cat "$T/allowed.json")"
+done
+[ "$(allow now)" = 200 ] && grep -q '"action": "perm:allow"' "$A"/antigravity/in/*.json || fail "Home's Allow for the approval it waits for: $(cat "$T/allowed.json")"
 rm -rf "$A/cursor" "$A/codex/log.jsonl"
 ln -s "$A/antigravity" "$A/cursor"   # a chat folder that is itself a link: skipped, not followed
 [ "$(activity cursor,antigravity | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["agents"]))')" = "['antigravity']" ] \

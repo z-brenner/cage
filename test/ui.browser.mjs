@@ -815,6 +815,42 @@ await again.getByRole('button', { name: 'Deny' }).click()
 await page.locator('.chat .msg-agent', { hasText: 'Okay, I won’t send it.' }).last().waitFor({ timeout: 10000 })
 ok('Home: an approval waiting for you, in the same words as its card (and its notification); Allow there reaches the agent; Open shows it in the chat; what each agent is doing')
 
+// Allow on Home answers the approval it showed, or none: if the agent has moved on meanwhile (answered in another
+// window, and now asking something else), it says so, sends nothing, and shows what it asks now
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+await ask('Email Bob once more')
+const askedFor = () => { // the approval the fake VM asked for, once it has: its time
+  const log = fs.readFileSync(claudeLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  const k = log.findLastIndex((e) => e.t === 'you' && e.text === 'Email Bob once more')
+  return ((k >= 0 && log.slice(k).find((e) => e.t === 'buttons')) || {}).at
+}
+for (let i = 0; i < 100 && !askedFor(); i++) await page.waitForTimeout(100)
+await page.waitForFunction((at) => (waitingOf('claude') || {}).at === at, askedFor(), { timeout: 15000 })   // Home shows that one
+await waits.getByText('Gmail: send email to bob@acme.com').waitFor({ timeout: 5000 })
+await page.evaluate(() => { window.__loadActivity = loadActivity; window.loadActivity = async () => {} })   // Home doesn't look again yet
+const askedNow = '⚠️ **Permission Request**\n\nAgent wants to use **Bash**:\n\n```\nrm -rf ~/work/old\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).'
+fs.appendFileSync(claudeLog, [{ t: 'action', session: 'you', action: 'perm:deny', label: 'Deny' },
+  { t: 'buttons', session: 'you', text: askedNow, buttons: [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }]] }].map((e) => JSON.stringify({ at: Date.now(), ...e }) + '\n').join(''))
+const allowedThen = allowed()
+const before409 = errors.length
+await waits.getByRole('button', { name: 'Allow' }).click()
+await page.locator('#toasts .toast', { hasText: 'It isn’t waiting for that any more. Open its chat to see what it’s doing.' }).waitFor({ timeout: 5000 })
+errors.splice(before409, errors.length, ...errors.slice(before409).filter((m) => !/status of 409/.test(m)))   // (refused: that's the point)
+await page.evaluate(() => { window.loadActivity = window.__loadActivity })
+await waits.getByText('Run a command on its own computer: rm -rf ~/work/old').waitFor({ timeout: 10000 })
+if (allowed() !== allowedThen) fail('Allow on Home said yes to something it did not show')
+const wontSend = () => (fs.readFileSync(claudeLog, 'utf8').match(/Okay, I won’t send it\./g) || []).length
+const wontSendBefore = wontSend()
+await waits.getByRole('button', { name: 'Deny' }).click()
+await waits.waitFor({ state: 'detached', timeout: 10000 })
+for (let i = 0; i < 100 && wontSend() === wontSendBefore; i++) await page.waitForTimeout(100)
+// what it asked and answered came while you were on Home: unread, until you open its chat
+const unreadClaude = page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.badge.unread')
+await unreadClaude.waitFor({ timeout: 10000 })
+await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
+await unreadClaude.waitFor({ state: 'detached', timeout: 10000 })
+ok('Allow on Home answers the approval it showed, or none: one that has changed meanwhile is refused, and the new one shown')
+
 // how much is left of each plan, on Home: bars from each agent's /usage card; one that ran out is offered a stand-in
 await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
 const plans = page.locator('.plans')
