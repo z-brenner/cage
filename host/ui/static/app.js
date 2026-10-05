@@ -445,7 +445,8 @@ function handle (ev) {
     logEl.querySelectorAll('.skip-box').forEach((b) => b.remove())
     logEl.querySelectorAll('.ask-box input, .ask-box button').forEach((el) => { el.disabled = true })
     // gone: cage forgot it, because it restarted while this went on, or (when nothing came at all) it ended a while ago
-    const gone = J.got ? 'cage restarted before this finished' : 'This isn’t kept any more (cage keeps it for 10 minutes)'
+    if (ev.t === 'gone' && !J.got) logEl.append(msg('hint', 'cage keeps what something did for 10 minutes after it ends.'))
+    const gone = J.got ? 'cage restarted before this finished' : 'This isn’t kept any more'
     setStatus(J.code ? 'failed' : 'done', ev.t === 'gone' ? gone : J.code ? 'That didn’t work — see above' : 'Done.')
     scrollDown()
     if (dlg.open) document.getElementById('job-close').focus()
