@@ -274,7 +274,7 @@ grep -qx 'url=local:browser' "$CAGE_HOME/connectors/browser.conf" && grep -qx 'a
 cage up claude 2>/dev/null
 Y="$CAGE_HOME/msb/claude.yaml"
 grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF "    placeholder: \"$ph\"" || fail "placeholder not in the msb config: $(cat "$Y")"
-grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    substitution: {headers: true, query: false, body: true}' || fail "no body substitution for the password"
+grep -A4 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    substitution: {headers: false, query: false, body: true}' || fail "password not swapped in request bodies only"
 grep -A2 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    allow: ["example.com", "*.example.com"]' || fail "password allowed elsewhere"
 M="$CAGE_HOME/agents/claude/passwords.md"
 grep -qF "example.com: sign in as \`zack@example.com\` and type \`$ph\` as the password" "$M" && grep -qF "$alt" "$M" || fail "agent not told: $(cat "$M")"
@@ -683,6 +683,38 @@ ok "text a VM wrote (WhatsApp's status, host names in its logs) reaches the term
   out="$("$ROOT/cage" allow rm nope.example.net claude </dev/null 2>&1)"
   grep -q "nope.example.net wasn't on the allow list" <<<"$out" || fail "allow rm of a host that wasn't there: $out" )
 ok "host lists: *.patterns stay patterns in configs and checks, whatever is in the current folder; allow rm says when nothing changed"
+
+# website sign-ins: two sites whose names come out the same keep their own sign-ins; passwords with accents are
+# form-encoded byte by byte (bash 3.2 reads bytes over 127 as negative numbers)
+( fresh i
+  printf 'alice@a.com\npw-for-my-site\n' | "$ROOT/cage" password add my-site.com claude >/dev/null 2>&1 || fail "password add my-site.com"
+  printf 'bob@b.com\npw-for-my.site\n' | "$ROOT/cage" password add my.site.com claude >/dev/null 2>&1 || fail "password add my.site.com"
+  pw_of() { f="$(grep -lxF "site=$1" "$CAGE_HOME"/secrets/CAGE_PW_*.conf | xargs grep -Lx 'variant=form')"; cat "${f%.conf}"; }
+  [ "$(pw_of my-site.com)" = pw-for-my-site ] && [ "$(pw_of my.site.com)" = pw-for-my.site ] || fail "one site's sign-in replaced the other's: $(ls "$CAGE_HOME/secrets")"
+  out="$("$ROOT/cage" password 2>&1)"
+  grep -q 'my-site.com .*alice@a.com' <<<"$out" && grep -q 'my.site.com .*bob@b.com' <<<"$out" || fail "password list: $out"
+  printf 'bob2@b.com\npw-two\n' | "$ROOT/cage" password add my.site.com claude >/dev/null 2>&1
+  [ "$(grep -lxF 'site=my.site.com' "$CAGE_HOME"/secrets/CAGE_PW_*.conf | wc -l)" = 1 ] && [ "$(pw_of my.site.com)" = pw-two ] || fail "a new password for a site made a second entry"
+  "$ROOT/cage" password rm my.site.com </dev/null >/dev/null 2>&1 || fail "password rm my.site.com"
+  [ "$(pw_of my-site.com)" = pw-for-my-site ] && ! grep -qlxF 'site=my.site.com' "$CAGE_HOME"/secrets/CAGE_PW_*.conf || fail "password rm removed the wrong site"
+  printf 'z@x.com\np\303\244ssw\303\266rd&x=1 \303\274\342\202\254\n' | "$ROOT/cage" password add umlaut.example claude >/dev/null 2>&1 || fail "password add"
+  [ "$(cat "$CAGE_HOME/secrets/CAGE_PW_UMLAUT_EXAMPLE_F")" = 'p%C3%A4ssw%C3%B6rd%26x%3D1%20%C3%BC%E2%82%AC' ] || fail "form encoding: $(cat "$CAGE_HOME/secrets/CAGE_PW_UMLAUT_EXAMPLE_F")" )
+ok "website sign-ins: sites with look-alike names keep their own; found by site to list and remove; accents form-encoded right"
+
+# voice notes through Groq: its key goes to the VMs only while that's on, can be replaced, and can be deleted
+( fresh u
+  printf 'gsk_abcdefghijklmnopqrstuvwxyz\n' | "$ROOT/cage" voice on groq >/dev/null 2>&1 || fail "voice on groq"
+  "$ROOT/cage" up claude 2>/dev/null
+  grep -qx '  VOICE_GROQ_KEY:' "$CAGE_HOME/msb/claude.yaml" || fail "the Groq key wasn't handed on for voice notes"
+  "$ROOT/cage" voice off </dev/null >/dev/null 2>&1 && "$ROOT/cage" up claude 2>/dev/null
+  if grep -qs 'VOICE_GROQ_KEY' "$CAGE_HOME/msb/claude.yaml" "$CAGE_HOME/agents/claude/secrets.md"; then fail "voice off, but the VM still gets the Groq key"; fi
+  "$ROOT/cage" voice on groq </dev/null >/dev/null 2>&1 || fail "voice on groq with a key saved before"
+  [ "$(cat "$CAGE_HOME/secrets/VOICE_GROQ_KEY")" = gsk_abcdefghijklmnopqrstuvwxyz ] || fail "the key changed without asking"
+  printf 'y\ngsk_NEWNEWNEWNEWNEWNEWNEWNEW\n' | CAGE_PROTO=1 "$ROOT/cage" voice on groq >/dev/null 2>"$T/u.err" || fail "replacing the key: $(cat "$T/u.err")"
+  grep -q '"t":"confirm","text":"You saved a Groq key before' "$T/u.err" && [ "$(cat "$CAGE_HOME/secrets/VOICE_GROQ_KEY")" = gsk_NEWNEWNEWNEWNEWNEWNEWNEW ] \
+    || fail "the Groq key couldn't be replaced: $(cat "$T/u.err")"
+  "$ROOT/cage" secret rm VOICE_GROQ_KEY </dev/null >/dev/null 2>&1 && [ ! -e "$CAGE_HOME/secrets/VOICE_GROQ_KEY" ] || fail "the Groq key couldn't be deleted" )
+ok "voice notes through Groq: the key reaches VMs only while that's on, is replaced when you say so, and can be deleted"
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.

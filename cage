@@ -877,11 +877,12 @@ secret_rm() {
   local name="${1:-}" c
   { secret_name_ok "$name" && [ -f "$SECRETS/$name.conf" ]; } || die "no secret called \"$name\" (see: cage secret list)"
   c="$(conf_get "$SECRETS/$name.conf" connector)"
-  [ -z "$c" ] || die "$name belongs to the $c connector; remove that instead: cage connect rm $c"
+  [ -z "$c" ] || [ "$c" = voice ] || die "$name belongs to the $c connector; remove that instead: cage connect rm $c"
   [ -z "$(conf_get "$SECRETS/$name.conf" site)" ] || die "$name is a website sign-in: cage password rm $(conf_get "$SECRETS/$name.conf" site)"
   rm -f "$SECRETS/$name" "$SECRETS/$name.conf"
   ok "$name removed from this computer"
-  hint "running agents keep it until they restart: cage up"
+  if [ "$c" = voice ] && [ "${CAGE_VOICE:-off}" = groq ]; then hint "voice notes through Groq need a key again: cage voice on groq (or cage voice on, on each VM)"
+  else hint "running agents keep it until they restart: cage up"; fi
 }
 
 cmd_secret() {
@@ -913,15 +914,18 @@ secret_plan() {
     name="$(basename "$f" .conf)"
     hosts="$(conf_get "$f" hosts)" agents="$(conf_get "$f" agents)" ph="$(conf_get "$f" placeholder)" site="$(conf_get "$f" site)"
     { for_agent "$agents" "$a" && [ -r "$SECRETS/$name" ]; } || continue
+    # the Groq key is for voice notes through Groq: kept on this computer, handed on only while that's on
+    if [ "$(conf_get "$f" connector)" = voice ] && [ "${CAGE_VOICE:-off}" != groq ]; then continue; fi
     SECRET_ENV+=("$name=$(cat "$SECRETS/$name")")
     yaml="$yaml  $name:
     value: \"\${$name}\"
     allow: $(yaml_list "$hosts")
 "
-    # Website passwords: a placeholder that survives form encoding, swapped in request bodies too.
+    # Website passwords: a placeholder that survives form encoding, swapped in request bodies only (that's where
+    # sign-in forms send it; the fewer places, the fewer ways for a page to show it back).
     if [ -n "$ph" ]; then
       yaml="$yaml    placeholder: \"$ph\"
-    substitution: {headers: true, query: false, body: true}
+    substitution: {headers: false, query: false, body: true}
 "
     fi
     if [ -n "$site" ]; then
@@ -975,7 +979,26 @@ secret_plan() {
 # of the site's sign-in form in its browser; microsandbox swaps in the real password on the way out, and only
 # for that site. When the password has characters that HTML forms encode (&, +, %, spaces…), a second
 # placeholder carries it pre-encoded for classic forms; JSON-based sign-ins take the first one as is.
-pw_name() { printf 'CAGE_PW_%s' "$(printf '%s' "$1" | tr 'a-z.-' 'A-Z__' | cut -c1-28)"; }
+pw_find() { # pw_find <site>: the name its sign-in is saved under, if there is one
+  local f
+  for f in "$SECRETS"/CAGE_PW_*.conf; do
+    [ -f "$f" ] && [ "$(conf_get "$f" variant)" != form ] && [ "$(conf_get "$f" site)" = "$1" ] || continue
+    basename "$f" .conf
+    return 0
+  done
+  return 1
+}
+pw_name() { # pw_name <site>: the name to save its sign-in under
+  local n c
+  pw_find "$1" && return 0
+  n="CAGE_PW_$(printf '%s' "$1" | tr 'a-z.-' 'A-Z__' | cut -c1-28)"
+  # Two sites can come out the same (my-site.com and my.site.com): the second gets a checksum of its address.
+  if [ -n "$(conf_get "$SECRETS/$n.conf" site)" ]; then
+    c="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+    n="${n}_$(printf '%06X' $((c % 16777216)))"
+  fi
+  printf '%s' "$n"
+}
 rand_word() { LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c "$1" || true; }
 
 password_add() { # password_add <site> [agent...]
@@ -1032,9 +1055,8 @@ password_list() {
 
 password_rm() {
   local site="${1:-}" name
-  site="$(printf '%s' "$site" | tr 'A-Z' 'a-z')" site="${site#www.}"
-  name="$(pw_name "$site")"
-  [ -n "$site" ] && [ -n "$(conf_get "$SECRETS/$name.conf" site)" ] || die "no sign-in saved for \"$site\" (see: cage password list)"
+  site="$(printf '%s' "${site#https://}" | tr 'A-Z' 'a-z')" site="${site%%/*}" site="${site#www.}"
+  { [ -n "$site" ] && name="$(pw_find "$site")"; } || die "no sign-in saved for \"$site\" (see: cage password list)"
   local ag; ag="$(conf_get "$SECRETS/$name.conf" agents)"
   rm -f "$SECRETS/$name" "$SECRETS/$name.conf" "$SECRETS/${name}_F" "$SECRETS/${name}_F.conf"
   ok "the $site sign-in is deleted from this computer"
@@ -1317,7 +1339,7 @@ urlencode() {
   local LC_ALL=C s="$1" out="" c i
   for ((i = 0; i < ${#s}; i++)); do
     c="${s:i:1}"
-    case "$c" in [A-Za-z0-9.~_-]) out+="$c" ;; *) out+="$(printf '%%%02X' "'$c")" ;; esac
+    case "$c" in [A-Za-z0-9.~_-]) out+="$c" ;; *) out+="$(printf '%%%02X' $(( $(printf '%d' "'$c") & 255 )))" ;; esac   # bash 3.2: bytes over 127 come out negative
   done
   printf '%s' "$out"
 }
@@ -2576,12 +2598,18 @@ cmd_voice() { # cage voice [on [local|groq]|off]
   case "${1:-}" in
     "") say "voice notes: ${C_B}${CAGE_VOICE:-off}${C_0}${CAGE_VOICE_MODEL:+ (Whisper $CAGE_VOICE_MODEL)}"
         hint "cage voice on (private, on each agent's VM) · cage voice on groq (faster, Groq's servers) · cage voice off"; return 0 ;;
-    off) set_env CAGE_VOICE off; CAGE_VOICE=off; ok "voice notes are off" ;;
+    off) set_env CAGE_VOICE off; CAGE_VOICE=off; ok "voice notes are off"
+      if [ -f "$SECRETS/VOICE_GROQ_KEY" ]; then hint "no agent gets your Groq key now; it stays on this computer (delete it: cage secret rm VOICE_GROQ_KEY)"; fi ;;
     on)
       case "$mode" in
         local) ;;
         groq)
-          if [ ! -f "$SECRETS/VOICE_GROQ_KEY" ]; then
+          local ask=1
+          if [ -f "$SECRETS/VOICE_GROQ_KEY" ]; then
+            ask=0
+            if interactive && yes_no "You saved a Groq key before. Replace it with a new one?" n; then ask=1; fi
+          fi
+          if [ $ask = 1 ]; then
             say "A Groq API key (free tier available): $(link https://console.groq.com/keys)"
             prompt "Groq API key: " key secret
             [[ "$key" =~ ^gsk_[A-Za-z0-9]{20,}$ ]] || die "that doesn't look like a Groq key (gsk_…)"
