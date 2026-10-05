@@ -153,6 +153,19 @@ test("cc-connect's bridge: it registers with its token, and after a drop it come
   for (let i = 2; i < 4; i++) assert.ok(at[i] - at[i - 1] < 2500, `reconnect ${i} took ${at[i] - at[i - 1]} ms`)
 })
 
+test('while nothing answers (cc-connect restarting), it keeps trying, and messages wait for it', async (t) => {
+  const a = await adapter(t)
+  await a.open()
+  await until(() => /bridge connected/.test(a.output()), 5000, 'the bridge')
+  await a.bridge.down()
+  await new Promise((resolve) => setTimeout(resolve, 2500))   // its first tries find nothing there
+  a.upsert([wamsg('M1', 'are you back?')])
+  await a.bridge.up()
+  const m = await a.bridge.frame((f) => f.type === 'message', 10000)
+  assert.equal(m.msg_id, 'M1')
+  await a.call('readMessages', (ids) => ids.includes('M1'))
+})
+
 test('messages wait while cc-connect is away, then go in order, and only then show as read', async (t) => {
   const a = await adapter(t, { ack: false })
   await a.open()

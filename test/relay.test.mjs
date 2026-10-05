@@ -133,6 +133,18 @@ test('after cc-connect drops it, it reconnects within about a second each time',
   await r.logged((e) => e.t === 'status' && e.connected === false)
 })
 
+test('while nothing answers (cc-connect restarting), it keeps trying, and messages go once it is back', async (t) => {
+  const r = await relay(t)
+  await r.logged((e) => e.t === 'status' && e.connected === true)
+  await r.bridge.down()
+  await r.logged((e) => e.t === 'status' && e.connected === false)
+  await sleep(2500)   // its first tries find nothing there
+  r.request({ type: 'message', text: 'are you back?' })
+  await r.bridge.up()
+  const m = await r.bridge.frame((f) => f.type === 'message', 10000)
+  assert.equal(m.content, 'are you back?')
+})
+
 test("a frame that isn't a message object, or that breaks the handler, doesn't stop it", async (t) => {
   const r = await relay(t)
   await r.bridge.frame((m) => m.type === 'register')

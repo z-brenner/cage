@@ -5,6 +5,7 @@
 //                                         (b.opts.ack changes it later)
 //   b.conns          every connection so far: { url, headers, at, frames, send(o), ack(), close(), drop() }
 //   b.frame(pred)    waits for a message from an adapter that matches, and returns it
+//   b.down(), b.up() stop listening (as while cc-connect restarts), then listen again on the same port
 import crypto from 'node:crypto'
 import http from 'node:http'
 
@@ -89,6 +90,8 @@ export async function fakeBridge ({ ack = true } = {}) {
     last: () => conns[conns.length - 1],
     frames: () => conns.flatMap((c) => c.frames),
     frame: (pred, ms = 5000) => until(() => conns.flatMap((c) => c.frames).find((m) => m && pred(m)), ms, 'a message to the bridge'),
-    stop: () => new Promise((resolve) => { for (const c of conns) c.drop(); server.close(resolve) })
+    down: () => new Promise((resolve) => { for (const c of conns) c.drop(); server.close(() => resolve()) }),
+    up: () => new Promise((resolve) => server.listen(port, '127.0.0.1', resolve)),
+    stop: () => new Promise((resolve) => { for (const c of conns) c.drop(); server.close(() => resolve()) })
   }
 }

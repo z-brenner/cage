@@ -230,15 +230,19 @@ async function main () {
       if (!m || typeof m !== 'object') return
       try { onFrame(m) } catch (e) { say('bad frame from cc-connect:', e.message) }
     })
-    sock.addEventListener('close', () => {
+    // Node's WebSocket says 'error' and never 'close' when nothing is listening (cc-connect restarting), so either
+    // one means this connection is over: try again.
+    const lost = () => {
       if (ws !== sock) return
       if (ready) log({ t: 'status', connected: false })
       ready = false
       ws = null
+      try { sock.close() } catch {}
       setTimeout(connect, delay)
       delay = Math.min(delay * 2, 30000)
-    })
-    sock.addEventListener('error', () => {})
+    }
+    sock.addEventListener('close', lost)
+    sock.addEventListener('error', lost)
   }
   connect()
   setInterval(() => send({ type: 'ping', ts: Date.now() }), 30000)
