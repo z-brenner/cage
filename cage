@@ -2375,6 +2375,90 @@ cmd_rollback() {
   exec "$CAGE_ROOT/cage" up   # your agents, with the cage you went back to
 }
 
+# cage uninstall [--yes] [--everything]: takes cage off this computer: its VMs and background helpers, start at login,
+# the cage command and cage's folder. Your agents' logins and files and cage's settings stay, unless you ask for
+# everything (and type it, or say --yes). Backups always stay. So does microsandbox: it's a program of its own.
+cmd_uninstall() {
+  local yes="" all="" a v f answer bdir removable="" bin="$HOME/.local/bin/cage"
+  for a in "$@"; do
+    case "$a" in --yes|-y) yes=1 ;; --everything) all=1 ;; *) die "usage: cage uninstall [--yes] [--everything]" ;; esac
+  done
+  bdir="$(backup_dir)"
+  case "$bdir/" in "$CAGE_ROOT"/*) die "your backups are in $bdir, inside cage's own folder; move them elsewhere first (nothing was removed)" ;; esac
+  if [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; then removable=1; fi   # installed by install.sh
+  [ "$CAGE_ROOT" != "$HOME" ] || removable=""
+  if [ -z "$yes" ]; then
+    say "This takes cage off this computer: your agents' VMs, start at login, the cage command and $CAGE_ROOT."
+    if [ -n "$all" ]; then say "It also deletes your agents' logins and files, and cage's settings ($CAGE_HOME)."
+    else say "Your agents' logins and files, and cage's settings ($CAGE_HOME), stay unless you say so below."; fi
+    say "Your backups in $bdir stay either way."
+    yes_no "Take cage off this computer?" n || { say "nothing was removed"; return 0; }
+    if [ -f "$CAGE_ENV" ] && yes_no "Make a backup first (your settings, and each agent's login and files)?" y; then
+      ( cmd_backup ) || die "no backup was made, so nothing was removed"
+    fi
+    if [ -n "$all" ]; then
+      prompt "To delete your agents' logins and files and cage's settings for good, type delete: " answer
+      [ "$answer" = delete ] || die "nothing was removed"
+    else
+      prompt "To delete your agents' logins and files and cage's settings too, type delete (Enter keeps them): " answer
+      [ "$answer" != delete ] || all=1
+    fi
+  fi
+  if [ -n "$all" ]; then
+    case "$bdir/" in "$CAGE_HOME"/*) die "your backups are in $bdir, inside $CAGE_HOME; move them elsewhere first (nothing was removed)" ;; esac
+    [ -n "$CAGE_HOME" ] && [ "$CAGE_HOME" != "$HOME" ] && [ "$CAGE_HOME" != / ] || die "won't delete $CAGE_HOME (nothing was removed)"
+  fi
+
+  # What runs: the agents (stopped properly, so their files are saved), the background helpers, the web app
+  if [ -f "$CAGE_ENV" ]; then ( cmd_down ) || true; fi
+  refresher_stop
+  wsl_keepalive_stop
+  pkill -f -- "$CAGE_ROOT/host/ui/server.py" 2>/dev/null || true
+  ( autostart_apply off ) >/dev/null 2>&1 || true
+  rm -f "$CAGE_HOME/autostart"
+  if find_msb; then
+    for a in $KINDS; do
+      if exists "$a"; then
+        if "$MSB" rm --force "$(vm "$a")" >/dev/null 2>&1; then ok "removed $a's VM"; else warn "couldn't remove $a's VM ($(vm "$a"))"; fi
+      fi
+      [ -n "$all" ] || continue
+      for v in home cache; do "$MSB" volume rm "$(vm "$a")-$v" >/dev/null 2>&1 || true; done
+    done
+  fi
+
+  # The cage command, the lines the installer added to your shell's settings, the app menu entry, and cage itself
+  if [ -L "$bin" ] && [ "$(readlink -f "$bin")" = "$CAGE_ROOT/cage" ]; then rm -f "$bin"; fi
+  for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.zprofile" "$HOME/.config/fish/conf.d/cage.fish"; do unmark "$f"; done
+  f="$HOME/.local/share/applications/cage.desktop"
+  if grep -qF "$CAGE_ROOT/" "$f" 2>/dev/null; then rm -f "$f"; fi
+  if [ -n "$all" ]; then rm -rf "$CAGE_HOME"; ok "deleted your agents' logins and files, and cage's settings"; fi
+  if [ -n "$removable" ]; then rm -rf "$CAGE_ROOT"; ok "removed cage ($CAGE_ROOT)"
+  else warn "$CAGE_ROOT is a development checkout, so it stays; delete it yourself when you like"; fi
+
+  ok "cage is off this computer"
+  if [ -z "$all" ]; then
+    hint "kept: cage's settings in $CAGE_HOME, and your agents' logins and files (microsandbox volumes cage-<agent>-home)"
+    hint "to delete those too: rm -rf $CAGE_HOME, and msb volume rm cage-<agent>-home cage-<agent>-cache for each agent"
+  fi
+  if ls -d "$CAGE_HOME".before-restore-* >/dev/null 2>&1; then hint "older settings from restores are kept too: $CAGE_HOME.before-restore-*"; fi
+  if [ -d "$bdir" ]; then say "your backups are still in $bdir"; fi
+  say "microsandbox stays installed (it's a program of its own). To remove it too: rm -rf ${MSB_HOME:-~/.microsandbox} ~/.local/bin/msb ~/.local/bin/microsandbox"
+}
+
+unmark() { # unmark <file>: takes out the lines the installer added (each with the empty line it put before it)
+  local f="$1" tmp
+  grep -qF '# added by the cage installer' "$f" 2>/dev/null || return 0
+  tmp="$f.cage-uninstall.$$"
+  awk -v m='# added by the cage installer' '
+    index($0, m) { blank = 0; next }
+    { if (blank) print ""; blank = 0 }
+    /^$/ { blank = 1; next }
+    { print }
+    END { if (blank) print "" }' "$f" > "$tmp" || { rm -f "$tmp"; warn "couldn't take cage's line out of $f"; return 0; }
+  if grep -q '[^[:space:]]' "$tmp"; then cat "$tmp" > "$f"; else rm -f "$f"; fi   # in place: keeps its mode and links
+  rm -f "$tmp"
+}
+
 cmd_down() {
   load_env
   resolve_agents "$@"
@@ -3396,6 +3480,7 @@ usage() {
   row "  restore [file]" "put a backup back, here or on a new computer"
   row "  destroy <agent>" "--keep-login keeps its login, --yes deletes all"
   row "  init" "just write the config file, to edit by hand"
+  row "  uninstall" "take cage off this computer (backups stay)"
   printf '\n  %sagents%s  claude · codex · cursor · antigravity\n' "$C_DIM" "$C_0"
   printf '  %sconfig%s  %s\n\n' "$C_DIM" "$C_0" "$CAGE_ENV"
 }
@@ -3416,6 +3501,7 @@ main() {
     shell) cmd_shell "$@" ;;
     update) cmd_update "$@" ;;
     rollback) cmd_rollback ;;
+    uninstall) cmd_uninstall "$@" ;;
     down) cmd_down "$@" ;;
     destroy) cmd_destroy "$@" ;;
     memory) cmd_memory "$@" ;;

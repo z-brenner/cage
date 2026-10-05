@@ -2,7 +2,7 @@
 # Tests install.sh against local copies of this repo: from git (fresh install, the `cage` command, PATH setup, re-run
 # update), and from releases on a local stand-in for GitHub Releases (checksums, in-place updates, a tampered download).
 # Then everything that can go wrong on the way: no network, GitHub down while git works, a disk that fills up halfway,
-# running as root, an older release; plus going back (a pinned version, cage rollback).
+# running as root, an older release; plus going back (a pinned version, cage rollback) and cage uninstall.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -26,9 +26,10 @@ commit add -A
 commit commit -qm snapshot
 
 # Stand-ins, first on PATH: the internet as `cage update` checks it (test/fake-curl.sh; the release server below is
-# reached for real), and microsandbox.
+# reached for real), and the OS tools `cage uninstall` turns start-at-login off with, so no real login item is touched.
 mkdir -p "$T/stub"
 ln -s "$ROOT/test/fake-curl.sh" "$T/stub/curl"
+for tool in systemctl launchctl; do printf '#!/bin/sh\nexit 0\n' > "$T/stub/$tool"; chmod +x "$T/stub/$tool"; done
 cat > "$T/stub/msb" <<'EOF'
 #!/bin/sh
 [ "$1" = --version ] && exit 0
@@ -248,5 +249,29 @@ printf 'tampered' >> "$CAGE_HOME/releases/v9.9.9/cage-v9.9.9.tar.gz"
 if CAGE_RELEASES="$DEAD" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" rollback 2>"$T/err"; then fail "rolled back to a changed copy"; fi
 grep -q "doesn't match its checksum" "$T/err" && [ "$(version)" = v9.9.12 ] || fail "a changed kept copy: $(cat "$T/err")"
 ok "a release of your choice (cage update --to, older ones too), and cage rollback with no network; the last two are kept"
+
+# --- uninstall ---------------------------------------------------------------------------------------------------
+mkdir -p "$HOME/cage-backups" && echo backup > "$HOME/cage-backups/cage-2026-01-01-000000.cagebackup"
+echo 'alias ll="ls -l"' >> "$HOME/.bashrc"
+if printf 'y\nn\nkeep\n' | CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --everything 2>"$T/err"; then fail "--everything without typing delete"; fi
+[ -x "$HOME/cage/cage" ] && [ -d "$CAGE_HOME" ] || fail "uninstall removed something without the typed confirmation"
+: > "$MSB_LOG"
+CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fail "uninstall: $(cat "$T/err")"
+[ ! -e "$HOME/cage" ] && [ ! -e "$HOME/.local/bin/cage" ] && [ ! -e "$HOME/.local/share/applications/cage.desktop" ] || fail "cage is still here"
+[ -f "$CAGE_HOME/cage.env" ] || fail "uninstall without --everything deleted the settings"
+grep -q '^rm --force cage-claude$' "$MSB_LOG" && ! grep -q 'volume rm' "$MSB_LOG" || fail "VMs and volumes: $(cat "$MSB_LOG")"
+grep -q 'added by the cage installer' "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc" 2>/dev/null && fail "PATH lines left"
+grep -qx 'alias ll="ls -l"' "$HOME/.bashrc" || fail "uninstall took the user's own line from .bashrc"
+bash "$ROOT/install.sh" 2>"$T/err" || fail "reinstall: $(cat "$T/err")"
+rm -f "$HOME/.bashrc"
+: > "$MSB_LOG"
+CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err" || fail "uninstall --everything: $(cat "$T/err")"
+grep -q '^volume rm cage-claude-home$' "$MSB_LOG" && grep -q '^volume rm cage-antigravity-cache$' "$MSB_LOG" || fail "volumes: $(cat "$MSB_LOG")"
+[ ! -e "$CAGE_HOME" ] || fail "uninstall --everything kept $CAGE_HOME"
+left="$(cd "$HOME" && find . \( -type f -o -type l \) ! -path './cage-backups/*' | sort)"
+[ -z "$left" ] || fail "uninstall --everything left: $left"
+[ -f "$HOME/cage-backups/cage-2026-01-01-000000.cagebackup" ] || fail "uninstall deleted a backup"
+grep -q 'microsandbox stays installed' "$T/err" || fail "no word on removing microsandbox: $(cat "$T/err")"
+ok "cage uninstall: VMs, command, PATH lines and ~/cage go; settings and volumes only with --everything; backups stay"
 
 echo "all $pass installer tests passed"

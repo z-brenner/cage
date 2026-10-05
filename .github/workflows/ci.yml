@@ -59,6 +59,14 @@ jobs:
           $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
           Write-Output $out
           if ($out -notmatch 'check only: would set up WSL 2|virtualization is turned off|needs Windows 11|GB free on|turned off part of WSL') { throw 'unexpected installer output' }
+      - name: the uninstall mode (check only)
+        shell: powershell
+        run: |
+          $env:CAGE_CHECK_ONLY = '1'
+          $env:CAGE_UNINSTALL = '1'
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch 'check only: would ask, offer a backup, then remove all of that') { throw 'unexpected uninstall output' }
       - name: PowerShell 7, the way `irm | iex` runs it (must not close the session)
         shell: pwsh
         run: |

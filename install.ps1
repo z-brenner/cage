@@ -5,6 +5,8 @@
 # creates your Linux user, installs cage inside it and opens it in your browser. If Windows has to restart
 # to turn WSL on, setup carries on by itself after you log back in.
 # $env:CAGE_CHECK_ONLY = '1' only checks this PC and prints what it would do.
+# $env:CAGE_UNINSTALL = '1' takes cage off this PC instead: its Linux distro (your agents, their logins and files,
+# cage's settings), the Start menu shortcut and start at login. Backups in Documents\cage backups stay.
 # Kept ASCII-only so Windows PowerShell 5.1 reads it correctly in any code page.
 
 & {
@@ -45,18 +47,48 @@
         if ($LASTEXITCODE -ne 0 -or -not $out) { return @() }
         return @($out | ForEach-Object { ($_ -replace "`0", '').Trim() } | Where-Object { $_ })
     }
+    # Everything this installer and cage put on Windows goes; backups (Documents\cage backups) stay.
+    function Remove-Cage {
+        $backups = Join-Path $env:USERPROFILE 'Documents\cage backups'
+        Say "This takes cage off this PC: its Linux distro '$Distro' with your agents, their logins and files,"
+        Say "and cage's settings; the Start menu shortcut; and starting at login."
+        Say "Your backups in '$backups' stay."
+        if ($env:CAGE_CHECK_ONLY) { Say 'check only: would ask, offer a backup, then remove all of that'; return }
+        $env:WSL_UTF8 = '1'
+        $answer = Read-Host '  Type remove to take cage off this PC'
+        if ($answer -ne 'remove') { Say 'Nothing was removed.'; return }
+        if ((Get-Distros) -contains $Distro) {
+            $answer = Read-Host '  Make a backup first? [Y/n]'
+            if ($answer -notmatch '^[nN]') {
+                & wsl.exe -d $Distro -- '~/.local/bin/cage' backup
+                if ($LASTEXITCODE -ne 0) { Stop-Setup 'the backup did not work, so nothing was removed' 'run this again, or answer n to go without a backup' }
+            }
+            & wsl.exe -d $Distro -- '~/.local/bin/cage' uninstall --yes
+            & wsl.exe --unregister $Distro
+            if ($LASTEXITCODE -ne 0) { Stop-Setup "couldn't remove the Linux distro '$Distro'" "run: wsl --unregister $Distro" }
+            Ok "removed the Linux distro '$Distro', and everything in it"
+        }
+        Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Programs')) 'Cage.lnk')
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:LOCALAPPDATA 'cage')
+        Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'cage' -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'cage-install' -ErrorAction SilentlyContinue
+        Ok 'removed the Start menu shortcut and starting at login'
+        Say "Your backups are still in '$backups'."
+    }
 
     try {
         Write-Host ''
         Write-Host '  [' -ForegroundColor Yellow -NoNewline; Write-Host ([char]0x2022) -NoNewline
         Write-Host '|' -ForegroundColor Yellow -NoNewline; Write-Host ([char]0x2022) -NoNewline
         Write-Host ']' -ForegroundColor Yellow -NoNewline; Write-Host ' cage  ' -NoNewline
-        Write-Host 'setting up on Windows' -ForegroundColor DarkGray
+        if ($env:CAGE_UNINSTALL) { Write-Host 'taking cage off Windows' -ForegroundColor DarkGray }
+        else { Write-Host 'setting up on Windows' -ForegroundColor DarkGray }
         Write-Host ''
 
         if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
             Stop-Setup 'this installer is for Windows' 'on Linux: curl -fsSL https://github.com/z-brenner/cage/releases/latest/download/install.sh | bash'
         }
+        if ($env:CAGE_UNINSTALL) { Remove-Cage; return }
         $build = [Environment]::OSVersion.Version.Build
         if ($build -lt 22000) {
             Stop-Setup "cage needs Windows 11 (this PC runs build $build)" 'WSL 2 can only run the agents'' VMs on Windows 11'
