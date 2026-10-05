@@ -26,6 +26,10 @@ find_msb() {
   return 1
 }
 find_msb || true
+# The microsandbox release cage is tested with (CI's microVM tests run it, scripts/install-msb.sh installs it), and the
+# oldest one cage works with. Move them only together with green microVM tests on the new version.
+CAGE_MSB_VERSION=v0.7.5
+MSB_MIN=0.7.5
 KINDS="claude codex cursor antigravity"
 
 # --- look and feel ---------------------------------------------------------------------------------------------
@@ -1709,14 +1713,42 @@ cmd_init() {
   [ "${ONBOARDING:-0}" = 1 ] || ok "wrote $CAGE_ENV"
 }
 
+# --- checking this computer -------------------------------------------------------------------------------------
+ver_lt() { # ver_lt <a> <b>: version a (like 0.7.4, numbers and dots) comes before b
+  local a="$1." b="$2." x y
+  while [ -n "$a$b" ]; do
+    x="${a%%.*}" y="${b%%.*}"
+    a="${a#*.}" b="${b#*.}"
+    [ "${x:-0}" = "${y:-0}" ] && continue
+    if [ "${x:-0}" -lt "${y:-0}" ] 2>/dev/null; then return 0; fi
+    return 1
+  done
+  return 1
+}
+
+MSB_HAVE=""
+msb_version_ok() { # false when the installed microsandbox is older than cage works with; sets MSB_HAVE (empty: it didn't say)
+  MSB_HAVE="$("$MSB" --version 2>/dev/null | sed -n 's/^msb v\{0,1\}\([0-9][0-9.]*\).*/\1/p' | head -n 1)" || MSB_HAVE=""
+  MSB_HAVE="${MSB_HAVE%.}"
+  [ -z "$MSB_HAVE" ] || ! ver_lt "$MSB_HAVE" "$MSB_MIN"
+}
+msb_tested() { [ -z "$MSB_HAVE" ] || [ "$MSB_HAVE" = "${CAGE_MSB_VERSION#v}" ]; }   # after msb_version_ok
+
 # Checks this computer. Prints one line per check (and a fix under each problem); fails if anything is missing.
 check_host() {
   local good=0
   if find_msb && command -v "$MSB" >/dev/null 2>&1; then
-    echo "  ${C_OK}✓${C_0} microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //' || true)"
+    if ! msb_version_ok; then
+      echo "  ${C_ERR}✗${C_0} microsandbox $MSB_HAVE is too old for cage"
+      echo "    ${C_DIM}→ run: cage update${C_0}"; good=1
+    elif ! msb_tested; then
+      echo "  ${C_AMBER}!${C_0} microsandbox $MSB_HAVE (cage is tested with ${CAGE_MSB_VERSION#v})"
+    else
+      echo "  ${C_OK}✓${C_0} microsandbox $MSB_HAVE"
+    fi
   else
     echo "  ${C_ERR}✗${C_0} microsandbox isn't installed"
-    echo "    ${C_DIM}→ cage offers to install it, or: curl -fsSL https://install.microsandbox.dev | sh${C_0}"
+    echo "    ${C_DIM}→ run: cage fix${C_0}"
     good=1
   fi
   case "$(uname -s)/$(uname -m)" in
@@ -1757,8 +1789,13 @@ check_json() {
   item() {
     out="$out${out:+,}{\"id\":$(jstr "$1"),\"status\":$(jstr "$2"),\"title\":$(jstr "$3"),\"detail\":$(jstr "$4"),\"fix\":$(jbool test -n "$5"),\"it\":$(jstr "$6")}"
   }
-  if find_msb && command -v "$MSB" >/dev/null 2>&1; then item msb ok "microsandbox is installed" "It runs your agents' private computers." "" ""
-  else item msb bad "microsandbox isn't installed yet" "It runs your agents' private computers. cage installs it for you, without admin rights." fix ""; fi
+  if ! find_msb || ! command -v "$MSB" >/dev/null 2>&1; then
+    item msb bad "microsandbox isn't installed yet" "It runs your agents' private computers. cage installs it for you, without admin rights." fix ""
+  elif ! msb_version_ok; then
+    item msb bad "microsandbox $MSB_HAVE is too old for cage" "cage needs $MSB_MIN or newer, and installs the version it's tested with (${CAGE_MSB_VERSION#v}) for you." fix ""
+  elif ! msb_tested; then
+    item msb warn "microsandbox $MSB_HAVE is installed" "It runs your agents' private computers. cage is tested with ${CAGE_MSB_VERSION#v}; this one will most likely work too." "" ""
+  else item msb ok "microsandbox is installed" "It runs your agents' private computers." "" ""; fi
   if [ "$(uname -s)" = Linux ]; then
     if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then item kvm ok "This computer can run virtual machines" "Each agent gets one of its own." "" ""
     elif [ -e /dev/kvm ]; then item kvm bad "You can't use virtual machines yet" "cage adds you to the kvm group; it may ask for your password." fix ""
@@ -1788,7 +1825,9 @@ check_json() {
 }
 
 cmd_fix() { # cage fix: what cage can fix on this computer itself (microsandbox, access to KVM)
-  if ! find_msb; then install_msb; fi
+  if ! find_msb; then install_msb
+  elif ! msb_version_ok; then install_msb "microsandbox $MSB_HAVE is too old for cage."
+  fi
   if [ "$(uname -s)" = Linux ] && [ -e /dev/kvm ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
     fix_kvm || die "couldn't give you access to /dev/kvm; on a work computer, IT may need to"
   fi
@@ -2027,6 +2066,7 @@ cmd_up() {
   load_env
   resolve_agents "$@"
   find_msb || die "microsandbox isn't installed; run cage to set it up"
+  msb_version_ok || die "microsandbox $MSB_HAVE is too old for cage; run: cage update"
   brain_init "${AGENTS[@]}"
   if oauth_any; then oauth_refresh_all 1800; fi
   local quiet=()
@@ -2158,7 +2198,8 @@ cage_version() {
 }
 
 # cage update [agents]: the newest cage first (the latest release, checked against its checksums; or the branch a
-# git install follows), then the agents rebuilt with the newest CLIs. A development checkout is left to git.
+# git install follows), then microsandbox if it's older than the one cage is tested with, then the agents rebuilt with
+# the newest CLIs. A development checkout is left to git.
 cmd_update() {
   if [ -z "${CAGE_NO_SELF_UPDATE:-}" ] && { [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; }; then
     local before tmp rc=0 ref=""
@@ -2173,6 +2214,13 @@ cmd_update() {
       warn "couldn't update cage itself (still $before); updating the agents anyway"
     elif [ "$(cage_version)" != "$before" ]; then
       exec env CAGE_NO_SELF_UPDATE=1 "$CAGE_ROOT/cage" update "$@"   # the rest with the new cage
+    fi
+  fi
+  # microsandbox older than the one this cage is tested with: that one goes in first (VMs and volumes are kept)
+  if find_msb; then
+    msb_version_ok || true
+    if [ -n "$MSB_HAVE" ] && ver_lt "$MSB_HAVE" "${CAGE_MSB_VERSION#v}"; then
+      install_msb "microsandbox $MSB_HAVE is older than the one cage is tested with."
     fi
   fi
   CAGE_REFRESH=1 cmd_up "$@"   # the VMs download the newest of everything, instead of waking from their cache
@@ -3052,15 +3100,24 @@ configured() {
     exit 1 )
 }
 
-install_msb() {
-  yes_no "microsandbox runs the VMs and isn't installed yet. Install it now (its official installer, no sudo)?" y \
-    || die "cage needs microsandbox: curl -fsSL https://install.microsandbox.dev | sh"
-  if ! curl -fsSL https://install.microsandbox.dev | sh >/dev/null 2>&1; then
-    warn "the installer couldn't look up the latest release (GitHub rate limit?); installing v0.7.5 instead"
-    MSB_VERSION=v0.7.5 "$CAGE_ROOT/test/install-msb-pinned.sh" >/dev/null 2>&1 || die "couldn't install microsandbox; see https://docs.microsandbox.dev"
+install_msb() { # install_msb [why]: the microsandbox release cage is tested with, through its official installer (no sudo)
+  local log="$CAGE_HOME/msb-install.log" err esc=$'\033' why="${1:-}"
+  [ -n "$why" ] || why="microsandbox runs the VMs and isn't installed yet."
+  yes_no "$why Install microsandbox ${CAGE_MSB_VERSION#v} now (its official installer, no sudo)?" y \
+    || die "cage needs microsandbox ${CAGE_MSB_VERSION#v}: run cage fix when you're ready"
+  mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
+  say "installing microsandbox ${CAGE_MSB_VERSION#v}…"
+  # CAGE_MSB_INSTALLER (a local copy of the official installer) is passed on to the script, for the tests
+  if ! MSB_VERSION="$CAGE_MSB_VERSION" "$CAGE_ROOT/scripts/install-msb.sh" >"$log" 2>&1; then
+    err="$(sed "s/$esc\[[0-9;]*m//g" "$log" | grep -iE 'error|fail|not supported|requires|denied' | tail -n 1 || true)"
+    [ -n "$err" ] || err="$(grep . "$log" | tail -n 1 || true)"
+    bad "couldn't install microsandbox: $(printf '%s' "${err:-the installer gave no reason}" | safe_text | sed 's/^[[:space:]]*//')"
+    hint "everything the installer said: $log"
+    exit 1
   fi
   find_msb || die "microsandbox installed, but msb isn't where expected; open a new terminal and run cage again"
-  ok "microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //')"
+  msb_version_ok || true
+  ok "microsandbox ${MSB_HAVE:-${CAGE_MSB_VERSION#v}}"
 }
 
 fix_kvm() {

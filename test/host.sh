@@ -15,6 +15,7 @@ ok() { pass=$((pass + 1)); echo "ok - $*"; }
 mkdir -p "$T/bin"
 cat > "$T/bin/msb" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --version ]; then cat "$MSB_STUB_VERSION" 2>/dev/null || echo "msb 0.7.5"; exit 0; fi   # the one cage pins
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
@@ -39,6 +40,7 @@ fi
 exit 0
 EOF
 chmod +x "$T/bin/msb"
+export MSB_STUB_VERSION="$T/msb.version"
 export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" MSB_VOLUMES="$T/volumes" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
 : > "$MSB_EXISTING"
 cage() { "$ROOT/cage" "$@"; }
@@ -586,6 +588,61 @@ mv "$T/bin/powershell.exe" "$T/ps.off"
 grep -q 'Windows interop is off' "$T/err" || fail "no warning without interop: $(cat "$T/err")"
 unset WSL_DISTRO_NAME
 ok "without Windows interop, up warns that WSL will stop the VMs"
+
+# microsandbox: cage installs the version it pins, with the official installer (here a stand-in), and says so when
+# the installed one isn't that version
+cat > "$T/msb-installer.sh" <<'EOF'
+#!/bin/sh
+# stands in for https://install.microsandbox.dev (scripts/install-msb.sh replaces this lookup with its pin)
+get_latest_version() {
+    VERSION=v9.9.9
+}
+main() {
+    if [ -n "${FAIL_MSB_INSTALL:-}" ]; then echo "error: glibc 2.28 or newer is required (found 2.17)" >&2; exit 1; fi
+    get_latest_version
+    mkdir -p "$MSB_HOME/bin"
+    printf '#!/bin/sh\necho "msb %s"\n' "${VERSION#v}" > "$MSB_HOME/bin/msb"
+    chmod +x "$MSB_HOME/bin/msb"
+    echo "msb ${VERSION#v}" > "$MSB_STUB_VERSION"   # the msb on PATH is the new one now
+    echo "Installed msb to $MSB_HOME/bin/msb"
+}
+main "$@"
+EOF
+export CAGE_MSB_INSTALLER="$T/msb-installer.sh" MSB_HOME="$T/msbhome"
+pin="$(sed -n 's/^CAGE_MSB_VERSION=v//p' "$ROOT/cage")"
+[ -n "$pin" ] || fail "no CAGE_MSB_VERSION in cage"
+mkdir -p "$T/nomsb" && ln -sf "$(command -v bash)" "$T/nomsb/bash"   # a PATH without msb (bash is elsewhere on some systems)
+nomsb="$T/nomsb:/usr/bin:/bin"
+out="$(printf 'y\nn\n' | PATH="$nomsb" HOME="$T/fixhome" CAGE_HOME="$T/fixhome/.cage" "$ROOT/cage" fix 2>&1 || true)"
+grep -q "✓ microsandbox $pin" <<<"$out" || fail "cage fix didn't install microsandbox $pin: $out"
+[ "$("$MSB_HOME/bin/msb" --version)" = "msb $pin" ] || fail "cage fix installed something else"
+grep -q "Installed msb" "$T/fixhome/.cage/msb-install.log" || fail "the installer's output isn't in msb-install.log"
+rm -rf "$MSB_HOME"
+out="$(printf 'y\n' | FAIL_MSB_INSTALL=1 PATH="$nomsb" HOME="$T/fixhome2" CAGE_HOME="$T/fixhome2/.cage" "$ROOT/cage" fix 2>&1 || true)"
+grep -q "couldn't install microsandbox: error: glibc 2.28 or newer is required (found 2.17)" <<<"$out" || fail "the installer's error isn't shown: $out"
+grep -q "$T/fixhome2/.cage/msb-install.log" <<<"$out" || fail "no pointer to the installer's log: $out"
+ok "cage fix installs the microsandbox version cage pins, and shows the installer's error when it fails"
+
+echo "msb 0.7.99" > "$MSB_STUB_VERSION"
+out="$(CAGE_HOME="$T/doc" cage doctor 2>&1 || true)"
+grep -q "! microsandbox 0.7.99 (cage is tested with $pin)" <<<"$out" || fail "doctor didn't warn about the msb version: $out"
+CAGE_HOME="$T/doc" cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+assert c["msb"]["status"] == "warn" and "0.7.99" in c["msb"]["title"], c["msb"]' || fail "the app's check doesn't warn about the msb version"
+echo "msb 0.7.4" > "$MSB_STUB_VERSION"
+out="$(CAGE_HOME="$T/doc" cage doctor 2>&1 || true)"
+grep -q "✗ microsandbox 0.7.4 is too old for cage" <<<"$out" && grep -q "run: cage update" <<<"$out" || fail "doctor: an old msb: $out"
+CAGE_HOME="$T/doc" cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+assert c["msb"]["status"] == "bad" and c["msb"]["fix"], c["msb"]' || fail "the app's check: an old msb isn't something cage fixes"
+: > "$MSB_LOG"
+if cage up claude 2>"$T/err"; then fail "up ran with a microsandbox that's too old"; fi
+grep -q "microsandbox 0.7.4 is too old for cage; run: cage update" "$T/err" || fail "up: $(cat "$T/err")"
+grep -q '^run | ' "$MSB_LOG" && fail "up started a VM with an old msb"
+printf 'y\n' | cage update claude 2>"$T/err" || fail "update with an old msb: $(cat "$T/err")"
+grep -q "✓ microsandbox $pin" "$T/err" || fail "update didn't install microsandbox $pin: $(cat "$T/err")"
+grep -q '^run | ' "$MSB_LOG" || fail "update didn't go on to the agents"
+rm -f "$MSB_STUB_VERSION"
+unset CAGE_MSB_INSTALLER MSB_HOME
+ok "doctor and the app's check warn about an msb cage isn't tested with; up refuses a too-old one, update replaces it"
 
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   cat >> "$CAGE_HOME/cage.env" <<'EOF'

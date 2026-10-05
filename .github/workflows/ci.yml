@@ -99,10 +99,8 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: install microsandbox (pinned; avoids the installer's anonymous GitHub API lookup)
-        env:
-          MSB_VERSION: v0.7.5
+      - name: install microsandbox (the version cage pins; avoids the installer's anonymous GitHub API lookup)
         run: |
-          test/install-msb-pinned.sh
+          MSB_VERSION="$(grep -oP '^CAGE_MSB_VERSION=\K\S+' cage)" test/install-msb-pinned.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: test/microvm-e2e.sh ${{ matrix.agent }}
