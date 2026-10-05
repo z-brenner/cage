@@ -94,5 +94,10 @@ problems="$(grep -v '^counts ' <<<"$problems" || true)"
 read -r uses checkouts downloads <<<"$counts"
 [ "$uses" -gt 0 ] && [ "$checkouts" -gt 0 ] && [ "$downloads" -gt 0 ] || fail "found no actions, checkouts or downloads in .github/workflows; update test/pins.sh"
 ok "the workflows: $uses actions pinned to commits, $checkouts checkouts that keep no token, $downloads downloads checked"
+# Dependabot proposes new versions of those actions, but only once they're a week old (a compromised release, like
+# tj-actions/changed-files in 2025, was found and pulled within days)
+days="$(sed -nE 's/^ +default-days: *([0-9]+) *$/\1/p' .github/dependabot.yml)"
+[ -n "$days" ] && [ "$days" -ge 7 ] || fail ".github/dependabot.yml should wait at least 7 days for new versions (cooldown: default-days: 7), not '${days:-none}'"
+ok "Dependabot waits $days days before it proposes a new version"
 
 echo "all $pass pin tests passed"

@@ -6,6 +6,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # only versions at least a week old: a release that turns out to be compromised is usually pulled by then
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ['*']
