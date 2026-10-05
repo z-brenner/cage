@@ -264,10 +264,12 @@ if (!/^claude \d{4}-\d\d-\d\d \d{4}\.md$/.test(saved.suggestedFilename()) || !fs
 // the keyboard: Alt+2 opens the second agent's chat, Ctrl+Shift+O a new conversation, ? the list of shortcuts; and the
 // palette knows each agent's new conversation, schedule and Stop
 const sent = (text) => (fs.readFileSync(path.join(dir, 'log.jsonl'), 'utf8').match(new RegExp(`"t":"you"[^\\n]*"text":"${text}"`, 'g')) || []).length
+// (the page is there once it's drawn, a moment after the address changes: a shortcut before that is still the last page's)
+const drawn = (at) => page.waitForFunction((at) => location.hash === '#' + at && document.getElementById('main').dataset.page === at, at, { timeout: 5000 })
 await page.keyboard.press('Alt+2')
-await page.waitForFunction(() => location.hash === '#agent/codex', null, { timeout: 5000 })
+await drawn('agent/codex')
 await page.keyboard.press('Alt+1')
-await page.waitForFunction(() => location.hash === '#agent/claude', null, { timeout: 5000 })
+await drawn('agent/claude')
 await page.keyboard.press('Control+Shift+O')
 for (let i = 0; i < 50 && !sent('/new'); i++) await page.waitForTimeout(100)
 await chat.locator('.chat-divider', { hasText: 'New conversation' }).last().waitFor({ timeout: 10000 })
