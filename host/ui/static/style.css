@@ -731,7 +731,7 @@ dialog.keys::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparen
   font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval-body .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
 .approval-body.open .clamp { display: block; -webkit-line-clamp: none; line-clamp: none; }
-.approval-more { align-self: flex-start; margin-top: -4px; }
+.approval-more { align-self: flex-start; margin-top: -4px; color: var(--link); font-size: 13px; }
 .approval-raw summary { width: fit-content; color: var(--muted); font-size: 12.5px; cursor: pointer; }
 .approval-raw summary:hover { color: var(--ink); }
 .approval-raw pre, .approval-text { margin: 6px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--hover); font: 12px/1.5 var(--mono);

@@ -206,6 +206,16 @@ await approval.getByRole('button', { name: 'Allow', exact: true }).click()
 await chat.getByText('Sent the email to bob@acme.com.').waitFor({ timeout: 10000 })
 if (!(await approval.getByText('You chose:').count())) fail('the choice is not shown')
 if (!fs.readFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), 'utf8').includes('"action":"perm:allow"')) fail('the approval did not reach the agent')
+// a short text of six lines, one of them long (under 420 characters in all): cut at its sixth line as laid out, and
+// then there's a Show all
+fs.appendFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }]],
+  text: '⚠️ **Permission Request**\n\nAgent wants to use **mcp__zapier__gmail_send_email**:\n\n```\n' + JSON.stringify({ body: 'Hi Dana,\n\n' + 'The redline is attached, with a short comment on each change. '.repeat(5) + '\n\nBest,\nSam', to: 'dana@acme.com' }) + '\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).' }) + '\n')
+const short = chat.locator('.choices.approval:not(.is-answered)', { hasText: 'dana@acme.com' })
+await short.waitFor({ timeout: 10000 })
+if (!(await short.locator('.approval-body .clamp').evaluate((el) => el.scrollHeight > el.clientHeight + 2))) fail('six lines, one of them long, are not cut at the sixth')
+await short.getByRole('button', { name: 'Show all' }).waitFor({ timeout: 5000 }).catch(() => fail('a text cut short has no Show all'))
+await short.getByRole('button', { name: 'Deny' }).click()
+await chat.locator('.msg-agent', { hasText: 'Okay, I won’t send it.' }).first().waitFor({ timeout: 10000 })
 ok('chat: starters, a file each way, a streamed answer, and asking before acting in words, with what it asked one click away (Allow reaches the agent)')
 
 // the VM starts a new chat log now and then (at 8 MB): what was said before stays on the screen, and after a reload

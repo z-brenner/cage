@@ -1435,13 +1435,16 @@ function approvalLine (ap) { // in one line, for Home and notifications: "Gmail:
 }
 function approvalView (ap) { // what the card shows above its buttons
   if (!ap.what) return [h('pre', { class: 'approval-text' }, ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim())]
-  const body = ap.body ? h('div', { class: 'approval-body' }, h('div', { class: 'clamp' }, ap.body)) : null
-  const long = ap.body && (ap.body.split('\n').length > 6 || ap.body.length > 420)
+  const clamp = h('div', { class: 'clamp' }, ap.body)
+  const body = ap.body ? h('div', { class: 'approval-body' }, clamp) : null
+  const more = body && h('button', { type: 'button', class: 'linkish approval-more', 'aria-expanded': 'false', hidden: true, onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all')
+  // "Show all" when the text is cut, which only its laid-out lines can tell (a long line takes two, a narrow window more)
+  if (more) new ResizeObserver(() => { if (!body.classList.contains('open')) more.hidden = clamp.scrollHeight <= clamp.clientHeight + 1 }).observe(clamp)
   return [
     h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
     ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v]) => h('div', {}, h('dt', {}, label), h('dd', {}, v)))) : null,
     body,
-    long ? h('button', { type: 'button', class: 'linkish small approval-more', 'aria-expanded': 'false', onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all') : null,
+    more,
     ap.cut ? h('p', { class: 'small muted' }, 'Only the start of this was shown here. Allow lets it do all of it.') : null,
     h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', {}, ap.raw))
   ]
