@@ -401,14 +401,20 @@ echo "CAGE_BACKUP_DIR=\"$CAGE_HOME/backups/\"" >> "$CAGE_HOME/cage.env"
 if CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err"; then fail "uninstall --everything deleted the backups"; fi
 grep -q "inside $CAGE_HOME; move them elsewhere first (nothing was removed)" "$T/err" && [ -f "$CAGE_HOME/backups/mine.cagebackup" ] ||
   fail "backups in cage's settings (cage.env): $(cat "$T/err")"
-rm -rf "$CAGE_HOME/backups"
+sed -i '/^CAGE_BACKUP_DIR=/d' "$CAGE_HOME/cage.env"
+ln -s "$CAGE_HOME/backups" "$HOME/my-backups"   # the same folder, by a link from outside
+echo "CAGE_BACKUP_DIR=\"$HOME/my-backups\"" >> "$CAGE_HOME/cage.env"
+if CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err"; then fail "uninstall --everything deleted the backups behind a link"; fi
+grep -q "inside $CAGE_HOME; move them elsewhere first (nothing was removed)" "$T/err" && [ -f "$CAGE_HOME/backups/mine.cagebackup" ] ||
+  fail "backups in cage's settings, through a link: $(cat "$T/err")"
+rm -rf "$CAGE_HOME/backups" "$HOME/my-backups"
 sed -i '/^CAGE_BACKUP_DIR=/d' "$CAGE_HOME/cage.env"
 # cage's settings folder set to your home folder (a trailing slash once got past the check)
 if CAGE_HOME="$HOME/" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err"; then fail "uninstall --everything with CAGE_HOME=~/"; fi
 grep -q "won't delete $HOME/: your home folder is in it (nothing was removed)" "$T/err" && [ -x "$HOME/cage/cage" ] && [ -f "$HOME/.bashrc" ] ||
   fail "CAGE_HOME=~/: $(cat "$T/err")"
 [ ! -s "$MSB_LOG" ] || fail "a refused uninstall touched the VMs: $(cat "$MSB_LOG")"
-ok "cage uninstall never deletes backups (where cage.env puts them too) or your home folder (however it's spelled)"
+ok "cage uninstall never deletes backups (where cage.env puts them too, through a link too) or your home folder (however it's spelled)"
 
 : > "$MSB_LOG"
 CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fail "uninstall: $(cat "$T/err")"
