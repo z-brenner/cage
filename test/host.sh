@@ -903,11 +903,14 @@ alive || fail "down <agent> released the keepalive while other VMs may still run
 gone || fail "down did not release the keepalive"
 ok "on WSL, up holds one hidden session open; down (all agents) releases it"
 
-"$W" _autostart 2>/dev/null
-grep -q 'started cage-claude' "$CAGE_HOME/autostart.log" || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
+echo cage-codex > "$T/w.running"; : > "$MSB_LOG"
+MSB_RUNNING="$T/w.running" "$W" _autostart 2>/dev/null
+grep -q 'started cage-claude' "$CAGE_HOME/autostart.log" && grep -q 'codex is already awake' "$CAGE_HOME/autostart.log" \
+  || fail "_autostart log: $(cat "$CAGE_HOME/autostart.log")"
+if grep -q -- '--name | cage-codex |' "$MSB_LOG"; then fail "_autostart restarted an agent that was awake"; fi
 alive || fail "_autostart did not start the keepalive"
 "$W" down 2>/dev/null; gone || fail "keepalive left running"
-ok "the Windows-login entry point runs up, logs to autostart.log and starts the keepalive"
+ok "the Windows-login entry point wakes the agents that are asleep (never restarts one), logs to autostart.log, starts the keepalive"
 
 mv "$T/bin/powershell.exe" "$T/ps.off"
 "$W" up claude 2>"$T/err"

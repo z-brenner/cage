@@ -183,15 +183,17 @@ python3 - "$plist" "$ROOT/cage" "$CAGE_HOME" <<'PY' || fail "bad LaunchAgent pli
 import plistlib, sys
 p = plistlib.load(open(sys.argv[1], "rb"))
 assert p["Label"] == "dev.cage.up"
-assert p["ProgramArguments"] == [sys.argv[2], "up"], p["ProgramArguments"]
+assert p["ProgramArguments"] == [sys.argv[2], "_autostart"], p["ProgramArguments"]
 assert p["RunAtLoad"] is True
 assert p["EnvironmentVariables"]["CAGE_HOME"] == sys.argv[3]
 assert "/opt/homebrew/bin" in p["EnvironmentVariables"]["PATH"]
 PY
-grep -q "launchctl bootstrap gui/$(id -u) $plist" "$T/os.log" || fail "LaunchAgent not bootstrapped: $(cat "$T/os.log")"
+# loaded at the next login, like on Linux and Windows: loading it now would run it now, in the middle of things
+if grep -q "launchctl bootstrap" "$T/os.log"; then fail "turning autostart on ran it right away: $(cat "$T/os.log")"; fi
 PATH="$T/bin:$PATH" FAKE_UNAME=Darwin cage autostart off 2>/dev/null
 [ ! -e "$plist" ] || fail "plist not removed"
-ok "autostart on/off installs and removes a valid macOS LaunchAgent"
+grep -q "launchctl bootout gui/$(id -u) $plist" "$T/os.log" || fail "LaunchAgent not unloaded: $(cat "$T/os.log")"
+ok "autostart on/off installs and removes a valid macOS LaunchAgent, which wakes agents at the next login"
 
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart on 2>/dev/null
 unit="$HOME/.config/systemd/user/cage-up.service"
@@ -201,6 +203,32 @@ grep -q 'systemctl --user enable cage-up.service' "$T/os.log" || fail "unit not 
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart off 2>/dev/null
 [ ! -e "$unit" ] || fail "unit not removed"
 ok "autostart on/off installs and removes a systemd user unit"
+
+# --- the guided setup in a terminal (a Mac here): you pick where to chat, the app or Telegram, and starting at login
+# is asked once, at the end; a no leaves nothing behind
+mkdir -p "$T/obin"
+printf '#!/bin/sh\ncase "$1" in -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$T/obin/uname"
+printf '#!/bin/sh\necho "msb $*" >> "%s/onb.log"\ncase "$1" in --version) echo "msb 0.7.5" ;; inspect) exit 1 ;; esac\nexit 0\n' "$T" > "$T/obin/msb"
+for tool in launchctl systemctl; do printf '#!/bin/sh\necho "%s $*" >> "%s/onb.log"\n' "$tool" "$T" > "$T/obin/$tool"; done
+chmod +x "$T/obin"/*
+( export CAGE_HOME="$T/onb-tg" HOME="$T/onb-tg-home" PATH="$T/obin:$PATH"
+  mkdir -p "$HOME"; : > "$T/onb.log"
+  printf '%s\n' 2 y n n n '100:GOODclaude' y Zack '' '' n | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (Telegram): $(tail -5 "$T/onb.err")"
+  grep -q 'A Telegram bot for each agent' "$T/onb.err" && grep -q 'say hi on Telegram' "$T/onb.err" || fail "onboarding (Telegram): $(cat "$T/onb.err")"
+  grep -qx 'CAGE_TELEGRAM_TOKEN_claude="100:GOODclaude"' "$CAGE_HOME/cage.env" && grep -q 'run .*--name cage-claude' "$T/onb.log" || fail "claude wasn't set up and woken: $(cat "$T/onb.log")"
+  [ ! -e "$HOME/Library/LaunchAgents/dev.cage.up.plist" ] && [ ! -e "$HOME/.config/systemd/user/cage-up.service" ] && [ ! -e "$CAGE_HOME/autostart" ] \
+    || fail "start-at-login was turned on although you said no"
+  if grep -q 'launchctl bootstrap\|systemctl --user enable' "$T/onb.log"; then fail "start-at-login ran before you were asked: $(cat "$T/onb.log")"; fi )
+( export CAGE_HOME="$T/onb-app" HOME="$T/onb-app-home" PATH="$T/obin:$PATH"
+  mkdir -p "$HOME"; : > "$T/onb.log"; : > "$T/requests.log"
+  printf '%s\n' 1 n y n n '' '' '' y | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (app): $(tail -5 "$T/onb.err")"
+  grep -q 'say hi in the app' "$T/onb.err" && grep -q 'Codex is one of your agents' "$T/onb.err" || fail "onboarding (app): $(cat "$T/onb.err")"
+  sed -n '/This computer/,$p' "$T/onb.err" > "$T/onb.after"   # what comes after the choice
+  if grep -qi 'telegram\|bot' "$T/onb.after"; then fail "the app's setup talks about Telegram or bots: $(grep -i 'telegram\|bot' "$T/onb.after")"; fi
+  [ ! -s "$T/requests.log" ] || fail "the app's setup called Telegram: $(cat "$T/requests.log")"
+  grep -qx 'CAGE_AGENTS="codex"' "$CAGE_HOME/cage.env" && [ -d "$CAGE_HOME/app/codex" ] && grep -q 'run .*--name cage-codex' "$T/onb.log" || fail "codex isn't in the app: $(cat "$CAGE_HOME/cage.env")"
+  [ -e "$HOME/Library/LaunchAgents/dev.cage.up.plist" ] && [ -e "$CAGE_HOME/autostart" ] || fail "start-at-login wasn't turned on although you said yes" )
+ok "guided setup: the app or Telegram, as you choose; start-at-login only when you say yes, asked once at the end"
 
 # --- Windows (WSL 2): autostart is the per-user Run key (no admin); doctor explains WSL-specific KVM problems
 : > "$T/os.log"

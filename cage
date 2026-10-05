@@ -2169,11 +2169,25 @@ cmd_setup() {
 
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
-# Runs `cage up` at login so the bots come back after a reboot (microsandbox has no daemon to restart VMs).
+# Wakes your agents at login so they come back after a reboot (microsandbox has no daemon to restart VMs).
 cmd_autostart() {
   autostart_apply "$@"
   mkdir -p "$CAGE_HOME"
   if [ "$1" = on ]; then : > "$CAGE_HOME/autostart"; else rm -f "$CAGE_HOME/autostart"; fi   # for the web app
+}
+# `cage _autostart`, what macOS and Windows run at login: wakes the agents that aren't awake, and never restarts one
+# that is (logging in again, or turning autostart on, mustn't interrupt them).
+autostart_up() {
+  local a wake=()
+  load_env
+  find_msb || die "microsandbox isn't installed; run: cage fix"
+  refresh_running
+  for a in $CAGE_AGENTS; do
+    if [ "$RUNNING" != "?" ] && agent_awake "$a"; then say "$a is already awake"; else wake+=("$a"); fi
+  done
+  if [ ${#wake[@]} -gt 0 ]; then cmd_up "${wake[@]}"; return; fi
+  if is_wsl; then wsl_keepalive_start; fi   # what cmd_up would start: kept up for the agents that are awake
+  refresher_start
 }
 autostart_apply() {
   local mode="${1:-}" label=dev.cage.up
@@ -2196,7 +2210,7 @@ autostart_apply() {
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>$(xml_escape "$CAGE_ROOT/cage")</string><string>up</string></array>
+  <array><string>$(xml_escape "$CAGE_ROOT/cage")</string><string>_autostart</string></array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>$(xml_escape "$path_env")</string>
@@ -2208,8 +2222,9 @@ autostart_apply() {
 </dict>
 </plist>
 PLIST
+      # Loaded at your next login, as on Linux and Windows: loading it now would run it now (RunAtLoad), waking
+      # or restarting agents in the middle of what they're doing.
       launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$plist"
       ok "autostart on: your agents wake up when you log in"
       hint "log: $CAGE_HOME/autostart.log"
       ;;
@@ -3451,12 +3466,21 @@ fix_kvm() {
 }
 
 cmd_onboard() {
-  local picked=() a host_out
+  local picked=() a host_out where="" n b rc
   ONBOARDING=1
   banner
   say "Hi! Let's put your AI agents in their own little cages. About five minutes."
+  say "First: where do you want to talk to them?"
+  say "  1  in cage's own app, in your browser (recommended: nothing else to set up)"
+  say "  2  in Telegram, with a bot for each agent (on your phone too)"
+  TRIES=0
+  while [ -z "$where" ] && another_try; do
+    prompt "1 or 2? [1] " where
+    case "$where" in ""|1|app) where=app ;; 2|t|telegram|Telegram) where=telegram ;; *) warn "1 (the app) or 2 (Telegram)?"; where="" ;; esac
+  done
+  if [ "$where" = app ]; then n=4; else n=6; fi   # Telegram adds two steps: the bots, and who may use them
 
-  step "1 of 6" "This computer"
+  step "1 of $n" "This computer"
   if ! find_msb; then install_msb; fi
   if [ "$(uname -s)" = Linux ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
     if ! fix_kvm; then
@@ -3467,26 +3491,36 @@ cmd_onboard() {
   if ! host_out="$(check_host)"; then printf '%s\n' "$host_out" >&2; die "fix the lines above, then run cage again"; fi
   printf '%s\n' "$host_out" >&2
 
-  step "2 of 6" "Your subscriptions"
-  say "Which do you have? Each one becomes its own agent, with its own bot."
+  step "2 of $n" "Your subscriptions"
+  say "Which do you have? Each one becomes its own agent, in a cage of its own."
   for a in $KINDS; do
     if yes_no "$(face "$a" ready) $(printf '%-12s' "$a") $(agent_plan "$a")?" n; then picked+=("$a"); fi
   done
   [ ${#picked[@]} -gt 0 ] || die "pick at least one; run cage again when you're ready"
+  cmd_init
 
-  cmd_setup "${picked[@]}"
+  if [ "$where" = telegram ]; then cmd_setup "${picked[@]}"; fi   # steps 3 and 4
 
-  step "5 of 6" "A little about you"
+  step "$((n - 1)) of $n" "A little about you"
   about_you
 
-  step "6 of 6" "Wake up and sign in"
-  [ -e "$CAGE_HOME/autostart" ] || ( cmd_autostart on ) || warn "couldn't turn on start-at-login (cage autostart on)"
-  cmd_up "${picked[@]}"
-  for a in "${picked[@]}"; do
-    refresh_running
-    [ "$(probe "$a")" = ready ] && continue
-    ( cmd_login "$a" ) || warn "no problem, sign $a in later: cage login $a"
-  done
+  # One agent that can't start doesn't end the setup: the others go on, and the summary shows who's where.
+  step "$n of $n" "Wake up and sign in"
+  set +e
+  if [ "$where" = app ]; then ( set -e; cmd_add "${picked[@]}" )   # your agents in the app: wakes and signs them in
+  else
+    ( set -e
+      cmd_up "${picked[@]}"
+      for a in "${picked[@]}"; do
+        refresh_running
+        [ "$(probe "$a")" = ready ] && continue
+        ( cmd_login "$a" ) || warn "no problem, sign $a in later: cage login $a"
+      done )
+  fi
+  rc=$?
+  set -e
+  load_env
+  [ $rc = 0 ] || warn "not everyone is awake yet; cage shows who, and what to do"
 
   printf '\n' >&2
   IND="  "
@@ -3494,13 +3528,22 @@ cmd_onboard() {
   printf '\n' >&2
   status_rows >&2
   printf '\n' >&2
-  if yes_no "Wake them up automatically when you log in?" y; then cmd_autostart on; fi
+  # Starting at login is yours to choose: asked once, and a no is a no.
+  if yes_no "Wake them up automatically when you log in?" y; then
+    ( cmd_autostart on ) || warn "couldn't turn on start-at-login: cage autostart on"
+  else
+    ( cmd_autostart off ) >/dev/null 2>&1 || true
+    hint "turn it on anytime: cage autostart on"
+  fi
   say "${C_DIM}They'll suggest things to remember; you decide what they keep: cage memory${C_0}"
   say "${C_DIM}Want them in Slack or Discord too? cage chat add slack (or discord)${C_0}"
-  say "${C_DIM}Run cage anytime to see how they're doing. Now say hi on Telegram:${C_0}"
-  local b
-  b="$(bot_for "${picked[0]}")"
-  if [ -n "$b" ]; then say "$(link "https://t.me/$b" "@$b")"; qr "https://t.me/$b"; fi
+  if [ "$where" = app ]; then
+    say "${C_DIM}Run cage anytime to see how they're doing. Now say hi in the app:${C_0} cage ui"
+  else
+    say "${C_DIM}Run cage anytime to see how they're doing. Now say hi on Telegram:${C_0}"
+    b="$(bot_for "${picked[0]}")"
+    if [ -n "$b" ]; then say "$(link "https://t.me/$b" "@$b")"; qr "https://t.me/$b"; fi
+  fi
   printf '\n' >&2
 }
 
@@ -3611,7 +3654,7 @@ main() {
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) keepalive_run "$@" ;;
-    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
+    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; autostart_up ;;
     _open) UI=1 open_url "${1:-}" ;;
     _outbox) load_env; find_msb || true; outbox_process; wait ;;   # once (the background helper does this every 3 s)
     _refresh) refresher_loop ;;
