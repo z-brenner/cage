@@ -26,6 +26,17 @@ const errors = []
 const watch = (p) => p.on('pageerror', (e) => errors.push(e.message))
 watch(page)
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
+// the page asks and tells in its own sheets and messages: a box from the browser (alert, confirm) is a failure. Leaving
+// with unsaved text is the one the browser has to ask itself.
+page.on('dialog', (d) => { if (d.type() !== 'beforeunload') errors.push(`the browser's own ${d.type()}: ${d.message()}`); d.dismiss().catch(() => {}) })
+const sheet = page.locator('dialog#confirm')
+const answer = async (text, button) => { // the page's own question: what it says, and an answer
+  await sheet.waitFor({ timeout: 10000 })
+  const said = await sheet.locator('#confirm-text').innerText()
+  if (!text.test(said)) fail('the question: ' + said)
+  await sheet.getByRole('button', { name: button, exact: true }).click()
+  await sheet.waitFor({ state: 'hidden', timeout: 5000 })
+}
 const pairing = () => { // what `cage ui` does: a one-time code in ui.pair, good for a minute
   const code = crypto.randomBytes(16).toString('hex')
   fs.appendFileSync(path.join(home, 'ui.pair'), `${Math.floor(Date.now() / 1000) + 60} ${code}\n`)
@@ -128,10 +139,17 @@ if (!(await chat.locator('textarea').inputValue()).startsWith('Summarize the att
 fs.writeFileSync(path.join(work, '..', 'brief.pdf'), '%PDF-1.4 brief')
 await chat.locator('input[type=file]').setInputFiles(path.join(work, '..', 'brief.pdf'))
 await chat.locator('.attached .chip:not(.busy)', { hasText: 'brief.pdf' }).waitFor({ timeout: 10000 })
+fs.writeFileSync(path.join(work, '..', 'huge.bin'), Buffer.alloc(26 << 20))   // too big to send: the page says so in its own words
+await chat.locator('input[type=file]').setInputFiles(path.join(work, '..', 'huge.bin'))
+await page.locator('#toasts[role=status] .toast', { hasText: 'huge.bin is bigger than 25 MB' }).waitFor({ timeout: 10000 })
+fs.rmSync(path.join(work, '..', 'huge.bin'))
 await chat.locator('textarea').press('Enter')
 await chat.locator('.msg-you', { hasText: 'Summarize the attached document' }).locator('.file-chip', { hasText: 'brief.pdf' }).waitFor({ timeout: 10000 })
+// while it's being written, a screen reader waits for the answer instead of reading out every update
+await chat.locator('.msg-agent.streaming[aria-busy="true"]').waitFor({ timeout: 10000 })
 await chat.locator('.msg-agent', { hasText: 'second point' }).locator('strong', { hasText: 'first' }).waitFor({ timeout: 10000 })
 if (await chat.locator('.msg-agent.streaming').count()) fail('the streamed preview stayed after the answer')
+if (await chat.locator('[aria-busy]').count()) fail('the answer is still marked busy')
 const back = chat.locator('.file-chip', { hasText: 'reviewed-brief.pdf' })
 await back.waitFor({ timeout: 10000 })
 const [download] = await Promise.all([page.waitForEvent('download'), back.click()])
@@ -251,8 +269,11 @@ await task.getByRole('button', { name: 'Run now' }).click()
 await page.locator('.chat .msg-agent', { hasText: 'Scheduled: Summarize my inbox (done)' }).waitFor({ timeout: 15000 })
 await page.locator('.tabs').getByRole('link', { name: 'Schedule' }).click()
 await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByText(/last ran/).waitFor({ timeout: 15000 })
-page.once('dialog', (d) => d.accept())
 await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByRole('button', { name: 'Delete' }).click()
+await answer(/^Delete “Summarize my inbox”\? Claude Code won’t do it any more\.$/, 'Keep it')
+if (JSON.parse(fs.readFileSync(path.join(home, 'app', 'cron.claude.json'), 'utf8')).length !== 1) fail('Keep it deleted the task')
+await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByRole('button', { name: 'Delete' }).click()
+await answer(/^Delete “Summarize my inbox”/, 'Delete')
 await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
 ok('scheduled tasks: added in plain words (weekdays at 8), run now answers in the chat, deleted')
 
@@ -286,6 +307,9 @@ await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
 await page.getByPlaceholder('GITHUB_TOKEN').fill('UI_KEY')
 await page.getByPlaceholder('api.github.com').fill('api.ui.example')
 await page.getByRole('button', { name: 'Add a key' }).click()
+// the side panel's focus is on what it says (and then on its question), not on its X
+await page.waitForFunction(() => document.querySelector('dialog#job').open && document.activeElement.closest('#job-log'), null, { timeout: 5000 })
+  .catch(async () => fail('the side panel opened with the focus on ' + await page.evaluate(() => document.activeElement.outerHTML.slice(0, 80))))
 const secret = dialog.locator('input[type=password]')
 await secret.waitFor({ timeout: 15000 })
 await secret.fill('ui-s3cret')
@@ -423,14 +447,17 @@ ok('a yes/no question: answered with a button; the setting is saved')
 // Stopping a backup (or an update, an add, a restore) halfway asks first, and No keeps it going
 await page.evaluate(() => runJob(['backup'], 'Backing up'))
 await secret.waitFor({ timeout: 15000 })   // its passphrase
-let stopAsked = ''
-page.once('dialog', (d) => { stopAsked = d.message(); d.dismiss() })
 await dialog.getByRole('button', { name: 'Stop' }).click()
-if (!/^Stop the backup\? Nothing will be saved/.test(stopAsked)) fail('Stop did not ask first: ' + stopAsked)
+if (!(await sheet.getByRole('button', { name: 'Keep going' }).evaluate((b) => b === document.activeElement))) fail('the safe answer does not have the focus')
+await page.keyboard.press('Escape')   // Esc is "Keep going", and leaves the side panel open
+await sheet.waitFor({ state: 'hidden', timeout: 5000 })
+if (!(await dialog.isVisible())) fail('Esc on the question closed the side panel too')
+await dialog.getByRole('button', { name: 'Stop' }).click()
+await answer(/^Stop the backup\? Nothing will be saved/, 'Keep going')
 const listed = async () => (await (await fetch(base + '/api/jobs', { headers: { 'X-Cage-Token': token } })).json()).jobs.some((j) => j.title === 'Backing up')
 for (let i = 0; i < 5; i++) { if (!(await listed())) fail('the backup stopped though you said No'); await page.waitForTimeout(200) }
-page.once('dialog', (d) => d.accept())
 await dialog.getByRole('button', { name: 'Stop' }).click()
+await answer(/^Stop the backup\?/, 'Stop')
 await page.locator('#job-status', { hasText: 'didn’t work' }).waitFor({ timeout: 15000 })
 await dialog.getByRole('button', { name: 'Close' }).click()
 ok('Stop asks first for a backup: No keeps it going, Yes stops it')
@@ -483,16 +510,16 @@ await about.evaluate((el) => { el.dataset.old = '1' })
 fs.writeFileSync(process.env.STUB_AWAKE, '')   // Codex wakes up: the state changes, and the page is drawn again
 await page.waitForFunction(() => { const el = document.querySelector('[data-keep="about"]'); return el && !el.dataset.old }, null, { timeout: 15000 })
 if ((await about.inputValue()) !== 'I am Sam, a contracts lawyer in Berlin.') fail('a redraw wiped what you wrote: ' + await about.inputValue())
-let asked = ''
-page.once('dialog', (d) => { asked = d.message(); d.dismiss() })
 await page.getByRole('link', { name: 'Security' }).click()
+await answer(/haven’t saved/, 'Stay')
 await page.waitForFunction(() => location.hash === '#memory', null, { timeout: 5000 })
-if (!/haven’t saved/.test(asked)) fail('leaving did not ask first: ' + asked)
 if (!(await page.getByRole('heading', { name: 'Memory' }).count()) || (await about.inputValue()) !== 'I am Sam, a contracts lawyer in Berlin.') fail('left the page without asking')
 await page.getByRole('button', { name: 'Save' }).click()
 await page.getByText('Saved. Your agents see it').waitFor({ timeout: 5000 })
 if (fs.readFileSync(path.join(home, 'brain', 'memory', 'about-me.md'), 'utf8') !== 'I am Sam, a contracts lawyer in Berlin.') fail('about you was not saved')
+await about.fill('I am Sam, a contracts lawyer in Berlin. And this I leave.')
 await page.getByRole('link', { name: 'Security' }).click()
+await answer(/haven’t saved/, 'Leave')
 await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 })
 fs.rmSync(process.env.STUB_AWAKE)
 ok('memory: unsaved text survives a redraw, says it is unsaved, and leaving asks first')
@@ -504,6 +531,47 @@ await page.keyboard.press('Enter')
 await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 })
 if (await page.locator('dialog#palette[open]').count()) fail('the palette stayed open')
 ok('Ctrl+K jumps to a page by name')
+
+// For a screen reader and the keyboard: every page has a main heading, which has the focus when you arrive (not after a
+// redraw); the palette is a combobox that says which option is picked
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+await page.waitForFunction(() => document.activeElement.tagName === 'H1' && document.activeElement.textContent === 'Home', null, { timeout: 10000 })
+  .catch(() => fail('arriving at Home, the focus is not on its heading'))
+await page.locator('#nav').getByRole('link', { name: 'Apps' }).focus()
+await page.evaluate(() => render(true))
+if (!(await page.evaluate(() => !!document.activeElement.closest('#nav')))) fail('a redraw moved the focus')
+await page.keyboard.press('Control+k')
+const combo = page.getByRole('combobox', { name: 'Go to, or do' })
+await combo.fill('sett')
+const picked = page.locator('#' + await combo.getAttribute('aria-activedescendant'))
+if ((await picked.getAttribute('role')) !== 'option' || (await picked.getAttribute('aria-selected')) !== 'true' || (await picked.innerText()).trim() !== 'Settings' ||
+  (await page.locator('#' + await combo.getAttribute('aria-controls')).getAttribute('role')) !== 'listbox') fail('the palette does not say which option is picked')
+await page.keyboard.press('Escape')
+ok('a main heading on every page, focused on arrival only; the palette is a combobox; the page asks and tells in its own words (no browser boxes)')
+
+// No colour too faint to read, and a main heading, on each page in light and dark (with axe-core, when the test is given
+// it: CAGE_TEST_AXE=/path/to/axe.min.js)
+if (process.env.CAGE_TEST_AXE) {
+  const axe = fs.readFileSync(process.env.CAGE_TEST_AXE, 'utf8')
+  const found = []
+  for (const colorScheme of ['light', 'dark']) {
+    const c = await browser.newContext({ locale: 'en-US', timezoneId: 'UTC', reducedMotion: 'reduce', colorScheme, bypassCSP: true, viewport: { width: 1280, height: 860 } })
+    const p = await c.newPage()
+    await p.goto(base + '/#pair=' + pairing())
+    await p.locator('.agent').first().waitFor({ timeout: 15000 })
+    for (const at of ['home', 'agent/claude', 'agent/claude/files', 'agent/claude/settings', 'agent/claude/schedule', 'agent/codex', 'apps', 'signins', 'memory', 'security', 'settings', 'setup']) {
+      await p.evaluate((at) => { location.hash = at }, at)
+      await p.waitForFunction((at) => document.getElementById('main').dataset.page === at, at, { timeout: 10000 })
+      await p.waitForTimeout(at === 'setup' ? 3000 : 1200)   // what the page loads (the schedule, the work folder, the checks)
+      await p.evaluate(axe)
+      const r = await p.evaluate(() => window.axe.run(document, { runOnly: { type: 'rule', values: ['color-contrast', 'page-has-heading-one'] } }))
+      for (const v of r.violations) for (const n of v.nodes) found.push(`${colorScheme} #${at}: ${v.id} ${n.target.join(' ')} ${(n.any[0] || {}).message || ''}`)
+    }
+    await c.close()
+  }
+  if (found.length) fail('axe-core:\n' + found.join('\n'))
+  ok('axe-core, 12 pages, light and dark: no text too faint to read, and a main heading on each')
+} else console.log('# skipped axe-core (set CAGE_TEST_AXE to the path of axe.min.js)')
 
 // setting up a fresh computer: checks, picking agents, signing in by device code, about you (opened the older way,
 // with the token in the address, which still works)

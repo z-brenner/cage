@@ -137,6 +137,33 @@ function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n
 function plural (n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')) }
 function hostOf (url) { try { return new URL(url).hostname } catch (e) { return url } }
 
+// The page's own messages and questions, in the page instead of the browser's alert() and confirm() boxes (which stop
+// everything, look like the browser's own warnings, and can't be read out where they belong): a message that goes by
+// itself (role=status), and a small sheet with two answers. The safe answer has the focus, and Esc means it.
+function toast (text, tone) {
+  const t = h('div', { class: 'toast ' + (tone || 'bad') }, icon(tone === 'ok' ? 'circle-check' : 'circle-alert'), h('span', { class: 'grow' }, text),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => t.remove() }, icon('x')))
+  document.getElementById('toasts').append(t)
+  setTimeout(() => t.remove(), 8000)
+}
+function confirmSheet (text, yes, no) { // → true for yes; false for no, Esc, or while another question is open
+  const d = document.getElementById('confirm')
+  if (d.open) return Promise.resolve(false)
+  const yesB = document.getElementById('confirm-yes')
+  const noB = document.getElementById('confirm-no')
+  document.getElementById('confirm-text').textContent = text
+  yesB.textContent = yes
+  noB.textContent = no
+  return new Promise((resolve) => {
+    let answer = false
+    yesB.onclick = () => { answer = true; d.close() }
+    noB.onclick = () => d.close()
+    d.addEventListener('close', () => resolve(answer), { once: true })
+    d.showModal()
+    noB.focus()
+  })
+}
+
 // --- talking to the server ---------------------------------------------------------------------------------------
 const NOT_ANSWERING = 'cage isn’t answering. Open the cage shortcut, or run cage ui.'
 const OLD_APP = 'cage was updated, but its web app is still the old one. Run cage ui (or open the cage shortcut) to restart it.'
@@ -270,7 +297,11 @@ function showJob () {
   if (!job) return
   job.hidden = false
   drawPill()
-  if (!dlg.open) dlg.showModal()
+  if (!dlg.open) {
+    dlg.showModal()
+    const box = logEl.querySelector('.ask-box:not(.skip-box) input, .ask-box:not(.skip-box) button')   // a question still waiting
+    if (box) box.focus(); else logEl.focus()
+  }
   if (job.fitTerm && !document.getElementById('job-term').hidden) setTimeout(job.fitTerm, 220)
   scrollDown()
 }
@@ -382,6 +413,7 @@ async function runJob (args, title, onDone, text) {
   title = title || ('cage ' + args.join(' '))
   sheet(title)
   dlg.showModal()
+  logEl.focus()
   let id
   try { id = (await api('/api/jobs', { method: 'POST', body: { args, title, text, cols: assisted(args) ? 400 : 100 } })).id } catch (e) {
     BUSY = ''
@@ -542,8 +574,10 @@ const STOP_ASK = {
 }
 document.getElementById('job-cancel').addEventListener('click', () => {
   if (!running()) return
-  if (STOP_ASK[job.args[0]] && !confirm(STOP_ASK[job.args[0]])) return
-  api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }).catch(() => {})
+  const J = job
+  const stop = () => { if (job === J && running()) api(`/api/jobs/${J.id}/cancel`, { method: 'POST' }).catch(() => {}) }
+  if (!STOP_ASK[J.args[0]]) return stop()
+  confirmSheet(STOP_ASK[J.args[0]], 'Stop', 'Keep going').then((yes) => { if (yes) stop() })
 })
 document.getElementById('job-close').addEventListener('click', () => dlg.close())
 document.getElementById('job-hide').addEventListener('click', () => dlg.close())
@@ -790,7 +824,7 @@ function pageHome () {
   if (!S.configured) return pageWelcome()
   const todo = attention()
   const sleepy = agentsOn().filter((a) => a.reachable && ['asleep', 'none'].includes(a.state))
-  return h('div', { class: 'page' },
+  return h('div', { class: 'page' }, h('h1', { class: 'sr-only' }, 'Home'),
     todo.length ? section('Needs you', '', h('ul', { class: 'list attn-list' }, todo)) : null,
     h('section', { class: 'section hero' }, h('div', { class: 'section-head' }, h('h2', {}, 'Ask your agents'),
       h('p', {}, 'Each awake agent answers on its own, side by side. When they agree, you can be fairly sure; when they don’t, that’s the part worth a closer look.')), composer(), answers()),
@@ -940,7 +974,7 @@ function setupAbout () {
         const text = aboutText('about-setup').trim()
         if (text && text !== ABOUT.saved) {
           const body = /^# About me/.test(text) ? text + '\n' : '# About me\n\n' + text + '\n'
-          try { await api('/api/memory/about', { method: 'PUT', body: { text: body } }); ABOUT.saved = body } catch (e) { alert(e.message); return }
+          try { await api('/api/memory/about', { method: 'PUT', body: { text: body } }); ABOUT.saved = body } catch (e) { toast(e.message); return }
         }
         setupGo('done')
       }, 'primary'))
@@ -1066,7 +1100,14 @@ function chatAdd (C, e, history) {
       h('time', {}, clock(e.at))), 'you')
       break
     }
-    case 'preview': { const m = agentMsg(C, md(e.text || '…'), 'streaming', e.at); m.dataset.ctx = e.ctx || ''; C.previews.set(e.handle, m); add(C, m, 'agent'); break }
+    case 'preview': { // still being written: a screen reader waits for it (aria-busy) instead of reading it out at every update
+      const m = agentMsg(C, md(e.text || '…'), 'streaming', e.at)
+      m.dataset.ctx = e.ctx || ''
+      m.setAttribute('aria-busy', 'true')
+      C.previews.set(e.handle, m)
+      add(C, m, 'agent')
+      break
+    }
     case 'update': { const m = C.previews.get(e.handle); if (m) m.querySelector('.agent-body').replaceChildren(md(e.text || '')); break }
     case 'delete': { const m = C.previews.get(e.handle); if (m) { m.remove(); C.previews.delete(e.handle); whoLast(C) } break }
     case 'reply':
@@ -1075,7 +1116,7 @@ function chatAdd (C, e, history) {
       C.typing.hidden = true
       add(C, agentMsg(C, md(e.text || ''), '', e.at), 'agent')
       break
-    case 'buttons': C.typing.hidden = true; add(C, buttonsMsg(C, e), 'agent'); break
+    case 'buttons': C.typing.hidden = true; settled(C); add(C, buttonsMsg(C, e), 'agent'); break
     case 'card': C.typing.hidden = true; add(C, agentMsg(C, cardOf(C, e.card), 'card-msg', e.at), 'agent'); break
     case 'file':
       C.shared.push({ ...e, from: 'agent' })
@@ -1087,9 +1128,12 @@ function chatAdd (C, e, history) {
       if (q) answered(q, e.label || e.action)
       break
     }
-    case 'error': C.typing.hidden = true; add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
+    case 'error': C.typing.hidden = true; settled(C); add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
     case 'status': C.connected = e.connected; break
   }
+}
+function settled (C) { // what was being written stays as it is (cc-connect keeps it when it stops to ask, or on an error)
+  for (const m of C.previews.values()) { m.removeAttribute('aria-busy'); m.classList.remove('streaming') }
 }
 function whoLast (C) { // who spoke last, once a preview is gone
   const last = C.list.lastElementChild
@@ -1233,7 +1277,7 @@ function buttonsMsg (C, e) {
 }
 function choose (C, box, value, label) {
   answered(box, label)
-  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label } }).catch((err) => { box.classList.remove('is-answered'); alert(err.message) })
+  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label } }).catch((err) => { box.classList.remove('is-answered'); toast(err.message) })
 }
 function answered (box, label) {
   box.classList.add('is-answered')
@@ -1266,7 +1310,7 @@ function cardOf (C, card) {
 
 async function attach (C, files) {
   for (const f of [...files]) {
-    if (f.size > 25 * 1024 * 1024) { alert(`${f.name} is bigger than 25 MB`); continue }
+    if (f.size > 25 * 1024 * 1024) { toast(`${f.name} is bigger than 25 MB, so it can’t be sent.`); continue }
     const item = { name: f.name, uploading: true }
     C.attached.push(item)
     drawAttached(C)
@@ -1275,7 +1319,7 @@ async function attach (C, files) {
       const d = await res.json()
       if (!res.ok) throw new Error(d.error || res.statusText)
       Object.assign(item, d, { uploading: false })
-    } catch (e) { C.attached.splice(C.attached.indexOf(item), 1); alert(`Couldn’t attach ${f.name}: ${e.message}`) }
+    } catch (e) { C.attached.splice(C.attached.indexOf(item), 1); toast(`Couldn’t attach ${f.name}: ${e.message}`) }
     drawAttached(C)
   }
 }
@@ -1292,7 +1336,7 @@ async function chatSend (C, text) {
   if (!a.enabled || a.state === 'login') { drawChatState(C, true); return }
   try {
     await api(`/api/chat/${C.agent}/send`, { method: 'POST', body: { text: msg, files: files.map(({ path, name, mime }) => ({ path, name, mime })) } })
-  } catch (e) { alert(e.message); return }
+  } catch (e) { toast(e.message); return }
   if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C) }
   C.typing.hidden = false
   if (['asleep', 'none'].includes(a.state) && !C.waking) wake(C)   // it waits in its folder until the agent is up
@@ -1415,14 +1459,17 @@ function pageSchedule (a) {
       await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: prompt.split('\n')[0].slice(0, 80) })
       what.value = ''
       await load()
-    } catch (err) { alert('Couldn’t add it: ' + err.message) }
+    } catch (err) { toast('Couldn’t add it: ' + err.message) }
   })
   const rowsOf = (S.jobs || []).map((j) => h('li', {}, h('span', { class: 'chat-mark' }, icon('calendar-clock')),
     h('span', { class: 'grow' }, h('b', {}, j.description || j.prompt || j.exec || 'A task'),
       h('span', { class: 'sub' }, [cronText(j.cron_expr), j.last_run && !/^0001/.test(j.last_run) ? 'last ran ' + ago(Date.parse(j.last_run) / 1000) : 'hasn’t run yet', j.enabled === false ? 'paused' : ''].filter(Boolean).join(' · ')),
       j.last_error ? h('span', { class: 'sub bad' }, j.last_error) : null),
-    btn('Run now', async () => { try { await cronApi(a.name, 'POST', `/api/v1/cron/${j.id}/exec`); go('agent/' + a.name) } catch (e) { alert(e.message) } }, 'sm ghost', 'play'),
-    btn('Delete', async () => { if (!confirm('Delete this scheduled task?')) return; try { await cronApi(a.name, 'DELETE', '/api/v1/cron/' + j.id); await load() } catch (e) { alert(e.message) } }, 'sm ghost danger')))
+    btn('Run now', async () => { try { await cronApi(a.name, 'POST', `/api/v1/cron/${j.id}/exec`); go('agent/' + a.name) } catch (e) { toast(e.message) } }, 'sm ghost', 'play'),
+    btn('Delete', async () => {
+      if (!(await confirmSheet(`Delete “${j.description || j.prompt || 'this task'}”? ${a.label} won’t do it any more.`, 'Delete', 'Keep it'))) return
+      try { await cronApi(a.name, 'DELETE', '/api/v1/cron/' + j.id); await load() } catch (e) { toast(e.message) }
+    }, 'sm ghost danger')))
   const tz = STATE.settings.tz
   return [
     section('Scheduled tasks', `Things ${a.label} does on its own, on a schedule. What it says shows up in the chat. They run while it’s awake${STATE.settings.autostart ? '' : ' (turn on Start at login so it is)'}${tz ? `, at your time (${tz.replace(/_/g, ' ')})` : ''}.`,
@@ -1455,7 +1502,7 @@ function pageFiles (a) {
       if (!d.ok) throw new Error(d.error)
       const link = h('a', { href: fileUrl(a.name, d.path, true), download: d.name })
       document.body.append(link); link.click(); link.remove()
-    } catch (e) { alert(e.message) }
+    } catch (e) { toast(e.message) }
     btnEl.disabled = false
   }
   const up = h('input', { type: 'file', multiple: true, hidden: true, onchange: async () => {
@@ -1466,7 +1513,7 @@ function pageFiles (a) {
         if (!res.ok) throw new Error(d.error)
         const r = await api(`/api/chat/${a.name}/request`, { method: 'POST', body: { type: 'put', from: d.path, dir: FILES.path, name: f.name } })
         if (!r.ok) throw new Error(r.error)
-      } catch (e) { alert(`Couldn’t upload ${f.name}: ${e.message}`) }
+      } catch (e) { toast(`Couldn’t upload ${f.name}: ${e.message}`) }
     }
     up.value = ''
     load(FILES.path)
@@ -1748,8 +1795,11 @@ function paletteItems () {
 const pal = document.getElementById('palette')
 function openPalette () {
   if (!STATE || !STATE.configured || dlg.open || pal.open) return
-  const input = h('input', { type: 'text', placeholder: 'Go to, or do…', 'aria-label': 'Search', autocomplete: 'off', spellcheck: 'false' })
-  const list = h('ul', { class: 'pal-list', role: 'listbox' })
+  const input = h('input', {
+    type: 'text', placeholder: 'Go to, or do…', 'aria-label': 'Go to, or do', autocomplete: 'off', spellcheck: 'false',
+    role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'pal-list', 'aria-autocomplete': 'list'
+  })
+  const list = h('ul', { class: 'pal-list', role: 'listbox', id: 'pal-list', 'aria-label': 'Places and actions' })
   let hits = []
   let at = 0
   const draw = () => {
@@ -1757,10 +1807,11 @@ function openPalette () {
     hits = paletteItems().filter(([, label]) => !q || label.toLowerCase().includes(q))
     at = Math.min(at, Math.max(0, hits.length - 1))
     list.replaceChildren(...hits.map(([ic, label, fn, agent, note], i) => h('li', {
-      role: 'option', class: i === at ? 'on' : '', 'aria-selected': i === at ? 'true' : 'false',
+      role: 'option', id: 'pal-' + i, class: i === at ? 'on' : '', 'aria-selected': i === at ? 'true' : 'false',
       onmousemove: () => { if (at !== i) { at = i; draw() } }, onclick: () => pick(i)
     }, agent ? avatar(agent, 18) : icon(ic), h('span', { class: 'grow' }, label), note ? h('span', { class: 'muted small' }, note) : null)))
-    if (!hits.length) list.append(h('li', { class: 'pal-empty' }, 'Nothing matches.'))
+    if (!hits.length) list.append(h('li', { class: 'pal-empty', role: 'presentation' }, 'Nothing matches.'))
+    if (hits.length) input.setAttribute('aria-activedescendant', 'pal-' + at); else input.removeAttribute('aria-activedescendant')
   }
   const pick = (i) => { const it = hits[i]; if (!it) return; pal.close(); it[2]() }
   input.addEventListener('input', () => { at = 0; draw() })
@@ -1833,7 +1884,7 @@ function heard (agent, e) {
 async function setNotify (on) {
   if (on && 'Notification' in window && Notification.permission !== 'granted') {
     const p = await Notification.requestPermission()
-    if (p !== 'granted') { alert('Your browser blocked notifications for cage. You can allow them in its site settings.'); on = false }
+    if (p !== 'granted') { toast('Your browser blocked notifications for cage. You can allow them in its site settings.'); on = false }
   }
   try { localStorage.setItem('cage-notify', on ? 'on' : 'off') } catch (e) {}
   if (BUSY === 'Desktop notifications') BUSY = ''   // done here and now, not by a job
@@ -1916,7 +1967,13 @@ function render (force) {
   ARRIVED = false
   if (kept) keepForm(main, kept)
   if (same && focused) { const el = main.querySelector(`[aria-label="${CSS.escape(focused)}"]`); if (el) el.focus({ preventScroll: true }) }
-  if (!same) window.scrollTo(0, 0)
+  if (!same) {
+    window.scrollTo(0, 0)
+    // On arriving at a page (not on a redraw), focus goes to its heading: a screen reader says where you are, and Tab
+    // goes on from there. Not from under a side panel or a question that's open.
+    const h1 = main.querySelector('h1')
+    if (h1 && !document.querySelector('dialog[open]')) { h1.tabIndex = -1; h1.focus({ preventScroll: true }) }
+  }
   SEEN = key
 }
 function route () {
@@ -1928,10 +1985,12 @@ function route () {
   }
   const p = raw
   const next = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|schedule|settings))?$/.test(p) ? p : 'home'
-  if (next !== page && unsaved() && !confirm('You haven’t saved what you wrote. Leave this page anyway?')) {
+  if (next !== page && unsaved() && LEAVING !== next) {
     history.replaceState(null, '', location.pathname + '#' + page)   // stay (this doesn't fire another hashchange)
+    confirmSheet('You haven’t saved what you wrote. Leave this page anyway?', 'Leave', 'Stay').then((yes) => { if (yes) { LEAVING = next; go(next) } })
     return
   }
+  LEAVING = ''
   page = next
   UNSAVED = null
   if (/^agent\/[a-z]+$/.test(page)) delete NOTES.unread[page.slice(6)]
@@ -1944,6 +2003,7 @@ function route () {
 // token in it (from an older cage) still works, but only a token that works replaces the one kept here: any website
 // could send you to this page with a made-up one.
 let LOCKED = ''   // why this page can't open, when it can't
+let LEAVING = ''  // the page you said you'd leave unsaved text for
 async function signIn (raw) {
   let t = ''
   try {
