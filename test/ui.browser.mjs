@@ -168,6 +168,7 @@ if (await chat.locator('.msg-agent.streaming').count()) fail('the streamed previ
 if (await chat.locator('[aria-busy]').count()) fail('the answer is still marked busy')
 const back = chat.locator('.file-chip', { hasText: 'reviewed-brief.pdf' })
 await back.waitFor({ timeout: 10000 })
+if ((await back.locator('.sub').innerText()) !== '10 bytes') fail('a 10-byte file says it is ' + await back.locator('.sub').innerText())
 const [download] = await Promise.all([page.waitForEvent('download'), back.click()])
 if (fs.readFileSync(await download.path(), 'utf8') !== '%PDF-1.4 brief') fail('the file the agent sent back')
 await chat.locator('textarea').fill('Email Bob that the brief is ready')
@@ -647,6 +648,30 @@ await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 }
 if (await page.locator('dialog#palette[open]').count()) fail('the palette stayed open')
 ok('Ctrl+K jumps to a page by name')
 
+// what cage blocked: looking at it tells cage you've seen it, once when you arrive (not at every redraw), and once more
+// when something new comes in while you look
+const blockedNow = (host) => fs.appendFileSync(path.join(home, 'events.log'), `${Math.floor(Date.now() / 1000)}|claude|blocked|${host}|\n`)
+await page.evaluate(() => {
+  window.__seen = 0
+  const real = window.fetch
+  window.fetch = (url, o) => { if (String(url) === '/api/jobs' && o && o.method === 'POST' && JSON.parse(o.body).args[0] === 'security') window.__seen++; return real(url, o) }
+})
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+blockedNow('tracker.example')
+await page.locator('.attn', { hasText: 'cage blocked 1 thing since you last looked' }).waitFor({ timeout: 15000 })
+await page.locator('#nav').getByRole('link', { name: 'Security' }).click()
+await page.getByText('Claude Code couldn’t reach tracker.example').waitFor({ timeout: 10000 })
+for (let i = 0; i < 3; i++) await page.evaluate(() => render(true))   // drawn again, as when the state changes
+await page.locator('#badge-security').waitFor({ state: 'hidden', timeout: 15000 })
+if ((await page.evaluate(() => window.__seen)) !== 1) fail('cage was told you saw it ' + await page.evaluate(() => window.__seen) + ' times')
+blockedNow('tracker.example')
+await page.getByText('2 times').waitFor({ timeout: 15000 })
+await page.locator('#badge-security').waitFor({ state: 'hidden', timeout: 15000 })
+for (let i = 0; i < 3; i++) await page.evaluate(() => render(true))
+if ((await page.evaluate(() => window.__seen)) !== 2) fail('something new while you look: cage was told ' + await page.evaluate(() => window.__seen) + ' times in all')
+await page.reload()   // (the page's own fetch again)
+ok('what cage blocked is marked seen once when you look, and again when something new comes in')
+
 // For a screen reader and the keyboard: every page has a main heading, which has the focus when you arrive (not after a
 // redraw); the palette is a combobox that says which option is picked
 await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
@@ -746,7 +771,15 @@ if (!(await page.title()).startsWith('(')) fail('the tab title does not count th
 await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
 await page.locator('.chat .msg-agent', { hasText: 'Your report is ready' }).waitFor({ timeout: 10000 })
 if (await badge.count()) fail('the unread mark stayed after opening the chat')
-ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
+// its Files, Schedule and Settings are that agent's pages too: a reply while you're on one isn't unread, or notified
+await page.locator('.tabs').getByRole('link', { name: 'Files' }).click()
+const told = await page.evaluate(() => window.__notes.length)
+fs.appendFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'Filed it' }) + '\n')
+await page.waitForFunction((n) => LIVE.offsets.claude >= n, fs.statSync(path.join(home, 'app', 'claude', 'log.jsonl')).size, { timeout: 10000 })
+await page.waitForTimeout(300)
+if (await badge.count() || (await page.evaluate(() => window.__notes.length)) !== told) fail('a reply while you look at its files is unread, or notified')
+await page.locator('.tabs').getByRole('link', { name: 'Chat' }).click()
+ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened, but not while on its files')
 
 // Home: an agent waiting for your OK while you're elsewhere is the first thing there, in the same words as its card in
 // the chat. Allow reaches the agent and the row goes; Open shows it in the chat. Each agent says what it's doing.

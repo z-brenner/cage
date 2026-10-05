@@ -135,7 +135,7 @@ function newer (latest, current) { // is release `latest` (v1.2.3) newer than wh
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]
   return false
 }
-function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB' }
+function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' kB' : plural(n, 'byte') }
 function plainLine (text, max) { // an agent's words on one line, without markdown's marks
   const t = String(text || '').replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, '$1').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
   return t.length > max ? t.slice(0, max - 1) + '…' : t
@@ -1937,9 +1937,13 @@ function pageMemory () {
     section('About you', 'Every agent reads this. Write it like a note to a new colleague.', h('div', { class: 'stack' }, ta, h('div', { class: 'row' }, save, status))))
 }
 
+let SECURITY_SEEN = ''   // what cage blocked, as the page last told cage you'd seen it
 function pageSecurity () {
   const S = STATE
-  if (S.events.unseen > 0) quietJob(['security'])   // you've seen them now
+  // you've seen them now: said once when you arrive, and again when something new comes in while you look (not at
+  // every redraw, which would run cage once more each time until it has answered)
+  const blocked = S.events.unseen + ' ' + JSON.stringify(S.events.recent[0] || null)
+  if (S.events.unseen > 0 && (ARRIVED || blocked !== SECURITY_SEEN)) { SECURITY_SEEN = blocked; quietJob(['security']) }
   const ev = S.events.recent.map((e) => {
     const when = `${e.count > 1 ? e.count + ' times · ' : ''}${ago(e.at)}`
     if (e.kind === 'secret') {
