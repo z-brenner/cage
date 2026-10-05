@@ -18,6 +18,7 @@ set -Eeuo pipefail   # -E: the ERR trap below fires inside functions too
 
 KIND="${1:?usage: provision.sh <claude|codex|cursor|antigravity> [--refresh | --node | --browser]}"
 MODE="${2:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CC_CONNECT_VERSION="${CC_CONNECT_VERSION:-v1.5.0}"
 CACHE=/var/cache/cage
 TOOLS=/opt/cage/tools
@@ -104,19 +105,16 @@ node_22() {
     return
   fi
   local f
-  if cached && [ -s "$CACHE/nodesource/nodesource.sources" ]; then   # NodeSource's apt source, as its setup left it
-    step "Node.js 22 (cached)"
-    install -D -m 644 "$CACHE/nodesource/nodesource.gpg" /usr/share/keyrings/nodesource.gpg
-    install -D -m 644 "$CACHE/nodesource/nodesource.sources" /etc/apt/sources.list.d/nodesource.sources
-    for f in nodejs nsolid; do [ ! -f "$CACHE/nodesource/$f" ] || install -D -m 644 "$CACHE/nodesource/$f" "/etc/apt/preferences.d/$f"; done
-  else
-    step "Node.js 22 (NodeSource)"
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
-    if [ "$CACHED" = 1 ]; then
-      cp /usr/share/keyrings/nodesource.gpg /etc/apt/sources.list.d/nodesource.sources "$CACHE/nodesource/" 2>/dev/null || true
-      for f in nodejs nsolid; do [ ! -f "/etc/apt/preferences.d/$f" ] || cp "/etc/apt/preferences.d/$f" "$CACHE/nodesource/"; done
-    fi
-  fi
+  step "Node.js 22$(cached && compgen -G "$CACHE/apt/archives/nodejs_*.deb" >/dev/null && echo ' (cached)' || echo ' (NodeSource)')"
+  # NodeSource's apt repository, set up the way its setup_22.x script does it, but with NodeSource's signing key kept
+  # next to this script (nodesource-repo.asc, fingerprint 6F71F525282841EEDAF851B42F59B5F99B1BE0B4) instead of
+  # running a script from the internet as root. A cache from before keeps working: same repository, same lists.
+  install -D -m 644 "$HERE/nodesource-repo.asc" /usr/share/keyrings/nodesource-repo.asc
+  printf 'Types: deb\nURIs: https://deb.nodesource.com/node_22.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource-repo.asc\n' \
+    "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/nodesource.sources
+  for f in nodejs nsolid; do   # NodeSource's packages over Ubuntu's older nodejs
+    printf 'Package: %s\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' "$f" > "/etc/apt/preferences.d/$f"
+  done
   apt_install nodejs
 }
 
@@ -300,8 +298,8 @@ if [ -d "$CACHE" ] && touch "$CACHE/.w" 2>/dev/null; then   # the cache volume (
   CACHED=1
   rm -f "$CACHE/.w"
   TOOLS="$CACHE/tools"
-  mkdir -p "$CACHE/apt/archives/partial" "$CACHE/apt/lists/partial" "$CACHE/npm" "$CACHE/nodesource" "$TOOLS"
-  # every apt-get (ours, NodeSource's, and Playwright's dry run) keeps its package lists and downloads in the cache
+  mkdir -p "$CACHE/apt/archives/partial" "$CACHE/apt/lists/partial" "$CACHE/npm" "$TOOLS"
+  # every apt-get (ours, and Playwright's dry run) keeps its package lists and downloads in the cache
   printf 'Dir::Cache::archives "%s/apt/archives";\nDir::State::lists "%s/apt/lists";\nAPT::Keep-Downloaded-Packages "true";\n' \
     "$CACHE" "$CACHE" > /etc/apt/apt.conf.d/90cage-cache
   mkdir -p /usr/etc   # npm's global config: /usr/etc/npmrc for NodeSource's npm, /etc/npmrc for others
