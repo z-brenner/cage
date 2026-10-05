@@ -271,6 +271,48 @@ head_of "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^co
 rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
 ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
 
+# Home reads the end of each agent's chat: an approval waiting for you, whether it's working, what it said last and
+# today's counts. The VM writes those logs, so they're read as the chat is: a log that's a link isn't read at all.
+python3 - "$A" > "$T/since" <<'PY'
+import json, os, sys, time
+A, now = sys.argv[1], int(time.time() * 1000)
+perm = [[{"text": "Allow", "data": "perm:allow"}, {"text": "Deny", "data": "perm:deny"}]]
+def log(agent, *entries):
+    os.makedirs(os.path.join(A, agent), exist_ok=True)
+    with open(os.path.join(A, agent, "log.jsonl"), "w") as f:
+        f.write("".join(json.dumps(e) + "\n" for e in entries))
+log("antigravity", {"t": "you", "text": "yesterday", "at": now - 86400000}, {"t": "reply", "text": "**Yesterday's** answer", "at": now - 86400000},
+    {"t": "you", "text": "email bob", "at": now - 60000}, {"t": "typing", "on": True, "at": now - 59000},
+    {"t": "buttons", "text": "May I send it?", "buttons": perm, "at": now - 50000},
+    {"t": "buttons", "session": "usage", "text": "not in your chat", "buttons": perm, "at": now - 40000})
+log("cursor", {"t": "you", "text": "a", "at": now - 9000}, {"t": "buttons", "text": "May I?", "buttons": perm, "at": now - 8000},
+    {"t": "action", "action": "perm:allow", "at": now - 7000}, {"t": "reply", "text": "Done", "at": now - 6000},
+    {"t": "file", "name": "notes.md", "at": now - 5000}, {"t": "you", "text": "b", "at": now - 4000}, {"t": "typing", "on": True, "at": now - 3000})
+log("codex")
+os.remove(os.path.join(A, "codex", "log.jsonl"))
+os.symlink(os.path.join(A, "antigravity", "log.jsonl"), os.path.join(A, "codex", "log.jsonl"))   # what a VM could plant
+print(now - 3600000)
+PY
+activity() { curl --noproxy '*' -s "${H[@]}" "$B/api/activity?agents=$1&since=$(cat "$T/since")"; }
+activity antigravity,cursor,codex,evil > "$T/activity.json"
+python3 - "$T/activity.json" <<'PY' || fail "what Home reads from the chats: $(cat "$T/activity.json")"
+import json, sys
+a = json.load(open(sys.argv[1]))["agents"]
+assert sorted(a) == ["antigravity", "codex", "cursor"], a
+g, c, x = a["antigravity"], a["cursor"], a["codex"]
+assert g["pending"]["text"] == "May I send it?" and not g["working"], g   # waiting for you isn't working
+assert g["last"]["text"] == "**Yesterday's** answer" and g["today"] == {"asked": 1, "answers": 0, "files": 0}, g
+assert c["pending"] is None and c["working"] and c["last"]["t"] == "file" and c["today"] == {"asked": 2, "answers": 1, "files": 1}, c
+assert x == {"pending": None, "last": None, "today": {"asked": 0, "answers": 0, "files": 0}, "working": False}, x   # the planted link
+PY
+rm -rf "$A/cursor" "$A/codex/log.jsonl"
+ln -s "$A/antigravity" "$A/cursor"   # a chat folder that is itself a link: skipped, not followed
+[ "$(activity cursor,antigravity | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["agents"]))')" = "['antigravity']" ] \
+  || fail "a chat folder that's a link was read"
+rm -rf "$A/cursor" "$A/antigravity"
+[ "$(activity cursor)" = '{"agents": {}}' ] && [ ! -e "$A/cursor" ] || fail "an agent with no chat yet: $(activity cursor)"
+ok "Home reads the end of each chat: an approval waiting for you, working, the last answer, today's counts; no links followed"
+
 # Any file name downloads, under its own name; a file too big to send whole isn't sent at all
 curl --noproxy '*' -s "${H[@]}" -X POST --data-binary 'PDF bytes' "$B/api/chat/claude/upload?name=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("отчёт 報告.pdf"))')" > "$T/up.json"
 p="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$T/up.json")" || fail "upload: $(cat "$T/up.json")"

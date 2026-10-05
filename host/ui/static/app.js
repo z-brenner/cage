@@ -28,6 +28,8 @@ let SEEN = ''      // the state last drawn, to redraw only when something change
 let LATEST = ''
 let page = 'home'
 let ASK = null     // the last question you asked from Home, and its answers (kept in this tab only)
+let ACTIVITY = {}  // what each agent is doing, from the end of its chat (server.py's activity()): {pending, working, last, today}
+const ANSWERED = {}   // approvals answered from Home, by when they were asked: gone at once, not at the next look
 
 // --- tiny DOM helpers: text always goes in as text, never as HTML ------------------------------------------------
 function h (tag, attrs, ...kids) {
@@ -134,6 +136,10 @@ function newer (latest, current) { // is release `latest` (v1.2.3) newer than wh
   return false
 }
 function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB' }
+function plainLine (text, max) { // an agent's words on one line, without markdown's marks
+  const t = String(text || '').replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, '$1').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
+  return t.length > max ? t.slice(0, max - 1) + '…' : t
+}
 function plural (n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')) }
 function hostOf (url) { try { return new URL(url).hostname } catch (e) { return url } }
 
@@ -217,12 +223,26 @@ async function refresh () {
     render()
     if (CHAT) drawChatState(CHAT)
     liveConnect()
+    loadActivity()
   } catch (e) {
     if (e.message === 'locked') return
     if (!e.down) { FAILS = 0; notice('slow') }   // the web app answers, but cage behind it was too slow (or failed)
     else if (++FAILS >= 2) notice('down')
     console.warn(e)
   }
+}
+async function loadActivity () { // what each agent is doing (Home, the title): read from the end of its chat log
+  const names = STATE ? agentsOn().map((a) => a.name) : []
+  const midnight = new Date()
+  midnight.setHours(0, 0, 0, 0)
+  try { ACTIVITY = names.length ? (await api(`/api/activity?agents=${names.join(',')}&since=${midnight.getTime()}`)).agents || {} : {} } catch (e) { return }
+  render()
+}
+let ACT_SOON = 0
+function activitySoon () { clearTimeout(ACT_SOON); ACT_SOON = setTimeout(loadActivity, 400) }   // something happened in a chat
+function waitingOf (name) { // the approval an agent waits for, unless you answered it from here already
+  const p = (ACTIVITY[name] || {}).pending
+  return p && ANSWERED[name] !== p.at ? p : null
 }
 // The line at the top when cage itself is in the way: not answering at all (dots greyed, sending off), or slow
 function notice (kind) {
@@ -658,6 +678,7 @@ function attention () {
   const S = STATE
   const out = []
   const item = (tone, ic, text, action) => h('li', { class: 'attn ' + tone }, h('span', { class: 'attn-icon' }, icon(ic)), h('span', { class: 'grow' }, text), action)
+  for (const a of agentsOn()) { const p = waitingOf(a.name); if (p) out.push(approvalRow(a, p)) }
   for (const a of agentsOn()) {
     const s = statusOf(a)
     if (s === 'login') out.push(item('warn', 'log-in', `${a.label} needs you to sign in to ${a.plan}`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')))
@@ -668,6 +689,30 @@ function attention () {
   if (S.memory.inbox > 0) out.push(item('info', 'brain', `Your agents want to remember ${plural(S.memory.inbox, 'new thing')}`, btn('Review', () => runJob(['memory'], 'What your agents want to remember'), 'sm')))
   if (newer(LATEST, S.version)) out.push(item('info', 'download', `cage ${LATEST} is available (you have ${S.version})`, btn('Update', () => runJob(['update'], 'Updating cage'), 'sm')))
   return out
+}
+
+// An agent waiting for your OK, though you're not in its chat: the same words as its card there, Allow and Deny right
+// here, or Open to see it in the conversation first
+function approvalRow (a, p) {
+  const decide = (action) => async (e) => {
+    const row = e.currentTarget.closest('li')
+    row.querySelectorAll('button').forEach((b) => { b.disabled = true })
+    try {
+      await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action] } })
+      ANSWERED[a.name] = p.at
+      render()
+      activitySoon()
+    } catch (err) { toast(err.message); row.querySelectorAll('button').forEach((b) => { b.disabled = false }) }
+  }
+  return h('li', { class: 'attn warn approval-row' }, h('span', { class: 'attn-icon' }, icon('hand')),
+    h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, approvalLine(approvalOf(p.text)), p.at ? ' · ' + when(p.at) : '')),
+    h('span', { class: 'attn-acts' }, btn('Allow', decide('perm:allow'), 'sm primary'), btn('Deny', decide('perm:deny'), 'sm'),
+      h('a', { class: 'btn sm ghost', href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label + '’s chat' }, 'Open')))
+}
+function when (at) { // 8:21 AM today; Mon 8:21 AM this week; Oct 3 before that
+  const d = new Date(at)
+  const days = (new Date().setHours(0, 0, 0, 0) - new Date(at).setHours(0, 0, 0, 0)) / 864e5
+  return days < 1 ? clock(at) : days < 7 ? d.toLocaleDateString([], { weekday: 'short' }) + ' ' + clock(at) : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
 function composer () {
@@ -810,12 +855,17 @@ function agentRow (a) {
   if (s === 'off') action = btn('Add', () => runJob(['add', a.name], 'Adding ' + a.label), 'sm')
   else if (s === 'login') action = btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')
   else action = h('a', { class: 'btn sm', href: '#agent/' + a.name }, icon('message-circle'), 'Chat')
+  const act = a.enabled && ACTIVITY[a.name]
+  const last = act && act.last
+  const doing = !act ? null : waitingOf(a.name) ? h('span', { class: 'agent-act warn' }, dot('warn'), 'Waiting for your OK')
+    : act.working ? h('span', { class: 'agent-act busy' }, dot('busy'), 'Working…')
+      : last ? h('span', { class: 'agent-act' }, 'Last: ', last.t === 'file' ? 'sent ' + last.text : plainLine(last.text, 80), last.at ? ' · ' + when(last.at) : '') : null
   return h('li', { class: 'agent' + (a.enabled ? '' : ' off'), style: { '--c': AGENT[a.name].color } },
     h('a', { class: 'agent-main', href: '#agent/' + a.name },
       avatar(a.name, 36),
       h('span', { class: 'agent-text' }, h('span', { class: 'agent-name' }, a.label),
         h('span', { class: 'agent-sub' }, h('span', { class: 'status ' + st.tone }, dot(st.tone), st.label),
-          a.enabled ? ' · Chat ' + chats.join(', ').replace(/, ([^,]*)$/, ' and $1') : ' · uses ' + a.plan))),
+          a.enabled ? ' · Chat ' + chats.join(', ').replace(/, ([^,]*)$/, ' and $1') : ' · uses ' + a.plan), doing)),
     action, h('a', { class: 'chev', href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label }, icon('chevron-right')))
 }
 
@@ -1066,6 +1116,7 @@ async function chatLoad (C, again) { // the end of the conversation; what comes 
   for (const e of d.entries) chatAdd(C, e, true)
   C.offset = d.o
   LIVE.offsets[C.agent] = Math.max(LIVE.offsets[C.agent] ?? -1, d.o)
+  if (looking(C.agent)) saw(C.agent)
   C.loaded = true
   for (const w of C.waiting || []) chatLive(C, w)   // what the live stream brought while this was loading
   C.waiting = []
@@ -1833,9 +1884,24 @@ document.addEventListener('keydown', (e) => {
 })
 
 // --- notifications: replies and questions from agents you're not looking at ----------------------------------------
-// One stream per agent, from now on; what arrives while you're elsewhere marks the agent unread in the sidebar and,
-// if you turned them on, shows a desktop notification (through the service worker, so it works installed too).
+// One stream for all agents, from where you last read each chat; what arrives while you're elsewhere marks the agent
+// unread in the sidebar and, if you turned them on, shows a desktop notification (through the service worker, so it
+// works installed too).
 const NOTES = { unread: {} }
+// How far you've read each agent's chat (seen) and been told about it (told), as offsets in its log, kept in this
+// browser: what came while the page was closed is still unread when it opens again, and is notified only once
+const READ = (() => { try { const r = JSON.parse(localStorage.getItem('cage-read')); if (r && r.seen && r.told) return r } catch (e) {} return { seen: {}, told: {} } })()
+function keepRead () { try { localStorage.setItem('cage-read', JSON.stringify(READ)) } catch (e) {} }
+function onAgent (agent) { return page === 'agent/' + agent || page.startsWith('agent/' + agent + '/') }   // its chat, files, schedule or settings
+function looking (agent) { return onAgent(agent) && document.visibilityState === 'visible' }
+function saw (agent) { // you're looking at it: everything so far is read
+  const o = LIVE.offsets[agent]
+  if (NOTES.unread[agent]) { delete NOTES.unread[agent]; if (STATE) drawNav() }
+  if (o === undefined || o < 0 || (READ.seen[agent] === o && READ.told[agent] >= o)) return
+  READ.seen[agent] = o
+  READ.told[agent] = Math.max(READ.told[agent] ?? -1, o)
+  keepRead()
+}
 let INSTALL = null   // the browser's "install this app" prompt, when it offers one
 function notifyOn () { try { return localStorage.getItem('cage-notify') === 'on' && 'Notification' in window && Notification.permission === 'granted' } catch (e) { return false } }
 // Every agent's chat on one stream (a browser allows only a few connections to a site): the open chat's new lines,
@@ -1850,28 +1916,40 @@ function liveConnect (force) {
   LIVE.es = null
   LIVE.key = key
   if (!names.length) return
-  const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? -1)).join(',')
+  const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? READ.seen[a] ?? -1)).join(',')
   const es = new EventSource(`/api/chat/stream?from=${encodeURIComponent(from)}&token=${encodeURIComponent(TOKEN)}`)
   LIVE.es = es
   es.onopen = () => { document.body.dataset.live = 'on' }
   es.onmessage = (m) => {
     const d = JSON.parse(m.data)
+    if (d.start) { // where it starts: the end, the first time this browser looks (what came before isn't news)
+      LIVE.offsets[d.a] = Math.max(LIVE.offsets[d.a] ?? -1, d.o)
+      if (READ.seen[d.a] === undefined) { READ.seen[d.a] = READ.told[d.a] = d.o; keepRead() }
+      if (looking(d.a)) saw(d.a)
+      return
+    }
     if (d.reset) { // the VM started a new log (the old one is kept): the open chat is read again, nothing is lost
       LIVE.offsets[d.a] = 0
+      READ.seen[d.a] = READ.told[d.a] = 0   // offsets in the new one
+      keepRead()
       if (CHAT && CHAT.agent === d.a) chatLoad(CHAT, true)
       return
     }
     if (!d.e || d.o <= (LIVE.offsets[d.a] ?? -1)) return
     LIVE.offsets[d.a] = d.o
     if (CHAT && CHAT.agent === d.a) chatLive(CHAT, d)
-    heard(d.a, d.e)
+    heard(d.a, d.e, d.o)
+    if (['you', 'buttons', 'action', 'reply', 'typing', 'error'].includes(d.e.t)) activitySoon()   // Home shows it
   }
   es.onerror = () => { document.body.dataset.live = 'off'; es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
 }
-function heard (agent, e) {
+function heard (agent, e, o) {
   if ((e.session || 'you') !== 'you' || !['reply', 'buttons', 'card', 'file'].includes(e.t)) return
-  if (page === 'agent/' + agent && document.visibilityState === 'visible') return
-  if (page !== 'agent/' + agent) { NOTES.unread[agent] = (NOTES.unread[agent] || 0) + 1; drawNav() }
+  if (looking(agent)) return saw(agent)
+  if (!onAgent(agent)) { NOTES.unread[agent] = (NOTES.unread[agent] || 0) + 1; drawNav() }
+  if (o <= (READ.told[agent] ?? -1)) return   // told already, before the page was opened again
+  READ.told[agent] = o
+  keepRead()
   if (!notifyOn()) return
   const perm = e.t === 'buttons' && (e.buttons || []).flat().some((b) => /^perm:/.test(b.data))
   const text = perm ? 'wants your OK: ' + approvalLine(approvalOf(e.text)) : e.t === 'file' ? 'sent you ' + (e.name || 'a file') : (e.text || (e.card && e.card.header && e.card.header.title) || '')
@@ -1922,7 +2000,8 @@ function drawNav () {
   if (INSTALL && !installed()) ver.append(h('button', { type: 'button', class: 'update', onclick: installApp }, icon('app-window'), 'Install as an app'))
   const todo = agentsOn().filter((a) => ['login', 'stuck'].includes(statusOf(a))).length + S.connectors.filter((c) => c.broken).length + (S.events.unseen ? 1 : 0)
   const unread = Object.values(NOTES.unread).reduce((x, y) => x + y, 0)
-  document.title = todo + unread ? `(${todo + unread}) cage` : 'cage'
+  const waiting = agentsOn().filter((a) => waitingOf(a.name)).length
+  document.title = todo + unread + waiting ? `(${todo + unread + waiting}) cage` : 'cage'
   document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
 let ARRIVED = false   // true while a page is drawn on arriving at it (not on a redraw): the time to reload what it shows
@@ -1949,7 +2028,7 @@ function render (force) {
   document.body.classList.remove('is-locked')
   document.body.classList.toggle('unconfigured', !STATE.configured)
   drawNav()
-  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE)
+  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE) + (page === 'home' ? JSON.stringify([ACTIVITY, ANSWERED]) : '')
   const main = document.getElementById('main')
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields
@@ -1993,7 +2072,7 @@ function route () {
   LEAVING = ''
   page = next
   UNSAVED = null
-  if (/^agent\/[a-z]+$/.test(page)) delete NOTES.unread[page.slice(6)]
+  if (page.startsWith('agent/')) saw(page.split('/')[1])
   document.body.classList.remove('nav-open')
   if (TOKEN) start(); else locked(LOCKED)
   render()
@@ -2031,7 +2110,11 @@ function start () {
   api('/api/update').then((d) => { LATEST = d.latest || ''; render() }).catch(() => {})
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {})
   setInterval(() => { if (!dlg.open && document.visibilityState === 'visible') refresh() }, 6000)
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !dlg.open) refresh() })
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return
+    if (page.startsWith('agent/')) saw(page.split('/')[1])
+    if (!dlg.open) refresh()
+  })
   window.addEventListener('beforeunload', (e) => { if (unsaved()) { e.preventDefault(); e.returnValue = '' } })
 }
 async function reattach () { // after a reload: a job this page started is still going; it comes back as the pill

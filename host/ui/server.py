@@ -35,7 +35,11 @@ and only pictures are shown in the page (everything else downloads).
   GET  /api/chat/<a>/history?tail=N     the end of the chat (log.jsonl, after the end of log.1.jsonl when the VM has
                                         just started a new one): {"o": offset in log.jsonl, "entries", "more"}
   GET  /api/chat/stream?from=a:N,b:M    server-sent events for all your agents' chats at once (a browser allows only a
-                                        few connections per site): {"a", "o", "e"} per new line, {"a", "reset"}
+                                        few connections per site): {"a", "o", "start"} where each begins, then {"a",
+                                        "o", "e"} per new line, {"a", "reset"}
+  GET  /api/activity?agents=a,b&since=T what each agent is doing, from the end of its chat (for Home): {"agents": {a:
+                                        {"pending": {"text","at"}|null, "working", "last": {"t","text","at"}|null,
+                                        "today": {"asked","answers","files"} (from T, ms, on)}}}
   POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
   POST /api/chat/<a>/action             {"action", "label"?}  (a button in the chat)
@@ -338,16 +342,20 @@ class Chat:
     """An agent's chat folder (~/.cage/app/<agent>), opened without following links: its VM writes in there."""
     D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
-    def __init__(self, agent):
+    def __init__(self, agent, create=True):
+        """create=False: only one that's there already (FileNotFoundError if not)."""
         if agent not in AGENTS:
             raise KeyError("no such agent")
         self.agent = agent
-        os.makedirs(APPDIR, mode=0o700, exist_ok=True)
+        if create:
+            os.makedirs(APPDIR, mode=0o700, exist_ok=True)
         top = os.open(APPDIR, self.D)
         try:
             try:
                 self.fd = os.open(agent, self.D, dir_fd=top)
             except FileNotFoundError:
+                if not create:
+                    raise
                 os.mkdir(agent, 0o777, dir_fd=top)
                 self.fd = os.open(agent, self.D, dir_fd=top)
                 os.fchmod(self.fd, 0o777)
@@ -492,6 +500,46 @@ class Chat:
             chunk = f.read(1 << 20)
         i = chunk.find(b"\n")
         return start + i if i >= 0 else start
+
+
+TAIL = 512 << 10   # how much of the end of a chat log Home reads
+WORKING = 15 * 60   # "working…" for longer than this without a word is stale (it was stopped, or its VM restarted)
+
+
+def activity(c, since):
+    """What an agent is doing, from the end of its chat log (read like the chat: no links followed): an approval
+    waiting for you (cc-connect's "perm:" buttons with nothing you sent after them, no answer and no new message),
+    since when it's been working (typing on, until it answers), what it said last, and how many questions, answers
+    and files there were from `since` on (ms: the page's midnight). The log is the VM's, so every value is checked."""
+    size, _ = c.size()
+    start = c.line_start(size - TAIL) if size > TAIL else 0
+    entries, _ = c.read_log(start, TAIL + (1 << 20))
+    pending, typing, last, today = None, None, None, {"asked": 0, "answers": 0, "files": 0}
+    for _, e in entries:
+        if (e.get("session") or "you") != "you":
+            continue
+        t, at = e.get("t"), e.get("at")
+        at = at if isinstance(at, (int, float)) and not isinstance(at, bool) else 0
+        rows = e.get("buttons") if isinstance(e.get("buttons"), list) else []
+        if t == "buttons" and any(isinstance(b, dict) and str(b.get("data", "")).startswith("perm:")
+                                  for row in rows if isinstance(row, list) for b in row):
+            pending = {"text": str(e.get("text") or "")[:4000], "at": at}
+        elif t in ("action", "you"):
+            pending = None
+        if t == "typing":
+            typing = at if e.get("on") is True else None
+        elif t in ("reply", "error", "buttons"):   # as the chat shows it: an answer, an error or a question ends "working…"
+            typing = None
+        if t in ("reply", "file", "card"):
+            card = e.get("card") if isinstance(e.get("card"), dict) else {}
+            header = card.get("header") if isinstance(card.get("header"), dict) else {}
+            text = e.get("text") if t == "reply" else e.get("name") if t == "file" else header.get("title")
+            last = {"t": t, "text": str(text or "")[:160], "at": at}
+        if at >= since:
+            key = {"you": "asked", "reply": "answers", "file": "files"}.get(t)
+            if key:
+                today[key] += 1
+    return {"pending": pending, "typing": typing, "last": last, "today": today}
 
 
 class State:
@@ -791,6 +839,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, {"ok": True})
         if parts == ["chat", "stream"] and method == "GET":
             return self.multi(query)
+        if parts == ["activity"] and method == "GET":
+            since = query.get("since", ["0"])[0]
+            since, now, out = int(since) if since.isdigit() else 0, time.time() * 1000, {}
+            for a in query.get("agents", [""])[0].split(","):
+                if a not in AGENTS or a in out:
+                    continue
+                try:
+                    with Chat(a, create=False) as c:   # no chat yet: nothing to say (and no folder made for it)
+                        act = activity(c, since)
+                except OSError:   # none, or not a folder (a link a VM left): nothing the app reads
+                    continue
+                typing = act.pop("typing")
+                act["working"] = bool(typing) and not act["pending"] and now - typing < WORKING * 1000
+                out[a] = act
+            return self.send(200, {"agents": out})
         if len(parts) == 3 and parts[0] == "chat":
             return self.chat(method, parts[1], parts[2], query)
         if parts == ["check"] and method == "GET":
@@ -968,6 +1031,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     pos[a] = int(o) if o.isdigit() and int(o) <= size else size
             self.events_head()
             self.wfile.write(b": hello\n\n")
+            for a in chats:   # where each one starts (the end, unless the page asked for more): what it has seen so far
+                self.wfile.write(b"data: " + json.dumps({"a": a, "o": pos[a], "start": True}).encode() + b"\n\n")
             self.wfile.flush()
             quiet = 0.0
             while True:

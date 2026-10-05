@@ -332,5 +332,62 @@ class Logs(unittest.TestCase):
         self.assertEqual(self.chat.read_log(0, name="log.1.jsonl", ino=ino + 1), ([], 0))   # another file by now
 
 
+class Activity(unittest.TestCase):
+    """What Home shows of each agent, from the end of its chat log."""
+    setUp, tearDown, write = Logs.setUp, Logs.tearDown, Logs.write
+    PERM = [[{"text": "Allow", "data": "perm:allow"}, {"text": "Deny", "data": "perm:deny"}]]
+
+    def test_waiting_for_you(self):
+        self.write({"t": "you", "text": "email bob", "at": 5}, {"t": "typing", "on": True, "at": 6},
+                   {"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7},
+                   {"t": "buttons", "session": "usage", "text": "not here", "buttons": self.PERM, "at": 8},
+                   {"t": "buttons", "text": "Which one?", "buttons": [[{"text": "A", "data": "a"}]], "at": 9})
+        a = server.activity(self.chat, 0)
+        self.assertEqual(a["pending"], {"text": "May I?", "at": 7})   # a question that isn't asking first doesn't count
+        self.assertIsNone(a["typing"])   # it asked: it isn't working on anything while it waits
+        self.assertEqual(a["today"], {"asked": 1, "answers": 0, "files": 0})
+
+    def test_answered(self):
+        for after in ({"t": "action", "action": "perm:deny", "at": 8}, {"t": "you", "text": "no, wait", "at": 8}):
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, after)
+            self.assertIsNone(server.activity(self.chat, 0)["pending"], after)
+
+    def test_working_and_last(self):
+        self.write({"t": "you", "text": "hi", "at": 1}, {"t": "reply", "text": "hello", "at": 2},
+                   {"t": "card", "card": {"header": {"title": "Usage"}}, "at": 3}, {"t": "file", "name": "a.md", "at": 4},
+                   {"t": "you", "text": "more", "at": 5}, {"t": "typing", "on": True, "at": 6})
+        a = server.activity(self.chat, 3)
+        self.assertEqual((a["typing"], a["last"]), (6, {"t": "file", "text": "a.md", "at": 4}))
+        self.assertEqual(a["today"], {"asked": 1, "answers": 0, "files": 1})   # from 3 on
+        self.write({"t": "reply", "text": "**Done**", "at": 7})
+        a = server.activity(self.chat, 0)
+        self.assertEqual((a["typing"], a["last"]["text"]), (None, "**Done**"))
+
+    def test_what_a_vm_could_write(self):
+        """The VM writes the log: odd values are read as nothing, never as an error."""
+        self.write({"t": "buttons", "text": None, "buttons": "perm:allow", "at": "soon"}, {"t": "buttons", "buttons": [None, ["x"], [{"data": 1}]]},
+                   {"t": "reply", "text": ["a"], "at": True}, {"t": "card", "card": "x"}, {"t": "typing", "on": "yes", "at": 1}, [1, 2])
+        a = server.activity(self.chat, 0)
+        self.assertEqual((a["pending"], a["typing"], a["last"]), (None, None, {"t": "card", "text": "", "at": 0}))
+        self.assertEqual(a["today"], {"asked": 0, "answers": 1, "files": 0})
+
+    def test_only_the_end(self):
+        """Only the end of a long log is read, from the start of a whole line."""
+        self.write({"t": "buttons", "text": "long ago", "buttons": self.PERM, "at": 1}, *[{"t": "reply", "text": "x" * 1000, "at": 2}] * 600)
+        a = server.activity(self.chat, 0)
+        self.assertIsNone(a["pending"])
+        self.assertLess(a["today"]["answers"], 600)
+
+    def test_a_link_is_not_read(self):
+        other = os.path.join(HOME, "elsewhere.jsonl")
+        with open(other, "w") as f:
+            f.write(json.dumps({"t": "buttons", "text": "May I?", "buttons": self.PERM}) + "\n")
+        os.symlink(other, self.path)
+        self.assertIsNone(server.activity(self.chat, 0)["pending"])
+        with self.assertRaises(FileNotFoundError):   # and no chat folder is made for an agent that has none
+            server.Chat("antigravity", create=False)
+        self.assertFalse(os.path.exists(os.path.join(server.APPDIR, "antigravity")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -395,6 +395,11 @@ input[type=checkbox] { accent-color: var(--primary); width: 15px; height: 15px; 
 .attn-list > li.attn { min-height: 54px; padding: 10px 12px 10px 14px; }
 .attn-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; flex: none; color: var(--tone-fg); background: color-mix(in srgb, var(--tone) 12%, transparent); }
 .attn .grow { color: var(--ink); font-weight: 500; }
+.attn .grow .sub { display: block; margin-top: 1px; color: var(--muted); font-size: 13px; font-weight: 400; overflow-wrap: anywhere; }
+.attn-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.agent-act { margin-top: 1px; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-act .dot { display: inline-block; margin: 0 6px 1px 1px; vertical-align: middle; }
+.agent-act.warn { color: var(--warn-fg); font-weight: 550; }
 
 .hero .section-head h2 { font-size: 20px; font-weight: 650; letter-spacing: -.02em; }
 .hero .section-head p { font-size: 14px; }

@@ -634,6 +634,56 @@ await page.locator('.chat .msg-agent', { hasText: 'Your report is ready' }).wait
 if (await badge.count()) fail('the unread mark stayed after opening the chat')
 ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
 
+// Home: an agent waiting for your OK while you're elsewhere is the first thing there, in the same words as its card in
+// the chat. Allow reaches the agent and the row goes; Open shows it in the chat. Each agent says what it's doing.
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+const ask = (text) => fetch(base + '/api/chat/claude/send', { method: 'POST', headers: { 'X-Cage-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
+const claudeLog = path.join(home, 'app', 'claude', 'log.jsonl')
+const allowed = () => (fs.readFileSync(claudeLog, 'utf8').match(/"action":"perm:allow"/g) || []).length
+await ask('Email Bob the brief')
+const waits = page.locator('.attn-list li.approval-row', { hasText: 'Claude Code wants your OK' })
+await waits.getByText('Gmail: send email to bob@acme.com').waitFor({ timeout: 15000 })
+const claudeRow = page.locator('.list.agents li.agent', { hasText: 'Claude Code' })
+await claudeRow.locator('.agent-act', { hasText: 'Waiting for your OK' }).waitFor({ timeout: 5000 })
+if (!/^\(\d+\) cage$/.test(await page.title())) fail('the tab title does not count the approval waiting: ' + await page.title())
+if (!(await page.evaluate(() => window.__notes.some((n) => n.title === 'Claude Code' && n.body === 'wants your OK: Gmail: send email to bob@acme.com')))) {
+  fail('the notification does not say what it wants to do: ' + JSON.stringify(await page.evaluate(() => window.__notes)))
+}
+const allowedBefore = allowed()
+await waits.getByRole('button', { name: 'Allow' }).click()
+await waits.waitFor({ state: 'detached', timeout: 5000 })
+for (let i = 0; i < 50 && allowed() === allowedBefore; i++) await page.waitForTimeout(100)
+if (allowed() !== allowedBefore + 1) fail('Allow on Home did not reach the agent')
+await claudeRow.locator('.agent-act', { hasText: 'Last: Sent the email to bob@acme.com.' }).waitFor({ timeout: 15000 })
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'typing', session: 'you', on: true }) + '\n')
+await claudeRow.locator('.agent-act', { hasText: 'Working…' }).waitFor({ timeout: 10000 })
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'typing', session: 'you', on: false }) + '\n')
+await claudeRow.locator('.agent-act', { hasText: 'Last:' }).waitFor({ timeout: 10000 })
+await ask('Email Bob again')
+await waits.getByRole('link', { name: 'Open Claude Code’s chat' }).click()
+await page.waitForFunction(() => location.hash === '#agent/claude', null, { timeout: 5000 })
+const again = page.locator('.chat .choices.approval:not(.is-answered)')
+await again.getByText('Gmail: send email').waitFor({ timeout: 10000 })
+await again.getByRole('button', { name: 'Deny' }).click()
+await page.locator('.chat .msg-agent', { hasText: 'Okay, I won’t send it.' }).last().waitFor({ timeout: 10000 })
+ok('Home: an approval waiting for you, in the same words as its card (and its notification); Allow there reaches the agent; Open shows it in the chat; what each agent is doing')
+
+// what came while the page was closed is still unread when it opens again, and isn't notified twice
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'While you were away' }) + '\n')
+await badge.getByText('1').waitFor({ timeout: 10000 })
+await page.reload()
+await badge.getByText('1').waitFor({ timeout: 15000 }).catch(() => fail('an unread message is forgotten on a reload'))
+await page.waitForTimeout(500)
+if (await page.evaluate(() => window.__notes.length)) fail('a reload notified again: ' + JSON.stringify(await page.evaluate(() => window.__notes)))
+await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
+await page.locator('.chat .msg-agent', { hasText: 'While you were away' }).waitFor({ timeout: 10000 })
+await page.reload()
+await page.locator('.chat .msg-agent', { hasText: 'While you were away' }).waitFor({ timeout: 15000 })
+await page.waitForTimeout(1000)
+if (await badge.count()) fail('a message you read is unread again after a reload')
+ok('unread marks last through a reload, and a reload notifies nothing twice')
+
 // updating while the app is open: the server restarts with the new code, and the page reloads with the new page
 const p3 = await ctx.newPage()
 watch(p3)
