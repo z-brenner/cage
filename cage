@@ -506,7 +506,8 @@ app_dirs() {
   # gets its mode as it's made, with no chmod afterwards that a link swapped in meanwhile could redirect.
   for x in in out files; do
     if [ -L "$d/$x" ] || { [ -e "$d/$x" ] && [ ! -d "$d/$x" ]; }; then rm -f "$d/$x"; fi
-    [ -d "$d/$x" ] || ( umask 000 && mkdir "$d/$x" )
+    # (a link swapped in just now: mkdir fails; bash 3.2 needs the return to stop there)
+    { [ -d "$d/$x" ] && [ ! -L "$d/$x" ]; } || ( umask 000 && mkdir "$d/$x" ) || return 1
   done
 }
 

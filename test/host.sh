@@ -600,7 +600,16 @@ fresh() { block_watch; export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/c
   [ $rc = 0 ] || fail "a planted link stopped cage up: $(cat "$T/z.err")"
   for x in in out files; do
     [ ! -L "$A/$x" ] && [ -d "$A/$x" ] && [ "$(stat -c %a "$A/$x")" = 777 ] || fail "$x/ isn't a fresh folder again: $(ls -la "$A")"
-  done )
+  done
+  # a link put back right after cage removed one (the VM is still running then) isn't taken for the folder
+  rm -rf "$A/in" && ln -s ../../../zhome/.ssh "$A/in" && mkdir -p "$T/zbin"
+  printf '#!/bin/sh
+%s "$@"
+for a; do case "$a" in */app/claude/in) ln -s ../../../zhome/.ssh "$a" ;; esac; done
+' "$(command -v rm)" > "$T/zbin/rm"
+  chmod +x "$T/zbin/rm"; rc=0
+  PATH="$T/zbin:$PATH" "$ROOT/cage" up claude 2>"$T/z.err" || rc=$?
+  [ $rc = 1 ] && grep -q "couldn't start claude" "$T/z.err" || fail "a link put back in place of in/ went unnoticed (exit $rc): $(cat "$T/z.err")" )
 ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is removed, never followed"
 
 # memory review: a link in the inbox is removed unread; invisible characters are taken out (and you're told); a note
