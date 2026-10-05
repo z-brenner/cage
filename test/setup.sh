@@ -338,4 +338,17 @@ ok "whatsapp: spare or own number, owner-only, bridge and adapter settings for t
   [ ! -e "$T/PWNED" ] || fail "a command from an API reply ran" )
 ok "hostile chat-service replies: an owner id, a user id or a bot name that would be shell code is never saved"
 
+# the others you let talk to a Slack agent (asked on a terminal only): an id that would be shell code is skipped, and
+# the rest are saved
+if script --version 2>&1 | grep -q util-linux; then
+  ( block_watch; export CAGE_HOME="$T/hostile2"
+    cage init 2>/dev/null
+    printf '%s\n' 'xoxb-GOOD-1234567890' 'xapp-GOOD-1234567890' 'zack@acme.com' 'evil@acme.com, amy@acme.com' 'y' |
+      TERM=xterm-256color timeout 60 script -qfec "$ROOT/cage chat add slack claude" /dev/null > "$T/h2.out" 2>&1 || fail "chat add slack: $(cat -v "$T/h2.out")"
+    grep -q 'skipped evil@acme.com' "$T/h2.out" && grep -qxF 'CAGE_SLACK_ALLOW_claude="U0ZACK,U0AMY"' "$CAGE_HOME/cage.env" \
+      || fail "others on the Slack allow list: $(grep SLACK_ALLOW "$CAGE_HOME/cage.env"; cat -v "$T/h2.out" | tail -5)"
+    [ ! -e "$T/PWNED" ] || fail "a command from an API reply ran" )
+  ok "Slack: someone else's id that would be shell code is skipped; the others you name are let in"
+fi
+
 echo "all $pass setup tests passed"
