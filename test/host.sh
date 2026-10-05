@@ -1079,11 +1079,18 @@ alive || fail "_autostart did not start the keepalive"
 "$W" down 2>/dev/null; gone || fail "keepalive left running"
 ok "the Windows-login entry point wakes the agents that are asleep (never restarts one), logs to autostart.log, starts the keepalive"
 
+# a cage folder whose path Windows can't be handed (a space in it): no keepalive, and cage says why and what to do
+mkdir -p "$T/my cage" && cp "$CAGE_HOME/cage.env" "$T/my cage/"
+CAGE_HOME="$T/my cage" "$W" up claude 2>"$T/err" || fail "up with a space in CAGE_HOME: $(cat "$T/err")"
+grep -q "cage can't pass $T/my cage to Windows" "$T/err" && grep -q 'set CAGE_HOME to a path of letters' "$T/err" \
+  || fail "no keepalive, but not why: $(cat "$T/err")"
+if alive; then fail "a keepalive with a path Windows can't be handed"; fi
+
 mv "$T/bin/powershell.exe" "$T/ps.off"
 "$W" up claude 2>"$T/err"
 grep -q 'Windows interop is off' "$T/err" || fail "no warning without interop: $(cat "$T/err")"
 unset WSL_DISTRO_NAME
-ok "without Windows interop, up warns that WSL will stop the VMs"
+ok "without Windows interop, or with a cage folder Windows can't be handed, up says that WSL will stop the VMs, and why"
 
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   cat >> "$CAGE_HOME/cage.env" <<'EOF'

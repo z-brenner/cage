@@ -1926,8 +1926,12 @@ keepalive_run() { # cage _keepalive [CAGE_HOME]: the hidden session's side, a sl
 
 wsl_keepalive_start() {
   keepalive_running && return 0
-  { ( wsl_check_names ) && [[ "$CAGE_HOME" =~ ^[A-Za-z0-9._/-]+$ ]]; } || {
-    warn "no WSL keepalive: WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
+  ( wsl_check_names ) || { warn "no WSL keepalive: WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
+  if [[ ! "$CAGE_HOME" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    warn "no WSL keepalive: cage can't pass $CAGE_HOME to Windows (it has a space or another odd character), so WSL will stop the VMs ~15 s after you close the last WSL window"
+    hint "set CAGE_HOME to a path of letters, digits and . _ - / only"
+    return 0
+  fi
   [ -e "$CAGE_HOME/keepalive.pid" ] || helper_old_stop keepalive
   local ps i
   if ! ps="$(win_cmd powershell.exe)"; then
