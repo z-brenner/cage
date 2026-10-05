@@ -873,6 +873,59 @@ ok "restore: a full disk is named, not blamed on the passphrase; room checked fi
   "$ROOT/cage" down codex 2>"$T/d.err" && grep -q 'codex is already asleep' "$T/d.err" || fail "down codex: $(cat "$T/d.err")" )
 ok "down: a VM that won't stop in 30 s is stopped at once; asleep ones are left alone, and cage says when nobody was awake"
 
+# everyday commands: restart; logs (the last 200 lines, or follow); shell; status --json for scripts; chat rm telegram;
+# remove (asks first, offers a backup, keeps the last agent); and plain words when microsandbox or a VM isn't there
+( fresh ev
+  printf 'CAGE_AGENTS="claude codex cursor"\nCAGE_TELEGRAM_TOKEN_claude="1:abc"\nCAGE_TELEGRAM_BOT_claude="dot_claude_bot"\nCAGE_TELEGRAM_ALLOW="4242"\n' >> "$CAGE_HOME/cage.env"
+  printf 'cage-claude\ncage-codex\ncage-cursor\n' > "$T/ev.vms"; printf 'cage-claude\ncage-codex\n' > "$T/ev.running"
+  export MSB_EXISTING="$T/ev.vms" MSB_RUNNING="$T/ev.running"
+  mkdir -p "$MSB_VOLUMES/cage-cursor-home" "$MSB_VOLUMES/cage-codex-home"
+  : > "$MSB_LOG"
+  "$ROOT/cage" restart claude 2>"$T/ev.err" && grep -q 'restarting claude' "$T/ev.err" && grep -q -- '--name | cage-claude |' "$MSB_LOG" \
+    || fail "restart: $(cat "$T/ev.err")"
+  : > "$MSB_LOG"
+  "$ROOT/cage" logs claude >/dev/null 2>&1 && grep -qx 'logs | --tail | 200 | cage-claude' "$MSB_LOG" || fail "logs: $(cat "$MSB_LOG")"
+  "$ROOT/cage" logs claude --tail 5 >/dev/null 2>&1 && grep -qx 'logs | --tail | 5 | cage-claude' "$MSB_LOG" || fail "logs --tail: $(cat "$MSB_LOG")"
+  "$ROOT/cage" logs -f claude >/dev/null 2>&1 && grep -qx 'logs | --tail | 200 | -f | cage-claude' "$MSB_LOG" || fail "logs -f: $(cat "$MSB_LOG")"
+  CAGE_PROTO=1 "$ROOT/cage" logs codex >/dev/null 2>&1 && grep -qx 'logs | --tail | 200 | -f | cage-codex' "$MSB_LOG" || fail "the app's live log: $(cat "$MSB_LOG")"
+  if out="$("$ROOT/cage" logs antigravity 2>&1)"; then fail "logs of an agent without a VM"; fi
+  grep -q 'antigravity has no cage yet: cage up antigravity' <<<"$out" || fail "logs without a VM: $out"
+  if out="$("$ROOT/cage" shell cursor </dev/null 2>&1)"; then fail "a shell in a VM that's asleep"; fi
+  grep -q 'cursor is asleep: cage up cursor' <<<"$out" || fail "shell, asleep: $out"
+  if out="$(HOME="$T/evhome" PATH=/usr/local/bin:/usr/bin:/bin "$ROOT/cage" logs claude 2>&1)"; then fail "logs without microsandbox"; fi
+  grep -q "microsandbox isn't installed; run: cage fix" <<<"$out" || fail "logs without microsandbox: $out"
+  out="$(HOME="$T/evhome" PATH=/usr/local/bin:/usr/bin:/bin "$ROOT/cage" 2>&1)"
+  grep -q "microsandbox isn't installed, so your agents can't wake up" <<<"$out" && grep -q 'install it: cage fix' <<<"$out" || fail "home without microsandbox: $out"
+  : > "$MSB_LOG"; rc=0
+  "$ROOT/cage" status --json > "$T/ev.json" 2>/dev/null || rc=$?
+  [ $rc = 1 ] && python3 - "$T/ev.json" <<'PY' || fail "status --json (exit $rc): $(cat "$T/ev.json")"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [(a["name"], a["state"]) for a in d["agents"]] == [("claude", "ready"), ("codex", "ready"), ("cursor", "asleep")], d
+assert d["needs_you"] == ["cursor is asleep: cage up cursor"], d
+PY
+  if grep -q 'source' "$MSB_LOG"; then fail "status --json went through the VMs' logs"; fi
+  cp "$T/ev.vms" "$T/ev.running"
+  "$ROOT/cage" status --json >/dev/null 2>&1 || fail "status --json said something needs you, with everyone ready"
+  "$ROOT/cage" chat rm telegram claude </dev/null 2>"$T/ev.err" || fail "chat rm telegram: $(cat "$T/ev.err")"
+  if grep -q 'TELEGRAM_TOKEN_claude\|TELEGRAM_BOT_claude' "$CAGE_HOME/cage.env"; then fail "Telegram settings left behind"; fi
+  if "$ROOT/cage" remove cursor </dev/null 2>"$T/ev.err"; then fail "remove deleted without asking"; fi
+  grep -q 'asks before it deletes' "$T/ev.err" && grep -qx 'cage-cursor' "$MSB_EXISTING" || fail "remove without asking: $(cat "$T/ev.err")"
+  "$ROOT/cage" remove cursor --keep-login --yes 2>"$T/ev.err" || fail "remove --keep-login: $(cat "$T/ev.err")"
+  grep -qx 'CAGE_AGENTS="claude codex"' "$CAGE_HOME/cage.env" && ! grep -qx cage-cursor "$MSB_EXISTING" && [ -d "$MSB_VOLUMES/cage-cursor-home" ] \
+    || fail "remove --keep-login: $(cat "$T/ev.err")"
+  printf 'y\ny\n' | CAGE_PROTO=1 CAGE_BACKUP_DIR="$T/evbk" CAGE_BACKUP_PASSPHRASE="correct horse battery" "$ROOT/cage" remove codex 2>"$T/ev.err" \
+    || fail "remove with a backup first: $(cat "$T/ev.err")"
+  grep -q '"t":"confirm","text":"Back everything up first?' "$T/ev.err" && ls "$T/evbk"/cage-*.cagebackup >/dev/null 2>&1 || fail "no backup offered or made: $(cat "$T/ev.err")"
+  grep -qx 'CAGE_AGENTS="claude"' "$CAGE_HOME/cage.env" && [ ! -e "$MSB_VOLUMES/cage-codex-home" ] || fail "remove: $(cat "$T/ev.err")"
+  if out="$("$ROOT/cage" remove claude --yes 2>&1)"; then fail "removed the last agent"; fi
+  grep -q 'your only agent' <<<"$out" || fail "remove the last agent: $out"
+  out="$("$ROOT/cage" 2>&1)"
+  grep -q 'all caged and happy: say hi in the app: cage ui' <<<"$out" || fail "home: $out"
+  out="$("$ROOT/cage" help 2>&1)"
+  for c in 'status \[--json\]' 'restart \[agents\]' 'logs <agent> \[-f\]' 'remove <agent>' 'version'; do grep -q "  $c" <<<"$out" || fail "help lacks $c"; done )
+ok "everyday: restart, logs (last 200 lines or -f), status --json, chat rm telegram, remove; plain words without msb or a VM"
+
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
 mkdir -p "$T/wslroot" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$T/wslroot/"

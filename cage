@@ -1695,12 +1695,15 @@ unset_env() { # unset_env <name>...: drops lines from the env file
   env_edit unset "$@"
 }
 
-chat_rm() { # chat_rm <slack|discord> <agent>
+chat_rm() { # chat_rm <telegram|slack|discord|whatsapp> <agent>
   local where="${1:-}" a="${2:-}"
-  case "$where" in slack|discord|whatsapp) ;; *) die "usage: cage chat rm slack|discord|whatsapp <agent>" ;; esac
+  case "$where" in telegram|slack|discord|whatsapp) ;; *) die "usage: cage chat rm telegram|slack|discord|whatsapp <agent>" ;; esac
   [ -n "$a" ] || die "usage: cage chat rm $where <agent>"
   check_agent "$a"
-  if [ "$where" = slack ]; then
+  if [ "$where" = telegram ]; then
+    unset_env "CAGE_TELEGRAM_TOKEN_$a" "CAGE_TELEGRAM_BOT_$a"
+    hint "to delete the bot in Telegram too: $(link https://t.me/BotFather @BotFather) → /deletebot"
+  elif [ "$where" = slack ]; then
     unset_env "CAGE_SLACK_BOT_TOKEN_$a" "CAGE_SLACK_APP_TOKEN_$a" "CAGE_SLACK_OWNER_$a" "CAGE_SLACK_ALLOW_$a" "CAGE_SLACK_TEAM_$a"
     hint "to remove the app from Slack too: $(link https://api.slack.com/apps) → its app → Delete App"
   elif [ "$where" = discord ]; then
@@ -1751,7 +1754,7 @@ cmd_chat() {
     link) [ "${2:-}" = whatsapp ] && [ -n "${3:-}" ] || die "usage: cage chat link whatsapp <agent>"
           check_agent "$3"; whatsapp_link "$3" ;;
     rm|remove) shift; chat_rm "$@" ;;
-    *) die "usage: cage chat [list] | add slack|discord|whatsapp [agent] | link whatsapp <agent> | rm <app> <agent>" ;;
+    *) die "usage: cage chat [list] | add slack|discord|whatsapp [agent] | link whatsapp <agent> | rm telegram|slack|discord|whatsapp <agent>" ;;
   esac
 }
 
@@ -2401,25 +2404,133 @@ status_rows() { # one row per agent; records each state in STATES ("agent:state 
 }
 
 next_steps() { # one friendly line about what to do next, based on STATES
-  local s
+  local s a
   [ -n "$STATES" ] || status_rows >/dev/null
   case "$STATES" in
     *:none*|*:asleep*) hint "wake them up: cage up" ;;
     *:login*) for s in $STATES; do case "$s" in *:login) hint "next: cage login ${s%%:*}"; break ;; esac; done ;;
     *:installing*) hint "still installing; they'll be ready in a minute" ;;
-    *) printf '\n  %s♥%s all caged and happy. Say hi on Telegram.\n' "$C_PINK" "$C_0" >&2 ;;
+    *) # wherever you talk to them: the app always, chat apps where you've set them up
+      if [ -n "$PROTO" ]; then s="say hi."; else s="say hi in the app: cage ui"; fi
+      for a in $CAGE_AGENTS; do if has_chat "$a"; then s="say hi in the app (cage ui) or in your chat app."; break; fi; done
+      printf '\n  %s♥%s all caged and happy: %s\n' "$C_PINK" "$C_0" "$s" >&2 ;;
   esac
 }
 
-cmd_status() {
+cmd_status() { # cage status [--json]
   load_env
+  case "${1:-}" in
+    "") ;;
+    --json) status_json; return ;;
+    *) die "usage: cage status [--json]" ;;
+  esac
   printf '\n' >&2
   status_rows
+  if ! find_msb; then printf '\n' >&2; msb_missing; fi
   printf '\n' >&2
 }
+msb_missing() { bad "microsandbox isn't installed, so your agents can't wake up"; hint "install it: cage fix"; }
 
-cmd_logs() { [ -n "${1:-}" ] || die "usage: cage logs <agent>"; check_agent "$1"; exec "$MSB" logs -f "$(vm "$1")"; }
-cmd_shell() { [ -n "${1:-}" ] || die "usage: cage shell <agent>"; check_agent "$1"; agent_exec "$1" yes "cd ~/work 2>/dev/null; exec bash -l"; }
+# `cage status --json`, for scripts: each agent's state, and what needs you (exit 1 when something does). Quick:
+# it reads what the background helper has collected, without going through the VMs' logs itself.
+status_json() {
+  local a st first=1 n b needs=() have=1
+  find_msb || have=0
+  if [ $have = 1 ]; then refresh_running; else needs+=("microsandbox isn't installed: cage fix"); fi
+  printf '{"agents":['
+  for a in $CAGE_AGENTS; do
+    st=none
+    if [ $have = 1 ]; then st="$(probe "$a")"; fi
+    [ $first = 1 ] || printf ','; first=0
+    printf '{"name":"%s","state":"%s"}' "$a" "$st"
+    case "$st" in
+      login) needs+=("$a needs a login: cage login $a") ;;
+      asleep) needs+=("$a is asleep: cage up $a") ;;
+      none) needs+=("$a has no cage yet: cage up $a") ;;
+    esac
+  done
+  n="$(inbox_count)"
+  [ "$n" = 0 ] || needs+=("your agents want to remember $n new thing$([ "$n" = 1 ] || echo s): cage memory")
+  n="$(events_unseen)"
+  [ "$n" = 0 ] || needs+=("$n thing$([ "$n" = 1 ] || echo s) blocked since you last looked: cage security")
+  for b in "$OAUTH"/*.broken; do
+    if [ -e "$b" ]; then needs+=("$(basename "$b" .broken) needs you to sign in again: cage connect add $(basename "$b" .broken)"); fi
+  done
+  printf '],"needs_you":%s}\n' "$(jlist ${needs[@]+"${needs[@]}"})"
+  [ ${#needs[@]} -eq 0 ]
+}
+
+vm_there() { # vm_there <agent> [awake]: stops, in plain words, when microsandbox or the agent's VM isn't there (or asleep)
+  find_msb || die "microsandbox isn't installed; run: cage fix"
+  exists "$1" || die "$1 has no cage yet: cage up $1"
+  [ "${2:-}" = awake ] || return 0
+  refresh_running
+  [ "$RUNNING" = "?" ] || agent_awake "$1" || die "$1 is asleep: cage up $1"
+}
+
+cmd_logs() { # cage logs <agent> [--tail N | -f]: the last lines its VM printed (200 unless you say), or follow along
+  local a="" n=200 follow=0 usage="usage: cage logs <agent> [--tail N | -f]"
+  [ -z "$PROTO" ] || follow=1   # the app's activity log is a live view
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow) follow=1 ;;
+      --tail) [[ "${2:-}" =~ ^[0-9]+$ ]] || die "$usage"; n="$2"; shift ;;
+      -*) die "$usage" ;;
+      *) [ -z "$a" ] || die "$usage"; a="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$a" ] || die "$usage"
+  check_agent "$a"
+  vm_there "$a"
+  if [ $follow = 1 ]; then exec "$MSB" logs --tail "$n" -f "$(vm "$a")"; fi
+  exec "$MSB" logs --tail "$n" "$(vm "$a")"
+}
+cmd_shell() {
+  [ -n "${1:-}" ] || die "usage: cage shell <agent>"
+  check_agent "$1"
+  vm_there "$1" awake
+  agent_exec "$1" yes "cd ~/work 2>/dev/null; exec bash -l"
+}
+
+cmd_restart() { # cage restart [agents]: a fresh VM for each, with the same login and files (what `up` does to awake ones)
+  load_env
+  resolve_agents "$@"
+  say "restarting $(agents_label "${AGENTS[*]}"): a fresh cage for each, with the same login and files"
+  cmd_up "$@"
+}
+
+# cage remove <agent> [--keep-login] [--yes]: no longer one of your agents. Its cage goes, and its login and files
+# too unless you keep them (a backup is offered first).
+cmd_remove() {
+  local a="" x held=0 yes=0 rest=() mine=0 rc usage="usage: cage remove <agent> [--keep-login] [--yes]"
+  for x in "$@"; do
+    case "$x" in --keep-login) held=1 ;; --yes) yes=1 ;; -*) die "$usage" ;; *) [ -z "$a" ] || die "$usage"; a="$x" ;; esac
+  done
+  [ -n "$a" ] || die "$usage"
+  check_agent "$a"
+  load_env
+  for x in $CAGE_AGENTS; do if [ "$x" = "$a" ]; then mine=1; else rest+=("$x"); fi; done
+  # an empty list means "all four" in cage.env, so the last one stays
+  [ ${#rest[@]} -gt 0 ] || die "$a is your only agent, and cage needs one. To delete its cage, login and files anyway: cage destroy $a --yes"
+  if [ $yes = 0 ]; then
+    interactive || die "cage remove asks before it deletes anything; run it in a terminal, or add --yes"
+    if [ $held = 0 ]; then
+      say "This removes $a: its cage, and its login and files. (To keep its login and files, add --keep-login.)"
+      if yes_no "Back everything up first?" y; then
+        set +e; ( set -e; cmd_backup ); rc=$?; set -e   # its own checks stay on (they're off on the left of ||)
+        [ $rc = 0 ] || die "the backup didn't work, so nothing was removed"
+      fi
+    fi
+    yes_no "Remove $a$([ $held = 0 ] || echo ", keeping its login and files")?" n || { say "nothing changed"; return 0; }
+  fi
+  if [ $mine = 1 ]; then
+    set_env CAGE_AGENTS "${rest[*]}"
+    CAGE_AGENTS="${rest[*]}"
+    ok "$a is no longer one of your agents"
+  else say "$a wasn't one of your agents"; fi
+  if [ $held = 1 ]; then cmd_destroy "$a" --keep-login; else cmd_destroy "$a" --yes; fi
+}
 
 # A fresh VM installs the latest agent CLI and the pinned cc-connect; the home volume (login, work) is kept.
 cage_version() {
@@ -3555,7 +3666,7 @@ cmd_home() {
   load_env
   banner
   status_rows
-  next_steps
+  if find_msb; then next_steps; else msb_missing; fi
   local n
   n="$(inbox_count)"
   if [ "$n" -gt 0 ]; then hint "your agents want to remember $n new thing$([ "$n" = 1 ] || echo s): cage memory"; fi
@@ -3577,14 +3688,15 @@ usage() {
   printf '\n  %s %scage%s  %syour AI agents, each in its own little cage%s\n\n' "$(brand)" "$C_B" "$C_0" "$C_DIM" "$C_0"
   row "cage" "set everything up, or see how your agents are doing"
   printf '\n  %severy day%s\n' "$C_DIM" "$C_0"
-  row "  status" "how everyone's doing"
+  row "  status [--json]" "how everyone's doing"
   row "  up [agents]" "wake agents up (a fresh VM, same login and files)"
+  row "  restart [agents]" "a fresh VM for each, same login and files"
   row "  down [agents]" "put agents to sleep"
   row "  login <agent>" "sign an agent in to your subscription"
-  row "  logs <agent>" "watch what an agent's VM is doing"
+  row "  logs <agent> [-f]" "what an agent's VM printed lately (-f: follow it)"
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
-  row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too"
+  row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too (rm: Telegram too)"
   row "  approve <a> on|off" "ask you before it acts in your apps"
   row "  ask \"…\" [agents]" "every awake agent answers, here"
   row "  ask-all on|off" "/all <question> in chat: all of them answer"
@@ -3607,8 +3719,10 @@ usage() {
   row "  update [agents]" "newest cage and agent CLIs"
   row "  backup [file]" "everything, in one encrypted file"
   row "  restore [file]" "put a backup back, here or on a new computer"
+  row "  remove <agent>" "no longer one of your agents (--keep-login keeps its login)"
   row "  destroy <agent>" "--keep-login keeps its login, --yes deletes all"
   row "  init" "just write the config file, to edit by hand"
+  row "  version" "which cage this is"
   printf '\n  %sagents%s  claude · codex · cursor · antigravity\n' "$C_DIM" "$C_0"
   printf '  %sconfig%s  %s\n\n' "$C_DIM" "$C_0" "$CAGE_ENV"
 }
@@ -3624,12 +3738,14 @@ main() {
     doctor) cmd_doctor ;;
     up) cmd_up "$@" ;;
     login) cmd_login "$@" ;;
-    status) cmd_status ;;
+    status) cmd_status "$@" ;;
     logs) cmd_logs "$@" ;;
     shell) cmd_shell "$@" ;;
     update) cmd_update "$@" ;;
     down) cmd_down "$@" ;;
     destroy) cmd_destroy "$@" ;;
+    restart) cmd_restart "$@" ;;
+    remove) cmd_remove "$@" ;;
     memory) cmd_memory "$@" ;;
     secret|secrets) cmd_secret "$@" ;;
     password|passwords) cmd_password "$@" ;;
