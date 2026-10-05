@@ -918,9 +918,11 @@ const permText = (tool, input) => `⚠️ **Permission Request**\n\nAgent wants 
 const permButtons = [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }]]
 fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: permButtons,
   text: permText('mcp__zapier__gmail_send_email', JSON.stringify({ body: 'Dear Bob, '.repeat(90), to: 'eve@evil.example' }).slice(0, 790) + '...') }) + '\n')
-const cutShort = waits.filter({ hasText: 'Only part of it fits here' })
-await cutShort.getByText('Gmail: send email').waitFor({ timeout: 15000 })
-if (await cutShort.getByRole('button', { name: /^Allow/ }).count()) fail('Allow on Home for a request cut short')
+// (its row by what it says, whatever it offers: until Home looks again, the one denied above may still be there,
+// "Gmail: send email to bob@acme.com · …")
+const cutShort = waits.filter({ hasText: /Gmail: send email ·/ })
+await cutShort.waitFor({ timeout: 15000 })
+if (await cutShort.getByRole('button', { name: /^Allow/ }).count() || !(await cutShort.getByText(/Only part of it fits here/).count())) fail('Allow on Home for a request cut short: ' + await cutShort.innerText())
 if (!/\bprimary\b/.test(await cutShort.getByRole('link', { name: 'Open Claude Code’s chat' }).getAttribute('class'))) fail('Open is not the main button for a request cut short')
 await cutShort.getByRole('button', { name: /^Deny/ }).click()
 await waits.waitFor({ state: 'detached', timeout: 10000 })
@@ -992,9 +994,11 @@ if (!(await plans.locator('li', { hasText: 'Codex' }).getByText('Wake it up to s
 if (/null|undefined/.test(await plans.innerText())) fail('plan usage: ' + await plans.innerText())
 if ((await page.evaluate(() => usageView({ name: 'cursor', label: 'Cursor', state: 'ready' }).textContent)) !== 'Not reported') fail('an agent that can\'t tell its usage')
 if (!(await page.getByText('Each agent you ask uses its own plan.').count())) fail('no word under Ask that each agent uses its own plan')
-// asked again while Home sits there unchanged (the page every minute; the web app asks the agent every 10)
-const got = await page.evaluate(() => { USAGE.claude.got -= 120000; return USAGE.claude.got })
+// asked again while Home sits there unchanged, not drawn again (the page every minute; the web app asks the agent
+// every 10)
+const got = await page.evaluate(() => { window.__render = render; window.render = () => {}; USAGE.claude.got -= 120000; return USAGE.claude.got })
 await page.waitForFunction((got) => USAGE.claude.got > got, got, { timeout: 15000 }).catch(() => fail('plan usage is not asked for again while Home sits there'))
+await page.evaluate(() => { window.render = window.__render })
 await page.evaluate(() => { USAGE.claude = { ...USAGE.claude, card: { elements: [{ type: 'markdown', content: '5h limit\nRemaining: 0%\nResets: 1h 2m' }] } }; drawUsage('claude') })
 const out = plans.locator('li', { hasText: 'Claude Code' })
 const ranOut = await usageSays(out.locator('.usage-bar.bad'))
