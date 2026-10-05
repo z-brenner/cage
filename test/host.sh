@@ -520,12 +520,13 @@ grep -q '^mode = "default"$' "$c" && grep -q '^allowed_tools = \[".*"\]$' "$c" |
 grep -q 'mcp__zapier\|mcp__github' "$c" && fail "an app is pre-approved"
 # Claude Code's own tools, by today's names and by older ones, go ahead without asking; of the MCP tools, only its browser
 tools=" $(sed -n 's/^allowed_tools = \[\(.*\)\]$/\1/p' "$c" | tr -d '"' | tr ',' ' ') "
-for t in Bash Edit Write Read Glob Grep WebFetch WebSearch TodoWrite Skill Agent mcp__browser Monitor EnterWorktree ExitWorktree \
+# (not $t: that's claude's cc-connect.toml, which the voice check below reads)
+for tool in Bash Edit Write Read Glob Grep WebFetch WebSearch TodoWrite Skill Agent mcp__browser Monitor EnterWorktree ExitWorktree \
          TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch CronCreate CronDelete CronList \
          Task BashOutput KillShell MultiEdit LS SlashCommand; do
-  [[ "$tools" == *" $t "* ]] || fail "with approve on, claude would ask before $t, which stays inside its VM: $tools"
+  [[ "$tools" == *" $tool "* ]] || fail "with approve on, claude would ask before $tool, which stays inside its VM: $tools"
 done
-for t in $tools; do case "$t" in mcp__browser) ;; mcp__*) fail "an app's tool is pre-approved: $t" ;; esac; done
+for tool in $tools; do case "$tool" in mcp__browser) ;; mcp__*) fail "an app's tool is pre-approved: $tool" ;; esac; done
 grep -q '^mode = "default"$' "$CAGE_HOME/agents/codex/cc-connect.toml" && ! grep -q '^allowed_tools' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex: cc-connect's default mode (read-only), nothing pre-approved"
 cage _state 2>/dev/null | python3 -c 'import json,sys; d={a["name"]: a for a in json.load(sys.stdin)["agents"]}; assert d["claude"]["approve"] and not d["cursor"]["approve"], d' || fail "approve in the state"
 cage approve claude off </dev/null >/dev/null 2>&1; cage approve codex off </dev/null >/dev/null 2>&1
