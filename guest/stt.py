@@ -5,32 +5,65 @@ faster-whisper runs the Whisper model on the CPU; nothing you say leaves the VM.
 
   STT_PORT (8178)  STT_MODEL (base: tiny, base, small, medium, large-v3-turbo…)  STT_LANGUAGE (empty: detect)
   STT_MODELS       where models are downloaded to (once)
-GET /health says whether the model is loaded. Started by guest/voice.sh as the agent user.
+GET /health says whether the model is loaded. Started by guest/voice.sh as the agent user. The server answers
+from the start: while the model is still downloading (the first time; about 150 MB for base), a voice note gets
+"still downloading" at once rather than waiting longer than cc-connect does. test/stt_test.py covers it.
 """
-import email.parser, email.policy, http.server, json, os, sys, tempfile, threading, traceback
+import email.parser, email.policy, http.server, json, os, sys, tempfile, threading, time, traceback
 
 PORT = int(os.environ.get("STT_PORT", "8178"))
 MODEL = os.environ.get("STT_MODEL") or "base"
 LANGUAGE = os.environ.get("STT_LANGUAGE") or None
 MAX_BYTES = 50 * 1024 * 1024
 state = {"model": None, "error": None}
-ready = threading.Event()
 
 
 def log(msg):
     print(f"cage-stt: {msg}", file=sys.stderr, flush=True)
 
 
-def load():
-    try:
-        from faster_whisper import WhisperModel
-        state["model"] = WhisperModel(MODEL, device="cpu", compute_type="int8", download_root=os.environ.get("STT_MODELS"),
-                                      cpu_threads=os.cpu_count() or 2)
-        log(f"model {MODEL} loaded")
-    except Exception as e:  # reported on every request until fixed
-        state["error"] = f"{type(e).__name__}: {e}"
-        log(f"couldn't load model {MODEL}: {state['error']}")
-    ready.set()
+def downloaded(root):
+    """Bytes under the models folder so far."""
+    total = 0
+    for d, _, files in os.walk(root):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(d, f))
+            except OSError:
+                pass
+    return total
+
+
+def load(wait=60, every=30):
+    """Loads the model, downloading it the first time and saying how far that got. If that fails (no network
+    yet, say), it tries again later, with longer pauses."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")   # its progress bars are noise in a log
+    root = os.environ.get("STT_MODELS")
+    done = threading.Event()
+
+    def progress():
+        seen = downloaded(root)
+        while not done.wait(every):
+            now = downloaded(root)
+            if now != seen:
+                log(f"downloading the speech model ({MODEL}): {now // 1000000} MB so far")
+                seen = now
+    if root:
+        threading.Thread(target=progress, daemon=True).start()
+    while True:
+        try:
+            from faster_whisper import WhisperModel
+            state["model"] = WhisperModel(MODEL, device="cpu", compute_type="int8", download_root=root,
+                                          cpu_threads=os.cpu_count() or 2)
+            state["error"] = None
+            log(f"model {MODEL} loaded")
+            break
+        except Exception as e:  # reported on every request meanwhile
+            state["error"] = f"{type(e).__name__}: {e}"
+            log(f"couldn't load model {MODEL}: {state['error']}; trying again in {wait}s")
+            time.sleep(wait)
+            wait = min(wait * 2, 900)
+    done.set()
 
 
 def form_fields(content_type, body):
@@ -60,6 +93,8 @@ def transcribe(audio, filename, language):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    timeout = 60   # one request at a time, so a client that stops sending mustn't hold the server for longer
+
     def log_message(self, *a):
         pass
 
@@ -84,17 +119,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.split("?")[0].rstrip("/") not in ("/v1/audio/transcriptions", "/audio/transcriptions"):
             return self.error(404, "not found")
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self.error(400, "bad Content-Length")
         if not 0 < n <= MAX_BYTES:
             return self.error(413, "no audio, or more than 50 MB")
+        body = self.rfile.read(n)   # all of it, so the client hears the answer rather than a closed connection
+        if state["model"] is None:
+            if state["error"]:
+                return self.error(503, f"the speech model couldn't load ({state['error']}); "
+                                       "it will try again in a few minutes")
+            return self.error(503, "the speech model is still downloading, try again in a minute")
         try:
-            fields = form_fields(self.headers.get("Content-Type", ""), self.rfile.read(n))
+            fields = form_fields(self.headers.get("Content-Type", ""), body)
         except Exception as e:
             return self.error(400, f"couldn't read the form: {e}")
         if "file" not in fields:
             return self.error(400, "no file field")
-        if not ready.wait(timeout=900) or state["model"] is None:
-            return self.error(503, f"the speech model isn't ready: {state['error'] or 'still loading'}")
         language = (fields.get("language", (b"", None))[0].decode() or LANGUAGE) or None
         try:
             text = transcribe(fields["file"][0], fields["file"][1], language)

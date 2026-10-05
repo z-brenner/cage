@@ -51,12 +51,18 @@ else
 fi
 
 [ "$MODE" = local ] || exit 0
+# The first time, stt.py downloads the Whisper model while it already answers (and logs how far the download got):
+# until the model is there, a voice note gets "still downloading, try again in a minute" at once, not a time-out.
 delay=5
 while true; do
   log "speech-to-text on 127.0.0.1:$PORT (Whisper ${MODEL:-base})"
+  started=$SECONDS
   as_agent env STT_PORT="$PORT" STT_MODEL="$MODEL" STT_LANGUAGE="$LANGUAGE" STT_MODELS="$DIR/models" \
     "$VENV/bin/python" /cage/stt.py
-  log "speech-to-text exited ($?); restarting in ${delay}s"
+  rc=$?
+  # After a run of more than 5 minutes, a crash is news, not a loop: start again from the shortest pause.
+  [ $(( SECONDS - started )) -gt 300 ] && delay=5
+  log "speech-to-text exited ($rc); restarting in ${delay}s"
   sleep "$delay"
-  delay=$(( delay < 120 ? delay * 2 : 120 ))
+  delay=$(( delay * 2 < 120 ? delay * 2 : 120 ))
 done
