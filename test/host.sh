@@ -626,6 +626,30 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["configure
   || fail "cage _state isn't the JSON the web app expects: $(head -c 400 "$T/state.json")"
 ok "web app side: protocol events (questions, hidden answers, yes/no) and the state snapshot"
 
+# The web app gives each job a code of its own (CAGE_PROTO=<code>), and cage puts it in front of every event, so what
+# a VM prints can't pass for one of cage's questions. Questions come in a file in ~/.cage/jobs, not on the command line.
+out="$(printf 'n\n' | CAGE_PROTO=c0ffee12 "$ROOT/cage" ask-all on 2>&1 >/dev/null)"
+grep -q $'^\036c0ffee12{"t":"confirm","text":"Restart .*","default":"y"}$' <<<"$out" || fail "events with the job's code: $(cat -v <<<"$out")"
+if grep -q $'\036{' <<<"$out"; then fail "an event without the job's code: $(cat -v <<<"$out")"; fi
+cage ask-all off </dev/null 2>/dev/null
+mkdir -p "$CAGE_HOME/jobs" && chmod 700 "$CAGE_HOME/jobs"
+printf 'is it "snowing"?\nasks the second line' > "$CAGE_HOME/jobs/q1.txt"
+out="$(cage ask --text-file "$CAGE_HOME/jobs/q1.txt" claude 2>/dev/null)"
+grep -q 'answer from cage-claude to: is it "snowing"?' <<<"$out" && grep -q 'asks the second line' <<<"$out" || fail "ask --text-file: $out"
+[ ! -e "$CAGE_HOME/jobs/q1.txt" ] || fail "ask --text-file left the question behind"
+echo 'mail bob@example.com' > "$CAGE_HOME/jobs/m1.txt"
+out="$(cage mask try --text-file "$CAGE_HOME/jobs/m1.txt" 2>&1)"
+grep -qF 'mail [EMAIL_1]' <<<"$out" && [ ! -e "$CAGE_HOME/jobs/m1.txt" ] || fail "mask try --text-file: $out"
+echo 'not for you' > "$T/elsewhere.txt"
+ln -s "$T/elsewhere.txt" "$CAGE_HOME/jobs/link.txt"
+for f in "$T/elsewhere.txt" "$CAGE_HOME/jobs/link.txt" "$CAGE_HOME/jobs/../cage.env" "$CAGE_HOME/jobs/missing.txt"; do
+  if cage ask --text-file "$f" claude >/dev/null 2>"$T/err"; then fail "ask --text-file read $f"; fi
+  grep -q 'no text from the web app' "$T/err" || fail "ask --text-file $f: $(cat "$T/err")"
+done
+[ -f "$T/elsewhere.txt" ] && [ -f "$CAGE_HOME/cage.env" ] || fail "ask --text-file removed a file outside ~/.cage/jobs"
+rm -f "$CAGE_HOME/jobs/link.txt"
+ok "web app side: each job's events carry its code; questions come in a file in ~/.cage/jobs, and nothing else is read"
+
 # --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
 V="$T/volumes/cage-claude-home"
 mkdir -p "$V/.claude" "$V/work" "$V/.cache/ms-playwright/chromium" "$T/volumes/cage-codex-home/.codex"

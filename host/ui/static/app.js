@@ -71,9 +71,10 @@ function inline (text, plain) { // links (and, in answers, `code`, **bold**, *it
     if (t[0] === '`') out.push(h('code', {}, t.slice(1, -1)))
     else if (t.startsWith('**')) out.push(h('strong', {}, t.slice(2, -2)))
     else if (t[0] === '*' || t[0] === '_') out.push(h('em', {}, t.slice(1, -1)))   // *italic* or _italic_
-    else if (t[0] === '[') {
+    else if (t[0] === '[') { // a link with words of its own: where it really goes is shown too
       const [, label, url] = /^\[([^\]]+)\]\((.+)\)$/.exec(t)
-      out.push(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, label))
+      out.push(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', title: url }, label))
+      if (label.trim() !== url) out.push(h('span', { class: 'link-host' }, ' (' + hostOf(url) + ')'))
     } else out.push(h('a', { href: t, target: '_blank', rel: 'noopener noreferrer' }, t))
     last = m.index + t.length
   }
@@ -134,72 +135,180 @@ function newer (latest, current) { // is release `latest` (v1.2.3) newer than wh
 }
 function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB' }
 function plural (n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')) }
+function hostOf (url) { try { return new URL(url).hostname } catch (e) { return url } }
 
 // --- talking to the server ---------------------------------------------------------------------------------------
+const NOT_ANSWERING = 'cage isn’t answering. Open the cage shortcut, or run cage ui.'
+const OLD_APP = 'cage was updated, but its web app is still the old one. Run cage ui (or open the cage shortcut) to restart it.'
+let OLD = false   // the web app answering is older than this page: it would drop a question sent the new way ("text")
 async function api (path, opts = {}) {
-  const res = await fetch(path, {
-    method: opts.method || 'GET',
-    headers: { 'X-Cage-Token': TOKEN, 'Content-Type': 'application/json' },
-    body: opts.body ? JSON.stringify(opts.body) : undefined
-  })
+  if (OLD && opts.body && opts.body.text !== undefined) throw new Error(OLD_APP)
+  let res
+  try {
+    res = await fetch(path, {
+      method: opts.method || 'GET',
+      headers: { 'X-Cage-Token': TOKEN, 'Content-Type': 'application/json' },
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    })
+  } catch (e) { // the browser's own words ("Failed to fetch") say nothing
+    const err = new Error(NOT_ANSWERING)
+    err.down = true
+    throw err
+  }
   if (res.status === 401) { locked(); throw new Error('locked') }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || res.statusText)
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText)
+    err.status = res.status
+    throw err
+  }
   return data
 }
 let BOOTED = ''   // the cage version this page came with; after an update, the page reloads to get the new one
+let FAILS = 0     // refreshes in a row that got no answer at all: after two, the page says so
+let DOWN = false
+// someone is typing in this, or picking from this list. A switch that has focus isn't, and nor is a list whose change
+// cage is making (aria-busy): both can be drawn again from the state.
+function typing (el) {
+  if (!el) return false
+  if (el.tagName === 'SELECT') return el.getAttribute('aria-busy') !== 'true'   // its open list would close in your hands
+  return el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|file|range|color)$/.test(el.type))
+}
+let UNSAVED = null   // the open page's "is there something you wrote and didn't save?", if it has one
+function unsaved () { return !!UNSAVED && UNSAVED() }
 async function refresh () {
   try {
     STATE = await api('/api/state')
+    FAILS = 0
+    notice(OLD ? 'old' : STATE.stale ? 'slow' : '')
+    if (OLD) reattach()   // restarted yet?
     BOOTED = BOOTED || STATE.version
-    if (STATE.version !== BOOTED && !job && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) {
+    if (STATE.version !== BOOTED && !running() && !typing(document.activeElement) && !unsaved()) {
       BOOTED = STATE.version   // once: the server restarts itself within seconds of an update (host/ui/server.py)
       setTimeout(() => location.reload(), 4000)
     }
     render()
     if (CHAT) drawChatState(CHAT)
     liveConnect()
-  } catch (e) { if (e.message !== 'locked') console.warn(e) }
+  } catch (e) {
+    if (e.message === 'locked') return
+    if (!e.down) { FAILS = 0; notice('slow') }   // the web app answers, but cage behind it was too slow (or failed)
+    else if (++FAILS >= 2) notice('down')
+    console.warn(e)
+  }
 }
-function locked () {
+// The line at the top when cage itself is in the way: not answering at all (dots greyed, sending off), or slow
+function notice (kind) {
+  const el = document.getElementById('notice')
+  const down = kind === 'down'
+  document.body.classList.toggle('has-notice', !!kind)
+  if (down !== DOWN) {
+    DOWN = down
+    document.body.classList.toggle('is-down', down)
+    document.querySelectorAll('.composer .send').forEach((b) => { b.disabled = down || b.hasAttribute('data-idle') })
+    if (CHAT) drawChatState(CHAT)
+  }
+  el.hidden = !kind
+  if (!kind || el.dataset.kind === kind) return
+  el.dataset.kind = kind
+  el.className = 'notice ' + (down ? 'bad' : 'warn')
+  el.replaceChildren(icon(down ? 'circle-alert' : kind === 'old' ? 'refresh-cw' : 'loader-circle'), h('span', { class: 'grow' }, down
+    ? [h('b', {}, 'cage isn’t answering.'), ' Open the cage shortcut, or run ', h('code', {}, 'cage ui'), '. Trying again…']
+    : kind === 'old' ? [h('b', {}, 'cage was updated, but its web app is still the old one.'), ' Run ', h('code', {}, 'cage ui'), ' (or open the cage shortcut) to restart it.']
+      : 'cage is slow to answer, so what you see may be a little out of date.'))
+}
+function locked (text) {
   document.body.classList.add('is-locked')
   const main = document.getElementById('main')
   main.replaceChildren(document.getElementById('tpl-locked').content.cloneNode(true))
+  if (text) main.querySelector('.locked p').textContent = text
 }
-function watch (id, onEvent) { // a job's events, as they happen
+function watch (id, onEvent) { // a job's events, as they happen (all of them, from the start)
   const es = new EventSource(`/api/jobs/${id}/events?from=0&token=${encodeURIComponent(TOKEN)}`)
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data)
     if (ev.t === 'exit') es.close()
     onEvent(ev)
   }
+  es.onerror = () => { if (es.readyState === EventSource.CLOSED) onEvent({ t: 'gone' }) }   // cage forgot it (it restarted)
   return es
 }
 
 // --- jobs: a cage command, as a conversation in the side panel ----------------------------------------------------
+// One at a time. Closing the panel only hides it: the command carries on, a pill at the top brings it back (and finds
+// it again after a reload). Stop is the only way to end one early.
 const dlg = document.getElementById('job')
 const logEl = document.getElementById('job-log')
+const pill = document.getElementById('job-pill')
 let job = null
+function running () { return !!job && !job.done }
 function setStatus (kind, text) {
   const s = document.getElementById('job-status')
   s.className = 'job-status ' + kind
   s.replaceChildren(kind === 'running' ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : icon(kind === 'done' ? 'circle-check' : 'circle-alert'), h('span', {}, text))
   dlg.classList.toggle('running', kind === 'running')
   document.getElementById('job-cancel').hidden = kind !== 'running'
+  document.getElementById('job-hide').hidden = kind !== 'running'
   document.getElementById('job-close').hidden = kind === 'running'
+  const x = document.getElementById('job-x')
+  x.setAttribute('aria-label', kind === 'running' ? 'Hide' : 'Dismiss')
+  x.title = kind === 'running' ? 'Hide (Esc). It keeps going.' : 'Dismiss (Esc)'
+}
+function drawPill () { // a job that's still going (or just finished) while its panel is hidden
+  const show = !!job && !!job.hidden
+  pill.hidden = !show
+  document.body.classList.toggle('has-pill', show)
+  if (!show) return
+  const needs = !job.done && !!logEl.querySelector('.ask-box:not(.skip-box)')   // a question still waiting for an answer
+  const [cls, ic, text] = !job.done ? (needs ? ['needs', icon('circle-question-mark'), 'Waiting for you: ' + job.title] : ['', h('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Working: ' + job.title])
+    : job.code ? ['bad', icon('circle-alert'), 'Didn’t work: ' + job.title] : ['ok', icon('circle-check'), 'Done: ' + job.title]
+  pill.className = 'job-pill ' + cls
+  pill.title = 'Show what it’s doing'
+  pill.replaceChildren(ic, h('span', { class: 'pill-text' }, text), h('span', { class: 'pill-show', 'aria-hidden': 'true' }, 'Show'))
+}
+function showJob () {
+  if (!job) return
+  job.hidden = false
+  drawPill()
+  if (!dlg.open) dlg.showModal()
+  if (job.fitTerm && !document.getElementById('job-term').hidden) setTimeout(job.fitTerm, 220)
+  scrollDown()
+}
+function forgetJob () {
+  if (job) {
+    if (job.es) job.es.close()
+    if (job.term) job.term.dispose()
+    clearTimeout(job.fade)
+  }
+  job = null
+  drawPill()
+}
+function sheet (title) { // an empty side panel, for a new job
+  const termEl = document.getElementById('job-term')
+  logEl.replaceChildren()
+  termEl.hidden = true
+  termEl.replaceChildren()
+  dlg.classList.remove('wide')
+  document.getElementById('job-title').textContent = title
+  setStatus('running', 'Working…')
 }
 // Signing in without a terminal: a vendor's sign-in prints a link, maybe a code, maybe asks for one back. The panel
 // shows those as a button, a code to copy and a box to paste into; the terminal itself is one click away.
 const SIGNIN_JOBS = ['login', 'add', 'onboard']
+// Where each vendor signs you in (and its subdomains: Claude Code's own sign-in pages are on claude.com and
+// platform.claude.com). A link to anywhere else is still shown, but not as the big button, and with a warning: it
+// comes from the agent's VM, which an agent that read the wrong web page could have changed.
+const SIGNIN_HOSTS = ['claude.com', 'claude.ai', 'console.anthropic.com', 'auth.openai.com', 'chatgpt.com', 'cursor.com', 'accounts.google.com']
 const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>78]/g
-function signinParts (plain) { // what a sign-in printed: {url, code, paste}
+function signinParts (plain) { // what a sign-in printed: {url, code, paste, known}
   const urls = [...plain.matchAll(/https:\/\/[^\s"'<>]+/g)].map((m) => m[0].replace(/[).,;:]+$/, ''))
   const url = urls.reverse().find((u) => /oauth|authori[sz]e|login|device|signin|sign-in|activate|\bauth\b|accounts\./i.test(u)) || ''
   const lines = plain.split('\n')
   let code = ''
   lines.forEach((l, i) => { if (/code/i.test(l)) { const m = (l + ' ' + (lines[i + 1] || '')).match(/\b([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b/); if (m) code = m[1] } })
   const paste = /paste|authori[sz]ation code|enter (the |your )?code|code here/i.test(lines.slice(-8).join('\n'))
-  return { url, code, paste }
+  const host = url ? hostOf(url).toLowerCase() : ''
+  return { url, code, paste, host, known: SIGNIN_HOSTS.some((x) => host === x || host.endsWith('.' + x)) }
 }
 function signinAssistant (agent) {
   const box = h('div', { class: 'signin' }, h('p', { class: 'muted small signin-wait' }, h('span', { class: 'spinner' }), 'Starting the sign-in…'))
@@ -219,7 +328,7 @@ function signinAssistant (agent) {
   }
   A.found = () => found
   A.started = () => /\S/.test(text.replace(ANSI, ''))
-  function draw ({ url, code, paste }) {
+  function draw ({ url, code, paste, host, known }) {
     const qr = h('div', { class: 'signin-qr', hidden: true })
     const q = qrcode(0, 'M'); q.addData(url); q.make()
     qr.append(h('img', { src: q.createDataURL(5, 2), alt: 'QR code for the sign-in page' }), h('span', { class: 'small muted' }, 'Scan with your phone’s camera'))
@@ -242,12 +351,15 @@ function signinAssistant (agent) {
     } else {
       second = [h('b', {}, 'Approve, then come back'), h('p', { class: 'small muted' }, 'This finishes by itself once you’ve signed in there.')]
     }
+    const vendor = (AGENT[agent] || {}).vendor || 'your AI company'
     box.replaceChildren(
       h('div', { class: 'signin-step' }, h('span', { class: 'step-num' }, '1'), h('div', { class: 'grow' }, h('b', {}, 'Open the sign-in page'),
-        h('p', { class: 'small muted' }, 'Sign in there with the account that has your plan.'),
-        h('div', { class: 'row' }, h('a', { class: 'btn primary', href: url, target: '_blank', rel: 'noopener noreferrer' }, icon('external-link'), 'Open sign-in page'),
+        known ? h('p', { class: 'small muted' }, 'Sign in there with the account that has your plan.')
+          : h('p', { class: 'note warn signin-warn' }, icon('triangle-alert'), h('span', {}, `This link goes to ${host}, not ${vendor}. Don’t sign in there unless you expected it.`)),
+        h('div', { class: 'row' }, h('a', { class: 'btn' + (known ? ' primary' : ''), href: url, target: '_blank', rel: 'noopener noreferrer' }, icon('external-link'), 'Open sign-in page'),
           btn('Copy link', (e) => { navigator.clipboard.writeText(url).then(() => { e.currentTarget.lastChild.textContent = 'Copied' }).catch(() => {}) }, 'sm ghost', 'copy'),
-          btn('On your phone', () => { qr.hidden = !qr.hidden }, 'sm ghost', 'qr-code')), qr)),
+          btn('On your phone', () => { qr.hidden = !qr.hidden }, 'sm ghost', 'qr-code')),
+        h('p', { class: 'small muted signin-host' }, 'Goes to ', h('b', {}, host)), qr)),
       h('div', { class: 'signin-step' }, h('span', { class: 'step-num' }, '2'), h('div', { class: 'grow' }, second)),
       h('button', { type: 'button', class: 'linkish small muted details-toggle', onclick: () => revealTerminal() }, 'Show what it’s doing'))
   }
@@ -261,23 +373,34 @@ function revealTerminal () {
   if (job.fitTerm) setTimeout(job.fitTerm, 220)
 }
 
-async function runJob (args, title, onDone) {
-  if (job && !job.done) return
-  const termEl = document.getElementById('job-term')
-  logEl.replaceChildren()
-  termEl.hidden = true
-  termEl.replaceChildren()
-  dlg.classList.remove('wide')
-  document.getElementById('job-title').textContent = title || ('cage ' + args.join(' '))
-  setStatus('running', 'Working…')
+// A sign-in shows the helper above (not for Antigravity, whose sign-in is a terminal screen)
+function assisted (args) { return SIGNIN_JOBS.includes(args[0]) && !args.includes('antigravity') }
+// text: a question for `ask` or `mask try`, which the server hands to cage in a file instead of on its command line
+async function runJob (args, title, onDone, text) {
+  if (running()) { showJob(); return }   // one at a time: the one still going comes back instead
+  forgetJob()
+  title = title || ('cage ' + args.join(' '))
+  sheet(title)
   dlg.showModal()
   let id
-  const assist = SIGNIN_JOBS.includes(args[0]) && !args.includes('antigravity')
-  try { id = (await api('/api/jobs', { method: 'POST', body: { args, cols: assist ? 400 : 100 } })).id } catch (e) {
+  try { id = (await api('/api/jobs', { method: 'POST', body: { args, title, text, cols: assisted(args) ? 400 : 100 } })).id } catch (e) {
+    BUSY = ''
     logEl.append(msg('bad', e.message)); setStatus('failed', 'That didn’t work'); return
   }
-  job = { id, done: false, term: null, onDone, signin: assist ? signinAssistant() : null }
+  attachJob(id, args, title, onDone)
+}
+function attachJob (id, args, title, onDone) {
+  job = { id, args, title, done: false, term: null, onDone, signin: assisted(args) ? signinAssistant(args.find((a) => AGENT[a])) : null }
   job.es = watch(id, handle)
+  drawPill()
+}
+function openJob (id, args, title, show) { // a job that's already running (after a reload), or one that's done (its log)
+  if (job && job.id === id) { if (show) showJob(); return }
+  if (running()) { if (show) showJob(); return }
+  forgetJob()
+  sheet(title)
+  attachJob(id, args, title)
+  if (show) showJob(); else { job.hidden = true; drawPill() }
 }
 async function quietJob (args) { // a command whose output nobody needs to see (marking events as seen)
   try { await api('/api/jobs', { method: 'POST', body: { args } }) } catch (e) {}
@@ -294,6 +417,7 @@ function scrollDown () { logEl.scrollTop = logEl.scrollHeight }
 function send (payload) { return api(`/api/jobs/${job.id}/input`, { method: 'POST', body: payload }).catch(() => {}) }
 function handle (ev) {
   if (!job) return
+  if (ev.t !== 'gone') job.got = true
   if (ev.t === 'raw') {
     const bytes = Uint8Array.from(atob(ev.data), (c) => c.charCodeAt(0))
     terminal().write(bytes)
@@ -308,15 +432,30 @@ function handle (ev) {
     }
     return
   }
-  if (ev.t === 'exit') {
-    job.done = true
+  if (ev.t === 'input') { // an answer went in (from here, or another tab): its question isn't waiting any more
+    const box = logEl.querySelector('.ask-box:not(.skip-box):not(.flush)')
+    if (box) box.replaceWith(h('div', { class: 'answered' }, 'Answered'))
+    if (job.hidden) drawPill()
+    return
+  }
+  if (ev.t === 'exit' || ev.t === 'gone') {
+    const J = job
+    J.done = true
+    J.code = ev.t === 'gone' ? -1 : ev.code
     logEl.querySelectorAll('.skip-box').forEach((b) => b.remove())
     logEl.querySelectorAll('.ask-box input, .ask-box button').forEach((el) => { el.disabled = true })
-    setStatus(ev.code ? 'failed' : 'done', ev.code ? 'That didn’t work — see above' : 'Done.')
+    // gone: cage forgot it, because it restarted while this went on, or (when nothing came at all) it ended a while ago
+    if (ev.t === 'gone' && !J.got) logEl.append(msg('hint', 'cage keeps what something did for 10 minutes after it ends.'))
+    const gone = J.got ? 'cage restarted before this finished' : 'This isn’t kept any more'
+    setStatus(J.code ? 'failed' : 'done', ev.t === 'gone' ? gone : J.code ? 'That didn’t work — see above' : 'Done.')
     scrollDown()
-    document.getElementById('job-close').focus()
+    if (dlg.open) document.getElementById('job-close').focus()
+    SEEN = ''   // redraw from what's true now: a switch shows what cage did, not what was clicked
+    BUSY = ''
     refresh()
-    if (!ev.code && job.onDone) job.onDone()
+    if (!J.code && J.onDone) J.onDone()
+    drawPill()
+    if (job === J && J.hidden && !J.code) J.fade = setTimeout(() => { if (job === J && J.hidden) forgetJob() }, 6000)
     return
   }
   const e = ev.event
@@ -346,6 +485,7 @@ function handle (ev) {
     default: logEl.append(msg('say', text))
   }
   scrollDown()
+  if (job.hidden && ['prompt', 'confirm'].includes(e.t)) drawPill()   // it waits for you now
 }
 function askBox (question, secret) {
   logEl.append(msg('ask', question.replace(/[\s:]+$/, '')))
@@ -383,24 +523,42 @@ function terminal () {
   const fit = new FitAddon.FitAddon()
   term.loadAddon(fit)
   term.open(el)
-  const resize = () => { try { fit.fit(); api(`/api/jobs/${job.id}/resize`, { method: 'POST', body: { cols: term.cols, rows: term.rows } }).catch(() => {}) } catch (e) {} }
+  const id = job.id
+  const resize = () => { try { fit.fit(); api(`/api/jobs/${id}/resize`, { method: 'POST', body: { cols: term.cols, rows: term.rows } }).catch(() => {}) } catch (e) {} }
   if (!job.signin) setTimeout(resize, 220)   // after the panel has widened
   job.fitTerm = resize
-  window.addEventListener('resize', () => { if (!el.hidden) resize() })
+  window.addEventListener('resize', () => { if (job && job.term === term && !el.hidden) resize() })   // (this job's terminal only)
   term.onData((d) => send({ raw: btoa(String.fromCharCode(...new TextEncoder().encode(d))) }))
   if (!job.signin) term.focus()
   job.term = term
   return term
 }
-document.getElementById('job-cancel').addEventListener('click', () => { if (job && !job.done) api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }).catch(() => {}) })
+// Stopping these halfway can leave things half done, so Stop asks first
+const STOP_ASK = {
+  add: 'Stop adding it? It may be left half set up. Adding it again finishes the job.',
+  update: 'Stop the update? cage may be left half updated until you update again.',
+  restore: 'Stop restoring? Your settings may be left half restored.',
+  backup: 'Stop the backup? Nothing will be saved.'
+}
+document.getElementById('job-cancel').addEventListener('click', () => {
+  if (!running()) return
+  if (STOP_ASK[job.args[0]] && !confirm(STOP_ASK[job.args[0]])) return
+  api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }).catch(() => {})
+})
 document.getElementById('job-close').addEventListener('click', () => dlg.close())
+document.getElementById('job-hide').addEventListener('click', () => dlg.close())
 document.getElementById('job-x').addEventListener('click', () => dlg.close())
-dlg.addEventListener('close', () => {
-  if (job && !job.done) api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }).catch(() => {})
-  if (job && job.es) job.es.close()
-  if (job && job.term) job.term.dispose()
-  job = null
+pill.addEventListener('click', showJob)
+dlg.addEventListener('close', () => { // Esc, the X, Hide or Close: a job still going only goes out of sight
+  SEEN = ''
+  if (running()) {
+    job.hidden = true
+    drawPill()
+  } else forgetJob()
   refresh()
+})
+window.addEventListener('pagehide', () => { // a log or a terminal is only there to be looked at
+  if (running() && ['logs', 'shell'].includes(job.args[0])) navigator.sendBeacon(`/api/jobs/${job.id}/cancel?token=${encodeURIComponent(TOKEN)}`, new Blob(['{}'], { type: 'text/plain' }))
 })
 
 // --- building blocks ---------------------------------------------------------------------------------------------
@@ -424,8 +582,20 @@ const PRETTY = { github: 'GitHub', gitlab: 'GitLab', zapier: 'Zapier', notion: '
 function pretty (name) { return PRETTY[name] || name.charAt(0).toUpperCase() + name.slice(1) }
 function monogram (name) { return h('span', { class: 'mono-tile', 'aria-hidden': 'true' }, name.slice(0, 1).toUpperCase()) }
 function setting (title, sub, control, top) { return h('div', { class: 'setting' + (top ? ' top' : '') }, h('div', { class: 'what' }, h('b', {}, title), sub ? h('span', {}, sub) : null), h('div', { class: 'control' }, control)) }
+// Switches and lists that change a setting show what's true, not what was clicked: the click is put back at once and
+// the control waits (aria-busy) until the state says the change was made; a stopped or failed change never shows.
+let BUSY = ''   // the control whose change cage is making (by its label), until that job ends
+function asked (el, was) {
+  if (el.type === 'checkbox') el.checked = was; else el.value = was
+  if (running()) return   // one job at a time: the one still going comes back instead, and this changes nothing
+  BUSY = el.getAttribute('aria-label') || ''
+  el.setAttribute('aria-busy', 'true')
+}
+function busy (label) { return BUSY && BUSY === label ? 'true' : null }
 function toggle (on, onChange, label) { // a switch, on a real checkbox
-  return h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: on, 'aria-label': label || null, onchange: (e) => onChange(e.target.checked) }), h('span', { class: 'track', 'aria-hidden': 'true' }))
+  return h('label', { class: 'switch' }, h('input', {
+    type: 'checkbox', checked: on, 'aria-label': label || null, 'aria-busy': busy(label), onchange: (e) => { asked(e.target, on); onChange(!on) }
+  }), h('span', { class: 'track', 'aria-hidden': 'true' }))
 }
 function seg (options, current, onPick) {
   return h('div', { class: 'seg', role: 'group' }, options.map(([v, label]) =>
@@ -440,7 +610,7 @@ function scope (name) { // "for which agents": all of them, unless you open it a
       summary.textContent = on.length === boxes.length ? 'All agents' : on.length ? on.join(', ') : 'Nobody'
     }
   }), avatar(a.name, 16), a.label))
-  return h('details', { class: 'scope' }, summary, h('div', { class: 'scope-menu' }, boxes))
+  return h('details', { class: 'scope', 'data-open': name }, summary, h('div', { class: 'scope-menu' }, boxes))
 }
 function picked (form, name) {
   const all = [...form.querySelectorAll(`input[name=${name}]`)]
@@ -474,12 +644,12 @@ function composer () {
     return h('label', { class: 'pill' + (ready ? '' : ' disabled'), title: ready ? '' : nameOf(a.name) + ' is ' + STATUS[statusOf(a)].label.toLowerCase() },
       h('input', { type: 'checkbox', name: 'ask-who', value: a.name, checked: ready, disabled: !ready }), avatar(a.name, 16), h('span', {}, a.label))
   })
-  const sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Ask', title: 'Ask (Enter)', disabled: !awake.length }, icon('arrow-up'))
+  const sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Ask', title: 'Ask (Enter)', 'data-idle': !awake.length, disabled: !awake.length || DOWN }, icon('arrow-up'))
   const form = h('form', { class: 'composer' }, ta, h('div', { class: 'composer-bar' }, h('div', { class: 'pills' }, pills), sendBtn))
   const submit = () => {
     const q = ta.value.trim()
     const who = [...form.querySelectorAll('input[name=ask-who]:checked')].map((i) => i.value)
-    if (!q || !who.length || (ASK && !ASK.rounds.every((r) => r.done))) return
+    if (!q || !who.length || DOWN || (ASK && !ASK.rounds.every((r) => r.done))) return
     ta.value = ''
     ask(q, who)
   }
@@ -500,9 +670,9 @@ async function askRound (q, prompt) {
   thread.compare = null
   drawAnswers()
   try {
-    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', prompt, ...thread.agents] } })
+    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', ...thread.agents], text: prompt } })
     watch(id, (ev) => {
-      if (ev.t === 'exit') { r.done = true; if (ev.code && !r.error) r.error = 'Your agents couldn’t be asked.'; askSave(thread) } else if (ev.t === 'event') {
+      if (ev.t === 'exit' || ev.t === 'gone') { r.done = true; if ((ev.code || ev.t === 'gone') && !r.error) r.error = 'Your agents couldn’t be asked.'; askSave(thread) } else if (ev.t === 'event') {
         const e = ev.event
         if (e.t === 'asking') r.agents = e.agents
         else if (e.t === 'answer') r.answers[e.agent] = e.text || ''
@@ -513,13 +683,20 @@ async function askRound (q, prompt) {
     })
   } catch (e) { r.error = e.message; r.done = true; drawAnswers() }
 }
-const MAX_PROMPT = 90000
-function transcript (thread) { // the rounds so far, for a follow-up or a comparison
-  return thread.rounds.map((r, i) => `Question ${i + 1}: ${r.q}\n\n` + r.agents.map((a) => `${nameOf(a)} answered:\n${r.answers[a] || '(no answer)'}`).join('\n\n')).join('\n\n---\n\n').slice(-MAX_PROMPT)
+// How long a question can be, in UTF-8 bytes as the server counts them (server.py's MAX_ASK): each agent's CLI gets it
+// as one argument, which Linux caps at 128 KiB. In Cyrillic or Chinese, that's far fewer characters than in English.
+const MAX_ASK = 120 * 1024
+const utf8 = (s) => new TextEncoder().encode(s)
+function transcript (thread, room) { // the rounds so far, for a follow-up or a comparison: as much of the end as fits
+  const all = utf8(thread.rounds.map((r, i) => `Question ${i + 1}: ${r.q}\n\n` + r.agents.map((a) => `${nameOf(a)} answered:\n${r.answers[a] || '(no answer)'}`).join('\n\n')).join('\n\n---\n\n'))
+  if (all.length <= room) return new TextDecoder().decode(all)
+  const cut = Math.max(0, room - 3)   // the start goes, and "…" says so (a character split in two goes too)
+  return '…' + new TextDecoder().decode(all.subarray(all.length - cut)).replace(/^\uFFFD+/, '')
 }
+function withTranscript (head, thread, tail) { return head + transcript(thread, MAX_ASK - utf8(head + tail).length) + tail }
 function followUp (text) {
-  const prompt = `You and other AI assistants were asked the questions below. Their answers are included, so you can build on them or disagree.\n\n${transcript(ASK)}\n\n---\n\nFollow-up question: ${text}`
-  askRound(text, prompt)
+  askRound(text, withTranscript('You and other AI assistants were asked the questions below. Their answers are included, so you can build on them or disagree.\n\n',
+    ASK, `\n\n---\n\nFollow-up question: ${text}`))
 }
 async function compare () { // one agent reads all the answers: where they agree, where they don't
   const thread = ASK
@@ -528,13 +705,13 @@ async function compare () { // one agent reads all the answers: where they agree
   if (!by) return
   thread.compare = { by, text: '', done: false, error: '' }
   drawAnswers()
-  const prompt = `Several AI assistants answered the same question. Compare their answers for the person who asked: in a few short bullets, where they agree, where they disagree (and who is more likely right), and anything worth double-checking. Don't repeat the answers.\n\n${transcript({ rounds: [r] })}`
+  const text = withTranscript(`Several AI assistants answered the same question. Compare their answers for the person who asked: in a few short bullets, where they agree, where they disagree (and who is more likely right), and anything worth double-checking. Don't repeat the answers.\n\n`, { rounds: [r] }, '')
   try {
-    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', prompt, by] } })
+    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['ask', by], text } })
     watch(id, (ev) => {
       const c = thread.compare
       if (!c) return
-      if (ev.t === 'exit') { c.done = true; if (!c.text) c.error = c.error || 'No comparison came back.' } else if (ev.t === 'event' && ev.event.t === 'answer') c.text = ev.event.text || ''
+      if (ev.t === 'exit' || ev.t === 'gone') { c.done = true; if (!c.text) c.error = c.error || 'No comparison came back.' } else if (ev.t === 'event' && ev.event.t === 'answer') c.text = ev.event.text || ''
       else if (ev.t === 'event' && ev.event.t === 'bad') c.error = ev.event.text
       if (ASK === thread) drawAnswers()
     })
@@ -567,7 +744,7 @@ function roundView (r, i) {
 }
 function answers () {
   const past = askHistory().filter((t) => !ASK || t.id !== ASK.id)
-  const history = past.length ? h('details', { class: 'disclosure history' }, h('summary', {}, icon('rotate-ccw'), `Earlier questions (${past.length})`),
+  const history = past.length ? h('details', { class: 'disclosure history', 'data-open': 'ask-history' }, h('summary', {}, icon('rotate-ccw'), `Earlier questions (${past.length})`),
     h('ul', { class: 'list' }, past.map((t) => h('li', {}, h('span', { class: 'grow' }, h('b', {}, t.rounds[0].q), h('span', { class: 'sub' }, `${t.rounds.length > 1 ? plural(t.rounds.length - 1, 'follow-up') + ' · ' : ''}${t.agents.map(nameOf).join(', ')} · ${ago(t.id / 1000)}`)),
       btn('Open', () => { ASK = { ...t, compare: null }; drawAnswers() }, 'sm ghost')))),
     h('button', { type: 'button', class: 'linkish small muted', onclick: () => { try { localStorage.removeItem('cage-asks') } catch (e) {} drawAnswers() } }, 'Forget these')) : null
@@ -639,14 +816,13 @@ function pageWelcome () {
     restoreBox())
 }
 function restoreBox () { // moving to a new computer: put a backup back before anything else
-  const file = h('input', { type: 'text', placeholder: '/mnt/c/Users/you/Documents/cage backups/cage-….cagebackup', 'data-keep': 'restore' })
-  const form = h('form', { class: 'inline-form' }, field('Or the full path of a backup file', file), h('button', { type: 'submit', class: 'btn' }, 'Restore'))
-  form.addEventListener('submit', (e) => { e.preventDefault(); if (file.value.trim()) runJob(['restore', file.value.trim()], 'Restoring your backup') })
-  return h('details', { class: 'disclosure' }, h('summary', {}, icon('archive'), 'Moving from another computer? Restore a backup'),
+  // Only from cage's backups folder: restoring runs the backup's settings, so the app won't take a file from anywhere
+  return h('details', { class: 'disclosure', 'data-open': 'restore' }, h('summary', {}, icon('archive'), 'Moving from another computer? Restore a backup'),
     h('p', { class: 'small muted' }, 'Your settings, keys, sign-ins, and each agent’s login and files.'),
     STATE.backups.files.length ? rows(STATE.backups.files.map((b) => h('li', {}, h('span', { class: 'grow' }, b.name, ' ', h('span', { class: 'muted small' }, ago(b.at))),
       btn('Restore', () => runJob(['restore', b.path], 'Restoring ' + b.name), 'sm')))) : null,
-    form)
+    h('div', { class: 'row restore-where' }, h('p', { class: 'small muted grow' }, 'Copy your backup file into ', h('code', {}, STATE.backups.dir), ', and it shows up here.'),
+      btn('Look again', () => refresh(), 'sm ghost', 'refresh-cw')))
 }
 
 // --- setting up: this computer, your agents, signing in, a little about you --------------------------------------------
@@ -752,8 +928,7 @@ function setupSignin () {
   ]
 }
 function setupAbout () {
-  const ta = h('textarea', { rows: 6, placeholder: 'e.g. I’m Sam, a contracts lawyer in Berlin. Short answers, British English, and cite your sources.', 'aria-label': 'About you' })
-  api('/api/memory/about').then((d) => { if (!ta.value && d.text && !/^# About me\s*(<!--[\s\S]*?-->)?\s*$/.test(d.text)) ta.value = d.text }).catch(() => {})
+  const ta = aboutBox('about-setup', { rows: 6, placeholder: 'e.g. I’m Sam, a contracts lawyer in Berlin. Short answers, British English, and cite your sources.', 'aria-label': 'About you' })
   return [
     h('h1', {}, 'A little about you'),
     h('p', { class: 'lede' }, 'Every agent reads this, so you don’t have to repeat yourself. Optional; you can change it any time under Memory.'),
@@ -762,14 +937,18 @@ function setupAbout () {
       btn('Back', () => setupGo('signin'), 'ghost'),
       btn('Skip', () => setupGo('done'), ''),
       btn('Save and continue', async () => {
-        if (ta.value.trim()) { try { await api('/api/memory/about', { method: 'PUT', body: { text: '# About me\n\n' + ta.value.trim() + '\n' } }) } catch (e) { alert(e.message); return } }
+        const text = aboutText('about-setup').trim()
+        if (text && text !== ABOUT.saved) {
+          const body = /^# About me/.test(text) ? text + '\n' : '# About me\n\n' + text + '\n'
+          try { await api('/api/memory/about', { method: 'PUT', body: { text: body } }); ABOUT.saved = body } catch (e) { alert(e.message); return }
+        }
         setupGo('done')
       }, 'primary'))
   ]
 }
 function setupDone () {
   const first = agentsOn().find((a) => a.state === 'ready') || agentsOn()[0]
-  const auto = h('input', { type: 'checkbox', checked: true })
+  const auto = h('input', { type: 'checkbox', name: 'start-at-login', value: 'on', checked: true })
   return [
     h('div', { class: 'done-hero' }, h('img', { src: 'logo.svg', alt: '', width: 72, height: 72 }), h('h1', {}, 'You’re all set'),
       h('p', { class: 'lede' }, first ? `Chat with ${first.label} right here. Its page also has its files and settings.` : 'Add an agent any time from the sidebar.')),
@@ -814,7 +993,7 @@ function chatOpen (a) {
   C.ta = h('textarea', { rows: 1, placeholder: 'Message ' + nameOf(a) + '…', 'aria-label': 'Message ' + nameOf(a) })
   C.chips = h('div', { class: 'attached' })
   const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => { attach(C, picker.files); picker.value = '' } })
-  C.sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send', title: 'Send (Enter)' }, icon('arrow-up'))
+  C.sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send', title: 'Send (Enter)', disabled: DOWN }, icon('arrow-up'))
   C.form = h('form', { class: 'composer chat-composer' }, C.chips, C.ta, h('div', { class: 'composer-bar' },
     h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker,
     h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
@@ -837,21 +1016,32 @@ function chatClose () {
   CHAT = null
 }
 function grow (ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 260) + 'px' }
-async function chatLoad (C) { // the end of the conversation; what comes next arrives on the live stream
+async function chatLoad (C, again) { // the end of the conversation; what comes next arrives on the live stream
+  if (again) { C.loaded = false; C.waiting = [] }   // read it all again (a new log): lines that arrive meanwhile wait
+  let d
   try {
-    const d = await api(`/api/chat/${C.agent}/history?tail=600000`)
+    d = await api(`/api/chat/${C.agent}/history?tail=600000`)
     if (CHAT !== C) return
-    for (const e of d.entries) chatAdd(C, e, true)
-    C.offset = d.o
-    LIVE.offsets[C.agent] = Math.max(LIVE.offsets[C.agent] ?? -1, d.o)
-  } catch (e) { if (CHAT === C) C.retry = setTimeout(() => chatLoad(C), 3000); return }
+  } catch (e) { if (CHAT === C) C.retry = setTimeout(() => chatLoad(C, again), 3000); return }
+  const near = nearEnd()
+  C.list.replaceChildren()
+  C.previews.clear()
+  C.shared = []
+  C.lastWho = ''
+  if (d.more) add(C, h('div', { class: 'chat-divider earlier' }, h('span', {}, 'Earlier messages aren’t shown here')), '')
+  for (const e of d.entries) chatAdd(C, e, true)
+  C.offset = d.o
+  LIVE.offsets[C.agent] = Math.max(LIVE.offsets[C.agent] ?? -1, d.o)
   C.loaded = true
+  for (const w of C.waiting || []) chatLive(C, w)   // what the live stream brought while this was loading
+  C.waiting = []
   drawChatState(C)
-  scrollEnd(true)
+  if (!again || near) scrollEnd(true)
   liveConnect()
 }
 function chatLive (C, d) { // a new line in the open chat
-  if (!C.loaded || d.o <= C.offset) return
+  if (!C.loaded) { (C.waiting = C.waiting || []).push(d); return }
+  if (d.o <= C.offset) return
   C.offset = d.o
   const near = nearEnd()
   chatAdd(C, d.e, false)
@@ -897,7 +1087,7 @@ function chatAdd (C, e, history) {
       if (q) answered(q, e.label || e.action)
       break
     }
-    case 'error': add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
+    case 'error': C.typing.hidden = true; add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
     case 'status': C.connected = e.connected; break
   }
 }
@@ -994,32 +1184,47 @@ async function chatSend (C, text) {
   const msg = text !== undefined ? text : C.ta.value
   const files = C.attached.filter((f) => !f.uploading && f.path)
   if (!msg.trim() && !files.length) return
-  if (C.attached.some((f) => f.uploading)) return
+  if (C.attached.some((f) => f.uploading) || DOWN) return
   if (!a.enabled || a.state === 'login') { drawChatState(C, true); return }
   try {
     await api(`/api/chat/${C.agent}/send`, { method: 'POST', body: { text: msg, files: files.map(({ path, name, mime }) => ({ path, name, mime })) } })
   } catch (e) { alert(e.message); return }
   if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C) }
   C.typing.hidden = false
-  if (['asleep', 'none'].includes(a.state) && !C.waking) { // it waits in its folder; wake the agent up to read it
-    C.waking = true
-    api('/api/jobs', { method: 'POST', body: { args: ['up', C.agent] } }).catch(() => {})
-  }
+  if (['asleep', 'none'].includes(a.state) && !C.waking) wake(C)   // it waits in its folder until the agent is up
   drawChatState(C)
+}
+async function wake (C) { // wake the chat's agent up, and say so if that doesn't work
+  C.waking = true
+  C.woke = null
+  drawChatState(C)
+  try {
+    const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['up', C.agent] } })
+    watch(id, (ev) => {
+      if (ev.t !== 'exit' && ev.t !== 'gone') return
+      if (ev.code || ev.t === 'gone') { C.waking = false; C.woke = id; C.wokeAt = Date.now(); C.typing.hidden = true }
+      if (CHAT === C) drawChatState(C)
+    })
+  } catch (e) { C.waking = false; C.woke = 'none'; C.typing.hidden = true; drawChatState(C) }
 }
 // The line above the message box: what's in the way of a reply, if anything
 function drawChatState (C, nudge) {
   const a = agentOf(C.agent)
   if (!a) return
-  if (a.state === 'ready' || a.state === 'installing') C.waking = false
+  if (a.state === 'ready' || a.state === 'installing') { C.waking = false; C.woke = null }   // it's up (after all)
   const ban = (tone, ic, text, action) => { C.banner.className = 'chat-banner ' + tone; C.banner.replaceChildren(icon(ic), h('span', { class: 'grow' }, text), action || ''); C.banner.hidden = false }
   C.empty.hidden = C.list.childElementCount > 0 || !C.loaded
-  if (!a.enabled) ban('info', 'sparkles', `Add ${a.label} to chat with it. It uses ${a.plan}.`, btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'sm primary'))
+  if (DOWN) ban('bad', 'circle-alert', 'cage isn’t answering, so messages can’t go out right now.')
+  else if (!a.enabled) ban('info', 'sparkles', `Add ${a.label} to chat with it. It uses ${a.plan}.`, btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'sm primary'))
   else if (a.state === 'login') ban('warn', 'log-in', `Sign ${a.label} in first (it uses ${a.plan}).`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm primary'))
-  else if (C.waking) ban('info', 'power', `Waking ${a.label} up… your message goes as soon as it’s ready (about a minute).`)
+  else if (C.woke) {
+    ban('bad', 'circle-alert', `Couldn’t wake ${a.label}. Your message is waiting for it.`, h('span', { class: 'row' }, btn('Try again', () => wake(C), 'sm'),
+      C.woke !== 'none' && Date.now() - C.wokeAt < 9 * 60000 ? btn('See what happened', () => openJob(C.woke, ['up', a.name], 'Waking ' + a.label, true), 'sm ghost') : null))   // (kept 10 minutes)
+  } else if (C.waking) ban('info', 'power', `Waking ${a.label} up… your message goes as soon as it’s ready (about a minute).`)
   else if (a.state === 'asleep' || a.state === 'none') ban('idle', 'moon', `${a.label} is asleep. Sending a message wakes it up.`)
   else if (a.state === 'installing') ban('info', 'loader-circle', `${a.label} is getting ready (the first time takes a few minutes). You can write already.`)
   else if (a.state === 'stuck') ban('bad', 'circle-alert', `${a.label} is stuck.`, btn('Restart', () => runJob(['up', a.name], 'Restarting ' + a.label), 'sm'))
+  else if (C.connected === false) ban('warn', 'loader-circle', `${a.label}’s chat service is reconnecting. Your message goes as soon as it’s back.`)
   else C.banner.hidden = true
   if (nudge && !C.banner.hidden) { C.banner.classList.remove('nudge'); void C.banner.offsetWidth; C.banner.classList.add('nudge') }
 }
@@ -1250,7 +1455,11 @@ function agentSettings (a) {
   ]
 }
 function fallbackSelect (a, others) {
-  return h('select', { 'aria-label': 'Stand-in for ' + a.label, onchange: (e) => runJob(['fallback', a.name, e.target.value || 'off'], 'Stand-in for ' + a.label) },
+  return h('select', {
+    'aria-label': 'Stand-in for ' + a.label,
+    'aria-busy': busy('Stand-in for ' + a.label),
+    onchange: (e) => { const to = e.target.value; asked(e.target, a.fallback || ''); runJob(['fallback', a.name, to || 'off'], 'Stand-in for ' + a.label) }
+  },
     h('option', { value: '', selected: !a.fallback }, 'Nobody'),
     others.map((b) => h('option', { value: b.name, selected: a.fallback === b.name }, b.label)))
 }
@@ -1278,7 +1487,7 @@ function pageApps () {
   return h('div', { class: 'page' }, pageHead('Apps', 'Your email, calendar, GitHub and more, as tools your agents can use. Keys stay on this computer.'),
     section('Connected', '', h('div', { class: 'card flush' }, rows(list, 'No apps yet. Connect one below.'))),
     catalog.length ? section('Add an app', '', h('div', { class: 'tiles' }, catalog)) : null,
-    h('details', { class: 'disclosure' }, h('summary', {}, icon('plus'), 'Another app'), h('p', { class: 'small muted' }, 'Anything with a remote MCP server. cage asks for its key, or signs you in with your browser.'), custom))
+    h('details', { class: 'disclosure', 'data-open': 'another-app' }, h('summary', {}, icon('plus'), 'Another app'), h('p', { class: 'small muted' }, 'Anything with a remote MCP server. cage asks for its key, or signs you in with your browser.'), custom))
 }
 
 function pageSignins () {
@@ -1301,13 +1510,33 @@ function pageSignins () {
     section('API keys', 'For services your agents call directly. You type the key in the next step; it’s never shown again.', h('div', { class: 'card flush' }, rows(keys, 'None yet.'), kForm)))
 }
 
+// What you wrote about yourself: read once when you arrive (a redraw keeps what's in the box, see render()), and not
+// lost by accident: the page says when it isn't saved, and asks before you leave.
+const ABOUT = { saved: null, note: '', keep: '' }
+function aboutBox (keep, attrs) {
+  const ta = h('textarea', { ...attrs, 'data-keep': keep, oninput: () => aboutDrawn() })
+  if (ARRIVED || ABOUT.saved === null || ABOUT.keep !== keep) {
+    Object.assign(ABOUT, { saved: null, note: '', keep })
+    api('/api/memory/about').then((d) => {
+      ABOUT.saved = d.text || ''
+      const el = document.querySelector(`[data-keep="${keep}"]`)   // after a redraw, a new box
+      if (el && !el.value) el.value = keep === 'about' || !/^# About me\s*(<!--[\s\S]*?-->)?\s*$/.test(ABOUT.saved) ? ABOUT.saved : ''
+      aboutDrawn()
+    }).catch(() => {})
+  }
+  UNSAVED = () => { const v = aboutText(keep); return ABOUT.saved !== null && v.trim() !== '' && v !== ABOUT.saved }
+  return ta
+}
+function aboutText (keep) { const el = document.querySelector(`[data-keep="${keep}"]`); return el ? el.value : '' }   // the box now on the page
+function aboutDrawn () { const el = document.getElementById('about-status'); if (el) el.textContent = unsaved() ? 'Unsaved changes' : ABOUT.note }
 function pageMemory () {
   const S = STATE
-  const ta = h('textarea', { 'aria-label': 'About you', placeholder: 'Your name, what you do, how you like answers…', rows: 10 })
-  const status = h('span', { class: 'muted small' })
-  api('/api/memory/about').then((d) => { ta.value = d.text }).catch(() => {})
+  const ta = aboutBox('about', { 'aria-label': 'About you', placeholder: 'Your name, what you do, how you like answers…', rows: 10 })
+  const status = h('span', { class: 'muted small', id: 'about-status' }, unsaved() ? 'Unsaved changes' : ABOUT.note)
   const save = btn('Save', async () => {
-    try { await api('/api/memory/about', { method: 'PUT', body: { text: ta.value } }); status.textContent = 'Saved. Your agents see it the next time they wake up.' } catch (e) { status.textContent = e.message }
+    const text = aboutText('about')
+    try { await api('/api/memory/about', { method: 'PUT', body: { text } }); ABOUT.saved = text; ABOUT.note = 'Saved. Your agents see it the next time they wake up.' } catch (e) { ABOUT.note = e.message }
+    aboutDrawn()
   }, 'primary')
   return h('div', { class: 'page' }, pageHead('Memory', 'What all your agents know about you. They suggest new things; nothing is kept until you say so.'),
     section('Suggestions', '', h('div', { class: 'card row spread' },
@@ -1353,14 +1582,18 @@ function pageSettings () {
   const S = STATE
   const st = S.settings
   const masks = h('div', { class: 'checks' }, agentsOn().map((a) => h('label', { class: 'check' }, h('input', {
-    type: 'checkbox', checked: a.mask, onchange: (e) => runJob(['mask', e.target.checked ? 'on' : 'off', a.name], 'Privacy mask for ' + a.label)
+    type: 'checkbox',
+    checked: a.mask,
+    'aria-label': 'Mask for ' + a.label,
+    'aria-busy': busy('Mask for ' + a.label),
+    onchange: (e) => { asked(e.target, a.mask); runJob(['mask', a.mask ? 'off' : 'on', a.name], 'Privacy mask for ' + a.label) }
   }), avatar(a.name, 16), a.label)))
   const term = h('input', { type: 'text', placeholder: 'A client, a project, a person', required: true, 'data-keep': 'mask-term' })
   const termForm = h('form', { class: 'add-row tight' }, term, h('button', { type: 'submit', class: 'btn' }, 'Hide this too'))
   termForm.addEventListener('submit', (e) => { e.preventDefault(); runJob(['mask', 'add', term.value.trim()], 'Privacy mask') })
   const tryIn = h('input', { type: 'text', placeholder: 'Try: email bob@acme.com about Acme', 'data-keep': 'mask-try' })
   const tryForm = h('form', { class: 'add-row tight' }, tryIn, h('button', { type: 'submit', class: 'btn' }, 'Preview'))
-  tryForm.addEventListener('submit', (e) => { e.preventDefault(); if (tryIn.value) runJob(['mask', 'try', tryIn.value], 'What the AI company would see') })
+  tryForm.addEventListener('submit', (e) => { e.preventDefault(); if (tryIn.value) runJob(['mask', 'try'], 'What the AI company would see', null, tryIn.value) })
   const fallbacks = h('div', { class: 'stack tight' }, agentsOn().map((a) => {
     const others = agentsOn().filter((b) => b.name !== a.name)
     return h('div', { class: 'row' }, h('span', { class: 'fallback-who' }, avatar(a.name, 16), a.label), icon('chevron-right', 'muted'), others.length ? fallbackSelect(a, others) : h('span', { class: 'muted small' }, 'nobody else yet'))
@@ -1465,11 +1698,12 @@ function liveConnect (force) {
   const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? -1)).join(',')
   const es = new EventSource(`/api/chat/stream?from=${encodeURIComponent(from)}&token=${encodeURIComponent(TOKEN)}`)
   LIVE.es = es
+  es.onopen = () => { document.body.dataset.live = 'on' }
   es.onmessage = (m) => {
     const d = JSON.parse(m.data)
-    if (d.reset) {
+    if (d.reset) { // the VM started a new log (the old one is kept): the open chat is read again, nothing is lost
       LIVE.offsets[d.a] = 0
-      if (CHAT && CHAT.agent === d.a) { CHAT.list.replaceChildren(); CHAT.previews.clear(); CHAT.shared = []; CHAT.lastWho = ''; CHAT.offset = 0 }
+      if (CHAT && CHAT.agent === d.a) chatLoad(CHAT, true)
       return
     }
     if (!d.e || d.o <= (LIVE.offsets[d.a] ?? -1)) return
@@ -1477,7 +1711,7 @@ function liveConnect (force) {
     if (CHAT && CHAT.agent === d.a) chatLive(CHAT, d)
     heard(d.a, d.e)
   }
-  es.onerror = () => { es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
+  es.onerror = () => { document.body.dataset.live = 'off'; es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
 }
 function heard (agent, e) {
   if ((e.session || 'you') !== 'you' || !['reply', 'buttons', 'card', 'file'].includes(e.t)) return
@@ -1498,6 +1732,7 @@ async function setNotify (on) {
     if (p !== 'granted') { alert('Your browser blocked notifications for cage. You can allow them in its site settings.'); on = false }
   }
   try { localStorage.setItem('cage-notify', on ? 'on' : 'off') } catch (e) {}
+  if (BUSY === 'Desktop notifications') BUSY = ''   // done here and now, not by a job
   render(true)
 }
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); INSTALL = e; if (STATE) drawNav() })
@@ -1536,6 +1771,24 @@ function drawNav () {
   document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
 let ARRIVED = false   // true while a page is drawn on arriving at it (not on a redraw): the time to reload what it shows
+// What you're in the middle of on a page, which a redraw (the state changed, a job ended) keeps: the text in its boxes
+// (data-keep), the agents you ticked or unticked (named checkboxes: a "for which agents" menu, the Ask box), and the
+// menus and sections you opened (data-open). Switches have no name: they show what's true, not what was clicked.
+function formState (root) {
+  const s = { text: {}, ticks: {}, open: {} }
+  root.querySelectorAll('[data-keep]').forEach((el) => { s.text[el.dataset.keep] = el.value })
+  root.querySelectorAll('input[type=checkbox][name]:not(:disabled)').forEach((el) => { s.ticks[el.name + '/' + el.value] = el.checked })
+  root.querySelectorAll('details[data-open]').forEach((el) => { s.open[el.dataset.open] = el.open })
+  return s
+}
+function keepForm (root, s) {
+  root.querySelectorAll('[data-keep]').forEach((el) => { if (s.text[el.dataset.keep]) el.value = s.text[el.dataset.keep] })
+  root.querySelectorAll('input[type=checkbox][name]:not(:disabled)').forEach((el) => { // (one that was greyed out starts afresh)
+    const was = s.ticks[el.name + '/' + el.value]
+    if (was !== undefined && was !== el.checked) { el.checked = was; el.dispatchEvent(new Event('change')) }   // its menu's summary follows
+  })
+  root.querySelectorAll('details[data-open]').forEach((el) => { if (el.dataset.open in s.open) el.open = s.open[el.dataset.open] })
+}
 function render (force) {
   if (!STATE) return
   document.body.classList.remove('is-locked')
@@ -1545,9 +1798,9 @@ function render (force) {
   const main = document.getElementById('main')
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields
-  if (!force && main.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && main.dataset.page === page) return
-  const kept = {}
-  if (main.dataset.page === page) main.querySelectorAll('[data-keep]').forEach((el) => { kept[el.dataset.keep] = el.value })
+  if (!force && main.contains(document.activeElement) && typing(document.activeElement) && main.dataset.page === page) return
+  const kept = main.dataset.page === page ? formState(main) : null
+  const focused = main.contains(document.activeElement) && document.activeElement.getAttribute('aria-label')   // a switch, say
   document.body.classList.toggle('in-setup', page === 'setup')
   const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
     : page.startsWith('agent/') ? () => pageAgent(...page.slice(6).split('/'))
@@ -1557,33 +1810,75 @@ function render (force) {
   ARRIVED = !same
   main.replaceChildren(fn())
   ARRIVED = false
-  main.querySelectorAll('[data-keep]').forEach((el) => { if (kept[el.dataset.keep]) el.value = kept[el.dataset.keep] })
+  if (kept) keepForm(main, kept)
+  if (same && focused) { const el = main.querySelector(`[aria-label="${CSS.escape(focused)}"]`); if (el) el.focus({ preventScroll: true }) }
   if (!same) window.scrollTo(0, 0)
   SEEN = key
 }
 function route () {
   const raw = location.hash.slice(1)
-  if (/^[0-9a-f]{32,}$/.test(raw)) { // the token, from `cage ui`
-    TOKEN = raw
-    try { localStorage.setItem('cage-token', TOKEN) } catch (e) {}
+  if (/^pair=[0-9a-f]{16,128}$/.test(raw) || /^[0-9a-f]{32,}$/.test(raw)) { // from `cage ui` (or an older one's address)
     history.replaceState(null, '', location.pathname + '#home')
+    signIn(raw).then(route)
+    return
   }
-  const p = location.hash.slice(1)
-  page = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|schedule|settings))?$/.test(p) ? p : 'home'
+  const p = raw
+  const next = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|schedule|settings))?$/.test(p) ? p : 'home'
+  if (next !== page && unsaved() && !confirm('You haven’t saved what you wrote. Leave this page anyway?')) {
+    history.replaceState(null, '', location.pathname + '#' + page)   // stay (this doesn't fire another hashchange)
+    return
+  }
+  page = next
+  UNSAVED = null
   if (/^agent\/[a-z]+$/.test(page)) delete NOTES.unread[page.slice(6)]
   document.body.classList.remove('nav-open')
-  if (TOKEN) start()
+  if (TOKEN) start(); else locked(LOCKED)
   render()
+}
+// `cage ui` opens this page with a one-time pairing code, which is traded here for the token the page keeps. The
+// token itself never goes in an address (other programs on this computer could read it there). An address with the
+// token in it (from an older cage) still works, but only a token that works replaces the one kept here: any website
+// could send you to this page with a made-up one.
+let LOCKED = ''   // why this page can't open, when it can't
+async function signIn (raw) {
+  let t = ''
+  try {
+    if (raw.startsWith('pair=')) {
+      const res = await fetch('/api/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: raw.slice(5) }) })
+      const d = await res.json().catch(() => ({}))
+      if (res.ok && d.token) t = d.token
+      else if (!TOKEN) LOCKED = d.error || ''
+    } else if ((await fetch('/api/state', { headers: { 'X-Cage-Token': raw } })).ok) t = raw
+  } catch (e) { if (!TOKEN) LOCKED = NOT_ANSWERING }
+  if (!t) return
+  TOKEN = t
+  LOCKED = ''
+  try { localStorage.setItem('cage-token', t) } catch (e) {}
 }
 let started = false
 function start () {
   if (started) return
   started = true
-  refresh()
+  refresh().then(reattach)
+  setTimeout(() => { // the first answer can take a while just after the computer wakes up
+    const el = !STATE && document.querySelector('#main .loading')
+    if (el) el.textContent = 'Still starting… This can take a minute after your computer wakes up.'
+  }, 8000)
   api('/api/update').then((d) => { LATEST = d.latest || ''; render() }).catch(() => {})
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {})
-  setInterval(() => { if (!job && document.visibilityState === 'visible') refresh() }, 6000)
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !job) refresh() })
+  setInterval(() => { if (!dlg.open && document.visibilityState === 'visible') refresh() }, 6000)
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !dlg.open) refresh() })
+  window.addEventListener('beforeunload', (e) => { if (unsaved()) { e.preventDefault(); e.returnValue = '' } })
+}
+async function reattach () { // after a reload: a job this page started is still going; it comes back as the pill
+  try {
+    const list = (await api('/api/jobs')).jobs || []
+    if (OLD) { OLD = false; notice('') }
+    const j = list[list.length - 1]
+    if (j && !job) openJob(j.id, j.args, j.title, false)
+  } catch (e) { // a web app without that list predates this page (it went on through an update): see OLD
+    if (e.status === 404) { OLD = true; notice('old') }
+  }
 }
 
 document.querySelectorAll('[data-icon]').forEach((el) => el.append(icon(el.dataset.icon)))
@@ -1596,6 +1891,5 @@ document.getElementById('nav').addEventListener('click', (e) => { if (e.target.c
 window.addEventListener('hashchange', route)
 try { TOKEN = localStorage.getItem('cage-token') || '' } catch (e) {}
 route()
-if (!TOKEN) locked()
 document.getElementById('jump').addEventListener('click', () => { document.body.classList.remove('nav-open'); openPalette() })
 if (/Mac|iPhone|iPad/.test(navigator.platform)) document.getElementById('jump-key').textContent = '⌘K'

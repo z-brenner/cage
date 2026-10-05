@@ -56,9 +56,11 @@ ui_init() {
   UI_TC=$tc
 }
 UI_TC=0
-# CAGE_PROTO=1: cage is being driven by its web app (host/ui/server.py). Messages, links, QR codes and questions
-# come out as JSON lines on stderr, each starting with an ASCII record separator (\036), and answers come in on
-# stdin, so every flow works in the browser exactly as it does here. Anything else printed is shown as is.
+# CAGE_PROTO=<code>: cage is being driven by its web app (host/ui/server.py). Messages, links, QR codes and questions
+# come out as JSON lines on stderr, each starting with an ASCII record separator (\036) and the code, and answers
+# come in on stdin, so every flow works in the browser exactly as it does here. Anything else printed is shown as is.
+# The code is new for every job and never goes into a VM, so what a VM prints (during a sign-in, in its logs) can't
+# pass for one of cage's questions. CAGE_PROTO=1 is the same without a code (the tests; an older web app).
 PROTO="${CAGE_PROTO:-}"
 [ -n "$PROTO" ] || ui_init
 
@@ -68,9 +70,10 @@ jstr() { # jstr <text>: a JSON string
   printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')"
 }
 event() { # event <type> <text> [,"more":…]
-  local t="$2"
+  local t="$2" code="$PROTO"
   t="${t#"${t%%[! ]*}"}"   # no leading spaces (where a face or the brand would be)
-  printf '\036{"t":"%s","text":%s%s}\n' "$1" "$(jstr "$t")" "${3:-}" >&2
+  [ "$code" != 1 ] || code=""
+  printf '\036%s{"t":"%s","text":%s%s}\n' "$code" "$1" "$(jstr "$t")" "${3:-}" >&2
 }
 
 IND="  "   # message indent; steps of the guided setup nest their messages under the step's title
@@ -2690,9 +2693,19 @@ outbox_process() { # handle what the agents' hooks left; everything in an outbox
   if [ -f "$OUTBOX/.seen" ] && [ "$(wc -l < "$OUTBOX/.seen")" -gt 200 ]; then tail -n 100 "$OUTBOX/.seen" > "$OUTBOX/.seen.tmp" && mv "$OUTBOX/.seen.tmp" "$OUTBOX/.seen"; fi
 }
 
+text_file() { # text_file <file> <var>: a question the web app handed over in a file (argv is visible to other users)
+  local f="${1:-}" d
+  d="$(cd "$CAGE_HOME/jobs" 2>/dev/null && pwd -P)" || die "no text from the web app at $f"
+  [[ "$(basename -- "$f")" =~ ^[A-Za-z0-9_-]+\.txt$ ]] && [ "$(cd "$(dirname -- "$f")" 2>/dev/null && pwd -P)" = "$d" ] \
+    && [ -f "$f" ] && [ ! -L "$f" ] || die "no text from the web app at $f"
+  printf -v "$2" '%s' "$(cat -- "$f")"
+  rm -f -- "$f"
+}
+
 cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
   load_env
   find_msb || die "microsandbox isn't installed: run cage"
+  if [ "${1:-}" = --text-file ]; then local text; text_file "${2:-}" text; shift 2; set -- "$text" "$@"; fi
   local q="${1:-}" a n=0 tmp
   [ -n "$q" ] || die "usage: cage ask \"<question>\" [agents]"
   shift
@@ -2956,6 +2969,7 @@ cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>" 
       [ -z "${CAGE_MASK:-}" ] || features_apply ;;
     list) if [ -s "$MASK_TERMS" ]; then sed 's/^/  /' "$MASK_TERMS" >&2; else say "no terms of your own yet: cage mask add \"…\""; fi ;;
     try)
+      if [ "${1:-}" = --text-file ]; then text_file "${2:-}" t; set -- "$t"; fi
       [ -n "${1:-}" ] || die "usage: cage mask try \"<text>\""
       command -v python3 >/dev/null 2>&1 || die "this needs python3 on this computer"
       mask_types >/dev/null || die "CAGE_MASK_TYPES in $CAGE_ENV names a kind the mask doesn't know (it knows: $MASK_KINDS)"
@@ -3173,7 +3187,7 @@ cmd_security() {
 
 # --- the web app ----------------------------------------------------------------------------------------------------
 # `cage ui` starts host/ui/server.py on 127.0.0.1 and opens it in your browser, so you never need a terminal. The page
-# runs cage itself for everything it does (with CAGE_PROTO=1, see above) and reads `cage _state` for what it shows.
+# runs cage itself for everything it does (with CAGE_PROTO set, see above) and reads `cage _state` for what it shows.
 UI_PORT="${CAGE_UI_PORT:-7771}"
 jbool() { if "$@"; then printf true; else printf false; fi; }
 jlist() { local x out=""; for x in "$@"; do out="$out${out:+,}$(jstr "$x")"; done; printf '[%s]' "$out"; }   # jlist <strings…>
@@ -3267,26 +3281,94 @@ state_json() { # everything the web app shows, as one JSON object
   printf ']}}\n'
 }
 
+# ui_answer: 0 if cage's web app answers on the port, 1 if something else does, 2 if nothing listens there, and 3 if
+# what answers says what an older cage web app says (one that can't prove it's cage yet, so it isn't trusted either)
+ui_answer() {
+  local n r rc=0
+  n="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # the web app proves it's ours with the token, which only it and we can read; no proxy for a local address
+  r="$(curl --noproxy '*' -sS -m 2 "http://127.0.0.1:$UI_PORT/healthz?nonce=$n" 2>/dev/null)" || rc=$?
+  [ "$rc" != 7 ] || return 2
+  [ "$rc" = 0 ] && python3 -c 'import hashlib, hmac, sys
+key = open(sys.argv[1]).read().strip().encode()
+sys.exit(0 if hmac.compare_digest(hmac.new(key, sys.argv[2].encode(), hashlib.sha256).hexdigest(), sys.argv[3]) else 1)' \
+    "$CAGE_HOME/ui.token" "$n" "$r" 2>/dev/null && return 0
+  [ "$rc" != 0 ] || [ "$r" != ok ] || return 3
+  return 1
+}
+
+# ui_stop_old: stops this cage's own web app when it's one from before an update (it answered as an older one does)
+# that isn't busy with anything but a log or a terminal. One that started before a release whose files all had the
+# same date never saw its file change, so it would never restart itself, and its page would send the new page's
+# requests to the old code. Only a program of this user's running this cage's server.py on this port is stopped:
+# anything else that answers like that is left alone (and isn't trusted).
+ui_stop_old() {
+  local p k port old="" i st
+  for p in $(pgrep -u "$(id -u)" -f -- 'host/ui/server\.py' 2>/dev/null); do   # (the path, exactly: not as a pattern)
+    case "$(ps -o args= -p "$p" 2>/dev/null)" in *[Pp]ython*" $CAGE_ROOT/host/ui/server.py $CAGE_ROOT/cage") ;; *) continue ;; esac
+    if [ -r "/proc/$p/environ" ]; then   # (Linux) the one on this port
+      port="$(tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^CAGE_UI_PORT=//p')"
+      [ "${port:-7771}" = "$UI_PORT" ] || continue
+    fi
+    for k in $(pgrep -P "$p" 2>/dev/null); do   # what it's running: anything but a log or a terminal is real work
+      case "$(ps -o stat= -p "$k" 2>/dev/null)" in Z*) continue ;; esac   # (one that has just ended)
+      case "$(ps -o args= -p "$k" 2>/dev/null) " in *"/cage logs "*|*"/cage shell "*) ;; *) return 1 ;; esac
+    done
+    old="$old $p"
+  done
+  [ -n "$old" ] || return 1
+  # shellcheck disable=SC2086 # one pid each
+  kill $old 2>/dev/null || true
+  for i in $(seq 25); do st=0; ui_answer || st=$?; [ "$st" != 2 ] || return 0; sleep 0.2; done
+  return 1
+}
+
 cmd_ui() { # cage ui [--no-open]: the web app
   command -v python3 >/dev/null 2>&1 || die "the web app needs python3: sudo apt-get install python3"
   mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
-  local tok="$CAGE_HOME/ui.token" url
+  local tok="$CAGE_HOME/ui.token" pair="$CAGE_HOME/ui.pair" url code pid i st=0
   [ -s "$tok" ] || ( umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$tok" )
-  url="http://127.0.0.1:$UI_PORT/#$(cat "$tok")"
-  if ! curl -fsS -m 2 "http://127.0.0.1:$UI_PORT/healthz" >/dev/null 2>&1; then
+  ui_answer || st=$?
+  # something else, or an older web app: maybe the one from before an update, which restarts itself within seconds,
+  # or this cage's own that never will (see ui_stop_old)
+  for i in 1 2 3 4 5 6; do
+    if [ "$st" = 3 ] && ui_stop_old; then st=2; break; fi
+    case "$st" in 1|3) sleep 1; st=0; ui_answer || st=$? ;; *) break ;; esac
+  done
+  if [ "$st" = 2 ]; then
     if command -v setsid >/dev/null 2>&1; then
       CAGE_UI_PORT="$UI_PORT" setsid nohup python3 "$CAGE_ROOT/host/ui/server.py" "$CAGE_ROOT/cage" >>"$CAGE_HOME/ui.log" 2>&1 < /dev/null &
     else
       CAGE_UI_PORT="$UI_PORT" nohup python3 "$CAGE_ROOT/host/ui/server.py" "$CAGE_ROOT/cage" >>"$CAGE_HOME/ui.log" 2>&1 < /dev/null &
     fi
-    local i
-    for i in $(seq 50); do curl -fsS -m 1 "http://127.0.0.1:$UI_PORT/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
-    curl -fsS -m 2 "http://127.0.0.1:$UI_PORT/healthz" >/dev/null 2>&1 || die "the web app didn't start; see $CAGE_HOME/ui.log"
+    pid=$!
+    for i in $(seq 50); do   # until it answers, or it's gone (the port is taken, say)
+      st=0; ui_answer || st=$?
+      [ "$st" = 2 ] && kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
   fi
+  [ "$st" != 3 ] || die "an older version of cage's web app is still running, so the new one can't start yet. Try again in a minute; if it says this again, restart your computer"
+  [ "$st" != 1 ] || die "something else is using port $UI_PORT, so cage didn't open it there. Use another port: CAGE_UI_PORT=7772 cage ui"
+  [ "$st" = 0 ] || die "the web app didn't start; see $CAGE_HOME/ui.log"
   if is_wsl; then wsl_keepalive_start 2>/dev/null || true; fi   # WSL stops an idle distro, and the app with it
-  ok "cage is open in your browser"
-  hint "$url"
-  [ "${1:-}" = --no-open ] || UI=1 open_url "$url" >/dev/null 2>&1 || true
+  url="http://127.0.0.1:$UI_PORT/"
+  if [ "${1:-}" = --no-open ]; then ok "cage's web app is running at $url"; hint "open it with: cage ui"; return 0; fi
+  # The address gets a pairing code, not the token: the page trades it for the token, once, within a minute, and (on
+  # Linux) only from a program of yours. So the browser's command line, which other users can read, keeps no secret.
+  code="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  ( umask 077; now="$(date +%s)"
+    { if [ -f "$pair" ]; then awk -v now="$now" '$1 > now' "$pair"; fi; echo "$((now + 60)) $code"; } > "$pair.$$" && mv -f "$pair.$$" "$pair" )
+  url="$url#pair=$code"
+  if [ -n "${SSH_CONNECTION:-}" ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && ! is_wsl; then
+    say "you're connected over SSH: open cage in the browser on your own computer"
+    hint "connect with: ssh -L $UI_PORT:127.0.0.1:$UI_PORT <this computer> (if you didn't, reconnect that way and run cage ui again)"
+    hint "then open: $url (works once, within a minute)"
+    return 0
+  fi
+  UI=1 open_url "$url" >/dev/null 2>&1 || true
+  ok "opening cage in your browser"
+  hint "if it doesn't open, go to: $url (works once, within a minute)"
 }
 
 # --- backups ----------------------------------------------------------------------------------------------------
@@ -3677,7 +3759,8 @@ main() {
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
-    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
+    # the web app first (in its own shell, so nothing there stops the agents from waking), so the installed app opens
+    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; ( cmd_ui --no-open ) || true; cmd_up ;;
     _open) UI=1 open_url "${1:-}" ;;
     _outbox) load_env; find_msb || true; outbox_process; wait ;;   # once (the background helper does this every 3 s)
     _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT

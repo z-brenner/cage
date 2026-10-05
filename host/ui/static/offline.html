@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>cage</title>
+  <!-- what the installed app shows when cage isn't running (sw.js keeps a copy): no scripts, nothing from cage -->
+  <style>
+    :root { --bg: #fcfcfc; --fg: #3f3f46; --ink: #18181b; --muted: #71717a; --primary: #241c3b; --primary-fg: #fff; --hover: #f4f4f5; color-scheme: light dark; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0c0b10; --fg: #d4d3dc; --ink: #f5f4f9; --muted: #9796a6; --primary: #ffb833; --primary-fg: #241c3b; --hover: rgb(255 255 255 / 5%); } }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { display: flex; flex-direction: column; align-items: center; gap: 14px; max-width: 30rem; padding: 32px 20px; text-align: center; }
+    h1 { margin: 6px 0 0; color: var(--ink); font-size: 24px; letter-spacing: -.02em; }
+    p { margin: 0; color: var(--muted); }
+    code { padding: 1px 6px; border-radius: 5px; background: var(--hover); color: var(--ink); font-size: .92em; }
+    a { display: inline-flex; align-items: center; height: 40px; margin-top: 8px; padding: 0 20px; border-radius: 8px; background: var(--primary); color: var(--primary-fg); font-weight: 600; text-decoration: none; }
+    a:focus-visible { outline: 2px solid #7c6fe0; outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="logo.svg" alt="" width="72" height="72">
+    <h1>cage isn’t running on this computer</h1>
+    <p>Open the <b>cage</b> shortcut in your Start menu or app launcher, or run <code>cage ui</code> in a terminal. Then try again.</p>
+    <a href="/">Try again</a>
+  </main>
+</body>
+</html>

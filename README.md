@@ -115,7 +115,7 @@ Every agent has a chat in cage's app, on its page: no bot or phone needed.
 - **New conversation** (the pencil, or `/new`) starts fresh. cc-connect's other commands work too: `/stop`, `/model`, `/usage`.
 - **Scheduled tasks:** the **Schedule** tab lists what the agent does on its own (“every weekday at 8:00 AM, summarize my inbox”), with **Run now** and **Delete**, and adds new ones in plain words. Asking in the chat works too. They run in your time zone, while the agent is awake (so turn on **Start at login**), and what they say lands in the chat.
 - **Notifications:** turn on **Desktop notifications** in Settings to hear about replies, files and requests to go ahead while you're looking elsewhere; the sidebar marks agents with unread messages either way.
-- **An app of its own:** in Chrome or Edge, **Install as an app** (in the sidebar, or the install icon in the address bar) gives it its own window and taskbar icon. It still runs only on your computer: nothing is cached or sent anywhere.
+- **An app of its own:** in Chrome or Edge, **Install as an app** (in the sidebar, or the install icon in the address bar) gives it its own window and taskbar icon. It still runs only on your computer: nothing is sent anywhere, and all it keeps is a small page that says what to do when cage isn't running.
 
 **Ask all your agents in the app:** the question box on Home asks every awake agent at once and shows their answers side by side. **Where do they disagree?** has one agent compare the answers (where they agree, where they don't, what to double-check). A follow-up goes to all of them with the answers so far, so they can build on or push back on each other. Earlier questions are kept in this browser only.
 
