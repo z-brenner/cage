@@ -23,6 +23,7 @@ CC_CONNECT_VERSION="${CC_CONNECT_VERSION:-v1.5.0}"
 CACHE=/var/cache/cage
 TOOLS=/opt/cage/tools
 MARK="/opt/cage/provisioned-$KIND"
+CONFIG=/cage-config   # from cage up: which chat apps and connectors this agent has
 # Which try this is (entry.sh and guest/browser.sh count them, from 1). Every time limit below grows with it, up to 8
 # times as long: a download that can't pick up where it stopped (a vendor's installer, npm, Chromium) then still
 # finishes on a slow connection, a few tries in, and one that has stalled is still stopped.
@@ -331,6 +332,17 @@ install_cc_connect() {
   rm -rf "$tmp"
 }
 
+# Node.js for WhatsApp and the app's chat (guest/app.sh, always there), installed here, where entry.sh retries until it
+# works. Only WhatsApp waits for it, as it always has: an agent whose CLI doesn't need Node.js still starts when
+# NodeSource can't be reached, and guest/app.sh keeps trying on its own.
+adapters_node() {
+  if [ -r "$CONFIG/whatsapp.env" ]; then
+    node_22
+  elif [ -r "$CONFIG/app.env" ]; then
+    node_22 || log "the app's chat needs Node.js; it starts once Node.js can be installed"
+  fi
+}
+
 guest_env() {
   # Sourced by guest/entry.sh before starting cc-connect. Non-secret defaults only.
   mkdir -p /etc/cage
@@ -390,11 +402,9 @@ esac
 base_packages
 if [ "$REFRESH" = 1 ]; then log "cage update: the newest of everything"; fi
 "install_$KIND"
-# Node.js for the app's chat (guest/app.sh, always there) and WhatsApp: installed here, where entry.sh retries until it
-# works, so the adapters never depend on a single try of their own.
-if [ -r /cage-config/app.env ] || [ -r /cage-config/whatsapp.env ]; then node_22; fi
+adapters_node
 # The browser itself is set up after cc-connect starts (guest/browser.sh); its command is here from the start
-if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then browser_wrapper; fi
+if grep -q '^browser|local:browser|' "$CONFIG/connectors.list" 2>/dev/null; then browser_wrapper; fi
 install_cc_connect
 guest_env
 case "$KIND" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$KIND" ;; esac

@@ -243,6 +243,23 @@ lib no_sources || fail "a system without Ubuntu's sources file stopped provision
 [ ! -e "$T/mirrors.txt" ] && grep -q "doesn't get its packages from archive.ubuntu.com, so it isn't used" "$T/out" || fail "no plain message: $(shown)"
 ok "CAGE_APT_MIRROR: a plain http(s) mirror goes first, Ubuntu's own servers second; anything else is ignored, as is a system without Ubuntu's sources"
 
+adapters() { # adapters <the config files>: with a Node.js that can't be installed
+  node_22() { echo "NODE.JS FAILED"; return 1; }
+  CONFIG="$T/config"
+  rm -rf "$CONFIG"; mkdir -p "$CONFIG"
+  for f in "$@"; do touch "$CONFIG/$f"; done
+  adapters_node
+  echo "CARRIED ON"
+}
+export -f adapters
+lib adapters app.env || fail "Node.js for the app's chat stopped provisioning: $(shown)"
+grep -q 'NODE.JS FAILED' "$T/out" && grep -q 'CARRIED ON' "$T/out" && grep -q "the app's chat needs Node.js; it starts once" "$T/out" \
+  || fail "Node.js for the app's chat: $(shown)"
+if lib adapters app.env whatsapp.env || grep -q 'CARRIED ON' "$T/out"; then fail "WhatsApp went on without Node.js: $(shown)"; fi
+lib adapters || fail "no adapters: $(shown)"
+grep -q 'NODE.JS' "$T/out" && fail "Node.js without an adapter that needs it: $(shown)"
+ok "Node.js: WhatsApp waits for it; the app's chat doesn't keep the agent offline when it can't be installed"
+
 grep -Eq '^provision\[claude\]: still on base packages \(3 min\) \([0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$' \
   <<<"$( (CAGE_PROVISION_LIB=1 . "$ROOT/guest/provision.sh" claude; log "still on base packages (3 min)") )" || fail "log lines have no time"
 ok "provisioning's log lines end with the time"

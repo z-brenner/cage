@@ -97,6 +97,15 @@ case "$A" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$A" ;; 
 docker exec -u agent -e HOME=/home/agent "$NAME" "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"
 ok "$BIN runs as the unprivileged agent user"
 
+# Node.js 22 from NodeSource (not Ubuntu's older one), installed while provisioning (where it's retried), not later by
+# the app's chat on its own: every agent has the app
+logs="$(docker logs "$NAME" 2>&1)"
+node_at="$(grep -n "^provision\[$A\]: Node.js 22" <<<"$logs" | head -n 1 | cut -d: -f1)"
+done_at="$(grep -n "^provision\[$A\]: done:" <<<"$logs" | head -n 1 | cut -d: -f1)"
+[ -n "$node_at" ] && [ -n "$done_at" ] && [ "$node_at" -lt "$done_at" ] || fail "Node.js wasn't installed while provisioning"
+[[ "$(docker exec "$NAME" node --version)" == v22.* ]] || fail "not Node.js 22: $(docker exec "$NAME" node --version)"
+ok "Node.js 22 (NodeSource's) comes with provisioning"
+
 for _ in $(seq 1 30); do
   [ "$(docker exec "$NAME" ps -o user= -C cc-connect | head -1 | tr -d ' ')" = agent ] && break
   sleep 1
