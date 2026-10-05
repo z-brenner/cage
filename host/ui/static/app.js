@@ -1250,7 +1250,7 @@ function approvalLine (ap) { // in one line, for Home and notifications: "Gmail:
 }
 function approvalView (ap) { // what the card shows above its buttons
   if (!ap.what) return [h('pre', { class: 'approval-text' }, ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim())]
-  const body = ap.body ? h('div', { class: 'approval-body' }, ap.body) : null
+  const body = ap.body ? h('div', { class: 'approval-body' }, h('div', { class: 'clamp' }, ap.body)) : null
   const long = ap.body && (ap.body.split('\n').length > 6 || ap.body.length > 420)
   return [
     h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
@@ -1269,7 +1269,7 @@ function buttonsMsg (C, e) {
   box.dataset.values = all.map((b) => b.data).join('\n')
   const body = perm ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants your OK')), approvalView(approvalOf(e.text))]
     : [md(e.text || '')]
-  box.append(...body.flat(), h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) => {
+  box.append(...body.flat().filter(Boolean), h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) => {
     const label = (perm && PERM_LABEL[b.data]) || b.text
     return h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, label) }, label)
   }))))
