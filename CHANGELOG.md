@@ -33,6 +33,7 @@ Nothing yet.
 - **Updates are safe.** With no internet, `cage update` changes nothing and says so, and your agents keep running. It never moves you to an older release by itself, and never swaps a release for an unreviewed copy of the code. An update cut off halfway is finished by the next `cage update`.
 - **cage installs the microsandbox version it's tested with (0.7.5),** and `cage update` updates an older one. If yours is too old, cage asks you to run `cage fix` before it wakes your agents.
 - **Your agent is ready to chat first; its browser gets ready in the background,** usually within a minute of waking up. If the agent asks for the browser before that, it's told to try again in a few minutes.
+- **Claude Code keeps running between your messages,** so `/compact` and its other slash commands work in chat. When Claude asks you to pick between options, the question now reaches you and your answer goes back to it; before, it was answered with nothing.
 - **Claude Code comes from its stable channel,** about a week behind its newest release, skipping releases with known problems. Your first `cage update` may move it back a few versions.
 - **Asking your other agents keeps the mask.** What you told a masked agent stays masked when `/all`, a stand-in or `cage ask` passes it on. The question is no longer on a command line, where others on your computer could read it.
 - **The app opens with a one-time code,** never with its key in the address bar.
@@ -68,3 +69,4 @@ Nothing yet.
 - The privacy mask covers what you type, your answers, your About me and your notes' names. Files and pictures you send, web pages and your apps' results reach the AI company as they are, and anyone who can chat with the agent can ask it about a masked value.
 - Each chat app's token lives inside its agent's computer. An agent tricked by a prompt injection could read it.
 - macOS isn't supported yet.
+- cc-connect, which connects your chats to your agents, is a preview release in this version (1.5.1-beta.3), for the Claude Code fixes above. If your chats misbehave after this update, put `CAGE_CC_CONNECT_VERSION=stable` in `~/.cage/cage.env` and run `cage update`: your agents get cc-connect 1.5.0 again. (A plain `v1.5.0` there doesn't do it: earlier cages wrote that very line, so cage reads it as theirs.)

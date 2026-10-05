@@ -51,15 +51,15 @@ jobs:
       - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
         run: |
           curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/cc-connect.tgz" \
-            https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz
-          echo "72859035a1ee011b710204fc508de711838f919eb2ae6f104f1ddb3e5cd8ca87  $RUNNER_TEMP/cc-connect.tgz" | sha256sum -c -
+            https://github.com/chenhg5/cc-connect/releases/download/v1.5.1-beta.3/cc-connect-v1.5.1-beta.3-linux-amd64.tar.gz
+          echo "4c969474d9e971395f36842646ef42a519557e90e0fee4eba128a4ba786ac21a  $RUNNER_TEMP/cc-connect.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/cc-connect.tgz" -C "$RUNNER_TEMP"
           npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
       # CAGE_TEST_NO_SKIP: a suite that can't run here (no Playwright, say) fails the job instead of being skipped
       - name: the other fast checks, as a local test/all.sh runs them (mask and unit are the two steps above)
         env:
           CAGE_TEST_NO_SKIP: 1
-          CAGE_TEST_CC_CONNECT: ${{ runner.temp }}/cc-connect-v1.5.0-linux-amd64
+          CAGE_TEST_CC_CONNECT: ${{ runner.temp }}/cc-connect-v1.5.1-beta.3-linux-amd64
           PLAYWRIGHT_MODULE: ${{ runner.temp }}/pw/node_modules/playwright
         run: CAGE_TEST_CHROME="$(command -v google-chrome)" test/all.sh --skip mask unit
       # util-linux's script gives the tests a terminal, for the colour and mascot test (busybox has no script)
