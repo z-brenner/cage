@@ -687,6 +687,8 @@ ok('what cage blocked is marked seen once when you look, and again when somethin
 await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
 await page.waitForFunction(() => document.activeElement.tagName === 'H1' && document.activeElement.textContent === 'Home', null, { timeout: 10000 })
   .catch(() => fail('arriving at Home, the focus is not on its heading'))
+await page.evaluate(() => render(true))   // drawn again: the focus stays on the (new) heading
+if (!(await page.evaluate(() => document.activeElement.tagName === 'H1' && document.activeElement.isConnected))) fail('a redraw took the focus off the heading')
 await page.locator('#nav').getByRole('link', { name: 'Apps' }).focus()
 await page.evaluate(() => render(true))
 if (!(await page.evaluate(() => !!document.activeElement.closest('#nav')))) fail('a redraw moved the focus')

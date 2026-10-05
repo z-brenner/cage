@@ -2271,7 +2271,9 @@ function render (force) {
   // keep what you're typing: don't redraw a page while you're in one of its fields
   if (!force && main.contains(document.activeElement) && typing(document.activeElement) && main.dataset.page === page) return
   const kept = main.dataset.page === page ? formState(main) : null
-  const focused = main.contains(document.activeElement) && document.activeElement.getAttribute('aria-label')   // a switch, say
+  const was = main.contains(document.activeElement) ? document.activeElement : null
+  const focused = was && was.getAttribute('aria-label')   // a switch, say
+  const onHead = !!was && was.tagName === 'H1'   // the page's heading, where arriving put it
   document.body.classList.toggle('in-setup', page === 'setup')
   const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
     : page.startsWith('agent/') ? () => pageAgent(...page.slice(6).split('/'))
@@ -2283,13 +2285,12 @@ function render (force) {
   ARRIVED = false
   if (kept) keepForm(main, kept)
   if (same && focused) { const el = main.querySelector(`[aria-label="${CSS.escape(focused)}"]`); if (el) el.focus({ preventScroll: true }) }
-  if (!same) {
-    window.scrollTo(0, 0)
-    // On arriving at a page (not on a redraw), focus goes to its heading: a screen reader says where you are, and Tab
-    // goes on from there. Not from under a side panel or a question that's open.
-    const h1 = main.querySelector('h1')
-    if (h1 && !document.querySelector('dialog[open]')) { h1.tabIndex = -1; h1.focus({ preventScroll: true }) }
-  }
+  if (!same) window.scrollTo(0, 0)
+  // On arriving at a page (not on a redraw), focus goes to its heading: a screen reader says where you are, and Tab
+  // goes on from there. Not from under a side panel or a question that's open. A redraw keeps it there (it draws a new
+  // heading, and the focus would fall back to the top of the page).
+  const h1 = main.querySelector('h1')
+  if (h1 && (same ? onHead : !document.querySelector('dialog[open]'))) { h1.tabIndex = -1; h1.focus({ preventScroll: true }) }
   SEEN = key
 }
 function route () {
