@@ -27,31 +27,32 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: shellcheck
-        run: shellcheck -S warning cage install.sh guest/*.sh test/*.sh scripts/*.sh
+      - name: actionlint, for test/all.sh to check the workflow files (a pinned release, its checksum checked)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP/bin" actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: install.ps1 parses and stays ASCII (Windows PowerShell 5.1 reads files in the system code page)
         run: |
           if grep -nP '[^\x00-\x7F]' install.ps1; then echo "non-ASCII in install.ps1"; exit 1; fi
           pwsh -NoProfile -Command '$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e); if ($e) { $e | ForEach-Object { $_.ToString() }; exit 1 }'
-      - name: Python helpers compile (OAuth on the host; speech-to-text and the privacy mask in the VM)
-        run: python3 -m py_compile host/mcp_oauth.py host/ui/server.py guest/stt.py guest/mask.py
       - name: privacy mask
         run: test/mask.sh
-      - name: web app (API, and the page in headless Chrome)
-        run: |
-          npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
-          PLAYWRIGHT_MODULE="$RUNNER_TEMP/pw/node_modules/playwright" CAGE_TEST_CHROME="$(command -v google-chrome)" test/ui.sh
-      - name: Linux installer
-        run: test/installer.sh
       - name: "adapter rules (node): WhatsApp, and the app's chat relay"
         run: node --test test/whatsapp.test.mjs test/app.test.mjs
-      - name: host + setup tests (bash 5) + real cc-connect config validation
+      - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
         run: |
           curl -fsSL https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz | tar -xz -C "$RUNNER_TEMP"
-          CAGE_TEST_CC_CONNECT="$RUNNER_TEMP/cc-connect-v1.5.0-linux-amd64" test/host.sh
-          test/setup.sh
-      - name: browser sign-in (OAuth) against a mock MCP server
-        run: test/oauth.sh
+          npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
+      # CAGE_TEST_NO_SKIP: a suite that can't run here (no Playwright, say) fails the job instead of being skipped
+      - name: the other fast checks, as a local test/all.sh runs them (mask and unit are the two steps above)
+        env:
+          CAGE_TEST_NO_SKIP: 1
+          CAGE_TEST_CC_CONNECT: ${{ runner.temp }}/cc-connect-v1.5.0-linux-amd64
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/pw/node_modules/playwright
+        run: CAGE_TEST_CHROME="$(command -v google-chrome)" test/all.sh --skip mask unit
       - name: host + setup tests (bash 3.2, as shipped on macOS)
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2
