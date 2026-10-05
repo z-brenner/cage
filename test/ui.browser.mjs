@@ -218,6 +218,12 @@ await wakeBanner.getByRole('button', { name: 'Try again' }).click()
 await page.locator('.chat-banner', { hasText: 'Waking Codex up' }).waitFor({ timeout: 10000 })
 const waiting = fs.readdirSync(path.join(home, 'app', 'codex', 'in')).filter((n) => n.endsWith('.json'))
 if (waiting.length !== 1 || !fs.readFileSync(path.join(home, 'app', 'codex', 'in', waiting[0]), 'utf8').includes('hello codex')) fail('the message is not waiting for codex')
+// what a job did is kept for 10 minutes after it ends: opened later, it says so (cage didn't restart)
+const seen = errors.length
+await page.evaluate(() => openJob('a-job-cage-forgot', ['up', 'codex'], 'Waking Codex', true))
+await page.locator('#job-status', { hasText: 'This isn’t kept any more' }).waitFor({ timeout: 10000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+errors.splice(seen, errors.length, ...errors.slice(seen).filter((m) => !/status of 404/.test(m)))   // (its log is gone: that's the point)
 ok('an asleep agent wakes up when you message it, and the message waits for it; when it can\'t be woken, the page says why')
 
 // a question with a hidden answer: add a key
@@ -508,6 +514,17 @@ ok('updating while the app is open: the server restarts with its new code, and t
 // cage stops answering: within 15 seconds the page says so, greys out the agents and won't send; the installed app
 // (the service worker) shows a page that says what to do instead of the browser's error
 await p3.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 15000 })
+// first, cage answers but too slowly (the web app's 504): that's said, but not as "isn't answering", which it is
+await p3.evaluate(() => {
+  const real = window.fetch
+  window.fetch = (url, o) => String(url).startsWith('/api/state') ? Promise.resolve(new Response('{"error":"cage is taking too long to answer"}', { status: 504 })) : real(url, o)
+  window.__fetch = real
+})
+await p3.evaluate(async () => { for (let i = 0; i < 3; i++) await refresh() })
+await p3.locator('#notice', { hasText: 'cage is slow to answer' }).waitFor({ timeout: 5000 })
+if (await p3.evaluate(() => document.body.classList.contains('is-down'))) fail('a slow cage is shown as one that isn’t answering')
+await p3.evaluate(async () => { window.fetch = window.__fetch; await refresh() })
+await p3.locator('#notice').waitFor({ state: 'hidden', timeout: 5000 })
 process.kill(Number(pid3))
 await p3.locator('#notice', { hasText: 'cage isn’t answering' }).waitFor({ timeout: 15000 })
 if (!(await p3.locator('.composer .send').isDisabled())) fail('Ask still works while cage is down')
@@ -515,7 +532,7 @@ if (!(await p3.evaluate(() => document.body.classList.contains('is-down')))) fai
 await p3.reload()
 await p3.getByRole('heading', { name: 'cage isn’t running on this computer' }).waitFor({ timeout: 10000 })
 await p3.close()
-ok('cage not answering: a banner within 15 s, sending off; reloading shows what to do, not a browser error')
+ok('cage not answering: a banner within 15 s, sending off (not when it\'s only slow); reloading shows what to do, not a browser error')
 
 // on a phone: the sidebar is a menu
 const offscreen = () => page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().right <= 0, null, { timeout: 5000 })

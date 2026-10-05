@@ -147,14 +147,18 @@ async function api (path, opts = {}) {
       headers: { 'X-Cage-Token': TOKEN, 'Content-Type': 'application/json' },
       body: opts.body ? JSON.stringify(opts.body) : undefined
     })
-  } catch (e) { throw new Error(NOT_ANSWERING) }   // the browser's own words ("Failed to fetch") say nothing
+  } catch (e) { // the browser's own words ("Failed to fetch") say nothing
+    const err = new Error(NOT_ANSWERING)
+    err.down = true
+    throw err
+  }
   if (res.status === 401) { locked(); throw new Error('locked') }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || res.statusText)
   return data
 }
 let BOOTED = ''   // the cage version this page came with; after an update, the page reloads to get the new one
-let FAILS = 0     // refreshes in a row that got no answer: after two, the page says so
+let FAILS = 0     // refreshes in a row that got no answer at all: after two, the page says so
 let DOWN = false
 // someone is typing in this, or picking from this list. A switch that has focus isn't, and nor is a list whose change
 // cage is making (aria-busy): both can be drawn again from the state.
@@ -180,7 +184,8 @@ async function refresh () {
     liveConnect()
   } catch (e) {
     if (e.message === 'locked') return
-    if (++FAILS >= 2) notice('down')
+    if (!e.down) { FAILS = 0; notice('slow') }   // the web app answers, but cage behind it was too slow (or failed)
+    else if (++FAILS >= 2) notice('down')
     console.warn(e)
   }
 }
@@ -403,6 +408,7 @@ function scrollDown () { logEl.scrollTop = logEl.scrollHeight }
 function send (payload) { return api(`/api/jobs/${job.id}/input`, { method: 'POST', body: payload }).catch(() => {}) }
 function handle (ev) {
   if (!job) return
+  if (ev.t !== 'gone') job.got = true
   if (ev.t === 'raw') {
     const bytes = Uint8Array.from(atob(ev.data), (c) => c.charCodeAt(0))
     terminal().write(bytes)
@@ -429,7 +435,9 @@ function handle (ev) {
     J.code = ev.t === 'gone' ? -1 : ev.code
     logEl.querySelectorAll('.skip-box').forEach((b) => b.remove())
     logEl.querySelectorAll('.ask-box input, .ask-box button').forEach((el) => { el.disabled = true })
-    setStatus(J.code ? 'failed' : 'done', ev.t === 'gone' ? 'cage restarted before this finished' : J.code ? 'That didn’t work — see above' : 'Done.')
+    // gone: cage forgot it, because it restarted while this went on, or (when nothing came at all) it ended a while ago
+    const gone = J.got ? 'cage restarted before this finished' : 'This isn’t kept any more (cage keeps it for 10 minutes)'
+    setStatus(J.code ? 'failed' : 'done', ev.t === 'gone' ? gone : J.code ? 'That didn’t work — see above' : 'Done.')
     scrollDown()
     if (dlg.open) document.getElementById('job-close').focus()
     SEEN = ''   // redraw from what's true now: a switch shows what cage did, not what was clicked
@@ -1184,7 +1192,7 @@ async function wake (C) { // wake the chat's agent up, and say so if that doesn'
     const { id } = await api('/api/jobs', { method: 'POST', body: { args: ['up', C.agent] } })
     watch(id, (ev) => {
       if (ev.t !== 'exit' && ev.t !== 'gone') return
-      if (ev.code || ev.t === 'gone') { C.waking = false; C.woke = id; C.typing.hidden = true }
+      if (ev.code || ev.t === 'gone') { C.waking = false; C.woke = id; C.wokeAt = Date.now(); C.typing.hidden = true }
       if (CHAT === C) drawChatState(C)
     })
   } catch (e) { C.waking = false; C.woke = 'none'; C.typing.hidden = true; drawChatState(C) }
@@ -1201,7 +1209,7 @@ function drawChatState (C, nudge) {
   else if (a.state === 'login') ban('warn', 'log-in', `Sign ${a.label} in first (it uses ${a.plan}).`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm primary'))
   else if (C.woke) {
     ban('bad', 'circle-alert', `Couldn’t wake ${a.label}. Your message is waiting for it.`, h('span', { class: 'row' }, btn('Try again', () => wake(C), 'sm'),
-      C.woke !== 'none' ? btn('See what happened', () => openJob(C.woke, ['up', a.name], 'Waking ' + a.label, true), 'sm ghost') : null))
+      C.woke !== 'none' && Date.now() - C.wokeAt < 9 * 60000 ? btn('See what happened', () => openJob(C.woke, ['up', a.name], 'Waking ' + a.label, true), 'sm ghost') : null))   // (kept 10 minutes)
   } else if (C.waking) ban('info', 'power', `Waking ${a.label} up… your message goes as soon as it’s ready (about a minute).`)
   else if (a.state === 'asleep' || a.state === 'none') ban('idle', 'moon', `${a.label} is asleep. Sending a message wakes it up.`)
   else if (a.state === 'installing') ban('info', 'loader-circle', `${a.label} is getting ready (the first time takes a few minutes). You can write already.`)
