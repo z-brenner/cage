@@ -5,9 +5,18 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+  schedule:
+    - cron: '23 5 * * *'   # every night too: the vendors' CLIs and installers change without a push here
 
 permissions:
   contents: read
+
+# A newer push to a pull request cancels the run it replaces. On main, a run that has started always finishes (a
+# release needs CI's verdict on its own commit, see release.yml); a newer push only replaces one still waiting to start.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   host:
