@@ -1108,6 +1108,12 @@ def write_pid():
 
 
 if __name__ == "__main__":
+    # A session (and process group) of its own, as `cage ui` gives it with setsid where there is one. A Mac has none,
+    # and its start at login (launchd) stops what's left in the process group of the command it ran once that ends.
+    try:
+        os.setsid()
+    except OSError:
+        pass   # it has one already
     server = Server(("127.0.0.1", PORT), Handler)
     write_pid()
     forget_questions(time.time())

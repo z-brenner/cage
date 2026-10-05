@@ -6,11 +6,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-SERVER="" SERVER2="" SERVER3="" SERVER4="" SERVER5="" VM="" OTHER="" OLD=""
+SERVER="" SERVER2="" SERVER3="" SERVER4="" SERVER5="" SERVER6="" VM="" OTHER="" OLD=""
 cleanup() { # whatever the tests started, also when one fails halfway
   local p h
   [ -z "$OLD" ] || pkill -P "$OLD" 2>/dev/null || true   # what the older web app below runs
-  for p in $SERVER $SERVER2 $SERVER3 $SERVER4 $SERVER5 $VM $OTHER $OLD; do kill "$p" 2>/dev/null || true; done
+  for p in $SERVER $SERVER2 $SERVER3 $SERVER4 $SERVER5 $SERVER6 $VM $OTHER $OLD; do kill "$p" 2>/dev/null || true; done
   pkill -f "$T/bin/msb" 2>/dev/null || true   # the stub msb, in a job a failed test left behind
   # the background helper some settings start: by its pid file, or by the CAGE_HOME it runs with (these tests' only)
   for h in "$T"/*/refresh.pid; do if [ -s "$h" ]; then kill "$(cat "$h")" 2>/dev/null || true; fi; done
@@ -359,7 +359,15 @@ CAGE_HOME="$T/auto" CAGE_UI_PORT="$PORT4" "$ROOT/cage" _autostart 2>/dev/null ||
 SERVER4="$(up_pid "$T/auto" 2>/dev/null || true)"
 [ -n "$SERVER4" ] && [ "$(code "http://127.0.0.1:$PORT4/")" = 200 ] && grep -q "running at http://127.0.0.1:$PORT4/" "$T/auto/autostart.log" \
   || fail "_autostart didn't start the web app: $(cat "$T/auto/autostart.log")"
-ok "start at login: the web app starts too"
+# A Mac has no setsid, so cage ui starts the web app in its own process group: the web app leaves it by itself, or
+# start at login (launchd) would stop it as soon as the command it ran ends
+PORT6="$(free_port)"
+mkdir -p "$T/group"
+CAGE_HOME="$T/group" CAGE_UI_PORT="$PORT6" python3 "$ROOT/host/ui/server.py" "$ROOT/cage" & SERVER6=$!
+for _ in $(seq 50); do [ "$(code "http://127.0.0.1:$PORT6/healthz")" = 200 ] && break; sleep 0.1; done
+[ "$(ps -o pgid= -p "$SERVER6" | tr -d ' ')" = "$SERVER6" ] || fail "the web app stayed in the process group of the command that started it"
+kill "$SERVER6"; SERVER6=""
+ok "start at login: the web app starts too, in a process group of its own"
 
 # A job ends with its terminal, as a command does when its window closes: once the web app is gone, a log someone left
 # open stops too (cage ui starts the web app with nohup, which its jobs would otherwise inherit)
