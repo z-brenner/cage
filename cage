@@ -1283,15 +1283,16 @@ helper_alive() { # helper_alive <refresh|keepalive>
   else args="$(ps -o args= -p "$pid" 2>/dev/null || true)"; fi
   [[ "$args" == *"$CAGE_ROOT/cage _$1"* ]]
 }
+helper_old_stop() { # helper_old_stop <refresh|keepalive>: one from a cage before pid files, whose command line ends
+  # there (today's say which CAGE_HOME they're for, so those of your other CAGE_HOMEs never match)
+  pkill -f -- "$(printf '%s' "$CAGE_ROOT/cage _$1" | sed 's/[][\.*^$?+(){}|]/\\&/g')\$" 2>/dev/null || true
+}
 helper_stop() { # helper_stop <refresh|keepalive>
-  if [ ! -e "$CAGE_HOME/$1.pid" ]; then   # one from a cage before pid files
-    pkill -f -- "$CAGE_ROOT/cage _$1" 2>/dev/null || true; return 0
-  fi
+  if [ ! -e "$CAGE_HOME/$1.pid" ]; then helper_old_stop "$1"; return 0; fi
   if helper_alive "$1"; then kill "$(cat "$CAGE_HOME/$1.pid")" 2>/dev/null || true; fi
   rm -f "$CAGE_HOME/$1.pid"
 }
 
-refresher_pattern() { echo "$CAGE_ROOT/cage _refresh"; }
 refresher_start() { # the background helper: renews sign-ins, collects security events (strict network logs a lot)
   local a relay=""
   for a in ${CAGE_AGENTS:-}; do [ -z "$(agent_features "$a")" ] || relay=1; done
@@ -1300,9 +1301,9 @@ refresher_start() { # the background helper: renews sign-ins, collects security 
   lock_take "$CAGE_HOME/.refresh.lock"   # several cage commands at once still start one
   if ! helper_alive refresh; then
     # a helper from a cage before pid files would act on every request too: it goes, once
-    [ -e "$CAGE_HOME/refresh.pid" ] || pkill -f -- "$(refresher_pattern)" 2>/dev/null || true
-    if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
-    else nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
+    [ -e "$CAGE_HOME/refresh.pid" ] || helper_old_stop refresh
+    if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh "$CAGE_HOME" >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
+    else nohup "$CAGE_ROOT/cage" _refresh "$CAGE_HOME" >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
     echo $! > "$CAGE_HOME/refresh.pid"
   fi
   rm -rf "$CAGE_HOME/.refresh.lock"
@@ -1323,7 +1324,7 @@ refresher_loop() {
     [ "$(cat "$CAGE_HOME/refresh.pid" 2>/dev/null || true)" = $$ ] || exit 0
     # (a cage that's still being replaced by an update, and doesn't read as whole yet, is waited for)
     now="$(cksum 2>/dev/null < "$CAGE_ENV" || true; cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
-    if [ "$now" != "$sums" ] && bash -n "$CAGE_ROOT/cage" 2>/dev/null; then exec "$CAGE_ROOT/cage" _refresh; fi
+    if [ "$now" != "$sums" ] && bash -n "$CAGE_ROOT/cage" 2>/dev/null; then exec "$CAGE_ROOT/cage" _refresh "$CAGE_HOME"; fi
     outbox_process || true
     [ $((i % 20)) != 0 ] || events_harvest || true
     [ $((i % 100)) != 0 ] || oauth_refresh_all 900 || true
@@ -1911,7 +1912,6 @@ wsl_check_names() {
   [[ "$CAGE_ROOT" =~ ^[A-Za-z0-9._/-]+$ ]] || die "on Windows, keep cage at a path without spaces or quotes (now: $CAGE_ROOT)"
 }
 
-keepalive_pattern() { echo "$CAGE_ROOT/cage _keepalive"; }   # the keepalive's command line
 keepalive_running() { helper_alive keepalive; }
 
 keepalive_run() { # cage _keepalive [CAGE_HOME]: the hidden session's side, a sleep until `cage down`
@@ -1926,7 +1926,7 @@ wsl_keepalive_start() {
   keepalive_running && return 0
   { ( wsl_check_names ) && [[ "$CAGE_HOME" =~ ^[A-Za-z0-9._/-]+$ ]]; } || {
     warn "no WSL keepalive: WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
-  [ -e "$CAGE_HOME/keepalive.pid" ] || pkill -f -- "$(keepalive_pattern)" 2>/dev/null || true   # one from before pid files
+  [ -e "$CAGE_HOME/keepalive.pid" ] || helper_old_stop keepalive
   local ps i
   if ! ps="$(win_cmd powershell.exe)"; then
     warn "Windows interop is off, so WSL will stop these VMs ~15 s after you close the last WSL window"

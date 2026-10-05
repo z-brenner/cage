@@ -856,6 +856,28 @@ ok "up: an agent that can't start is named, with why; the others start, and the 
   if kill -0 "$pid" 2>/dev/null; then pkill -f -- "$re"; fail "cage down left the helper running"; fi )
 ok "the background helper: one per CAGE_HOME whatever the install path, picks up new settings itself, stops with cage down"
 
+# your other CAGE_HOMEs' helpers are theirs: a first start here, cage down here, a start here again never stops one;
+# a helper from a cage before pid files (it has no CAGE_HOME on its command line) does go when one starts
+( block_watch
+  alive() { kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" 2>/dev/null | grep -q Z; }   # (a stopped one may linger as a zombie)
+  for h in k1 k2 k3 k4; do mkdir -p "$T/$h" && CAGE_HOME="$T/$h" "$ROOT/cage" init 2>/dev/null && printf 'CAGE_AGENTS="claude"\n' >> "$T/$h/cage.env"; done
+  CAGE_HOME="$T/k2" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do [ -s "$T/k2/refresh.pid" ] && break; sleep 0.2; done
+  pb="$(cat "$T/k2/refresh.pid")"
+  CAGE_HOME="$T/k3" setsid nohup "$ROOT/cage" _refresh </dev/null >/dev/null 2>&1 &   # started the way cage used to
+  old=$!
+  sleep 0.5; alive "$pb" && alive "$old" || fail "the helpers didn't start"
+  CAGE_HOME="$T/k1" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$old" || break; sleep 0.2; done
+  if alive "$old"; then kill "$old"; fail "a helper from before pid files was left running"; fi
+  CAGE_HOME="$T/k1" "$ROOT/cage" down </dev/null >/dev/null 2>&1
+  CAGE_HOME="$T/k1" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  CAGE_HOME="$T/k4" "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1
+  sleep 1
+  alive "$pb" || fail "another CAGE_HOME's helper was stopped"
+  for h in k1 k2 k4; do kill "$(cat "$T/$h/refresh.pid")" 2>/dev/null || true; done )
+ok "the background helper: one CAGE_HOME never stops another's; one from before pid files goes"
+
 # nobody to answer (a script, a closed pipe): cage stops at the first question instead of asking forever; and five
 # wrong answers in a row end the asking too
 ( fresh g
