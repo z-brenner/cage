@@ -1826,7 +1826,8 @@ wait_ready() { # wait_ready <agent>...: sets WAIT_STOPPED to those that stopped
         st="$(probe "$a")"
         case "$st" in
           asleep|none) gone[i]=$(( ${gone[i]:-0} + 1 ))
-            if [ "${gone[i]}" -ge 2 ]; then WAIT_STOPPED="${WAIT_STOPPED:+$WAIT_STOPPED }$a"; st=stopped; fi ;;
+            # (not in its first seconds: a VM that was just started can take a moment to show as running)
+            if [ "${gone[i]}" -ge 2 ] && [ $((SECONDS - start)) -ge 5 ]; then WAIT_STOPPED="${WAIT_STOPPED:+$WAIT_STOPPED }$a"; st=stopped; fi ;;
           *) gone[i]=0 ;;
         esac
       fi
