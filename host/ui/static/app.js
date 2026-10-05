@@ -276,9 +276,10 @@ function sheet (title) { // an empty side panel, for a new job
 // Signing in without a terminal: a vendor's sign-in prints a link, maybe a code, maybe asks for one back. The panel
 // shows those as a button, a code to copy and a box to paste into; the terminal itself is one click away.
 const SIGNIN_JOBS = ['login', 'add', 'onboard']
-// Where each vendor signs you in. A link to anywhere else is still shown, but not as the big button, and with a warning:
-// it comes from the agent's VM, which an agent that read the wrong web page could have changed.
-const SIGNIN_HOSTS = ['claude.ai', 'console.anthropic.com', 'auth.openai.com', 'chatgpt.com', 'cursor.com', 'accounts.google.com']
+// Where each vendor signs you in (and its subdomains: Claude Code's own sign-in pages are on claude.com and
+// platform.claude.com). A link to anywhere else is still shown, but not as the big button, and with a warning: it
+// comes from the agent's VM, which an agent that read the wrong web page could have changed.
+const SIGNIN_HOSTS = ['claude.com', 'claude.ai', 'console.anthropic.com', 'auth.openai.com', 'chatgpt.com', 'cursor.com', 'accounts.google.com']
 const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>78]/g
 function signinParts (plain) { // what a sign-in printed: {url, code, paste, known}
   const urls = [...plain.matchAll(/https:\/\/[^\s"'<>]+/g)].map((m) => m[0].replace(/[).,;:]+$/, ''))

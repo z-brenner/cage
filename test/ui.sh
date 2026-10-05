@@ -38,8 +38,9 @@ case "$cmd" in
     *cage:ready*) echo cage:ready ;;
     *strict-mcp-config*) echo 'Paris, says **the stub**' ;;
     *skip-git-repo-check*) echo 'Lyon, says *the other* stub (snake_case_ok)' ;;
-    *"auth login"*) host=claude.ai; if [ -e "$STUB_EVIL" ]; then host=claude-login.evil.example; fi   # an agent that was tricked
-      printf 'Browser didn'"'"'t open? Use the url below to sign in (c to copy)\n\n\033[1mhttps://%s/oauth/authorize?code=true&client_id=9d1c&state=xyz\033[0m\n\nPaste code here if prompted > ' "$host"
+    *"auth login"*) url=https://claude.com/cai/oauth/authorize   # where Claude Code 2.x sends you (its own built-in address)
+      if [ -e "$STUB_EVIL" ]; then url=https://claude-login.evil.example/oauth/authorize; fi   # an agent that was tricked
+      printf 'Browser didn'"'"'t open? Use the url below to sign in (c to copy)\n\n\033[1m%s?code=true&client_id=9d1c&state=xyz\033[0m\n\nPaste code here if prompted > ' "$url"
       read -r c; [ "$c" = "CODE-123" ] && echo "Login successful." ;;
   esac ;;
   logs) case "$*" in
