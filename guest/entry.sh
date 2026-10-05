@@ -7,14 +7,16 @@
 # /cage-config also says which secrets (names only) and connectors this agent has.
 #
 # 1. ensure the unprivileged `agent` user owns the persistent home
-# 2. first boot: install the agent CLI + cc-connect (retried until it succeeds)
-# 3. run cc-connect as `agent`, restarting it if it ever exits
+# 2. first boot: install the agent CLI + cc-connect (retried until it succeeds, each try with a time limit)
+# 3. run cc-connect as `agent`, restarting it if it ever exits; the browser, if it's on, gets ready meanwhile
 set -uo pipefail
 
 KIND="${1:?usage: entry.sh <claude|codex|cursor|antigravity>}"
 U=agent
 H=/home/agent
 CONFIG_SRC=/cage-config/cc-connect.toml
+PROVISION_LIMIT="${CAGE_PROVISION_LIMIT:-1800}"   # seconds for one try at provisioning, then it starts over
+[[ "$PROVISION_LIMIT" =~ ^[0-9]+$ ]] || PROVISION_LIMIT=1800
 
 log() { echo "cage-entry[$KIND]: $*"; }
 
@@ -26,8 +28,14 @@ chown "$U:$U" "$H"
 chmod 750 "$H"
 
 delay=15
-until bash /cage/provision.sh "$KIND" ${CAGE_REFRESH:+--refresh}; do   # `cage update` sets CAGE_REFRESH
-  log "provisioning failed; retrying in ${delay}s (network down? see output above)"
+while true; do
+  # Each try has a time limit: a step that hangs is started over, never waited on forever. `cage update` sets
+  # CAGE_REFRESH.
+  timeout -k 60 "$PROVISION_LIMIT" bash /cage/provision.sh "$KIND" ${CAGE_REFRESH:+--refresh} </dev/null && break
+  case $? in
+    124|137) log "provisioning took too long; trying again in ${delay}s" ;;
+    *) log "provisioning failed; retrying in ${delay}s (network down? see output above)" ;;
+  esac
   sleep "$delay"
   delay=$(( delay < 240 ? delay * 2 : 240 ))
 done
@@ -60,9 +68,6 @@ chmod 644 /etc/cage/runtime.env
 # The privacy mask's own terms (cage mask add), readable by the agent user that runs guest/mask.py
 if [ -r /cage-config/mask.terms ]; then install -m 644 /cage-config/mask.terms /etc/cage/mask.terms; else rm -f /etc/cage/mask.terms; fi
 bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
-if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then
-  bash /cage/browser.sh || log "could not set up the browser (continuing without it)"
-fi
 bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing without them)"
 
 # The app's chat (guest/app.sh), and WhatsApp if it's on for this agent: adapters on cc-connect's bridge
@@ -72,6 +77,10 @@ if [ -r /cage-config/whatsapp.env ]; then bash /cage/whatsapp.sh "$KIND" & fi
 if [ -r /cage-config/voice.env ]; then bash /cage/voice.sh "$KIND" & fi
 # /all and stand-ins write requests for cage into /cage-outbox (guest/hook.sh)
 if [ -d /cage-outbox ]; then chown "$U:$U" /cage-outbox 2>/dev/null || true; fi
+
+# The browser gets ready in the background (guest/browser.sh): the first time, Chromium downloads, and the agent can
+# chat meanwhile
+if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then bash /cage/browser.sh "$KIND" & fi
 
 log "starting cc-connect as $U"
 while true; do
