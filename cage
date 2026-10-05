@@ -1713,11 +1713,12 @@ chat_add() { # chat_add <slack|discord|whatsapp> [agent]
   fi
 }
 
-unset_env() { # unset_env <name>...: drops lines from the env file
+unset_env() { # unset_env <name>...: drops lines from the env file, and from this cage's own settings
   local n
   [ $# -gt 0 ] || return 0
   for n in "$@"; do env_name_ok "$n" || die "refusing to change a setting called \"$n\""; done
   env_edit unset "$@"
+  unset "$@"   # load_env reads the file again, but never forgets a setting it read before
 }
 
 chat_rm() { # chat_rm <telegram|slack|discord|whatsapp> <agent>

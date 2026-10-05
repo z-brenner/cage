@@ -936,8 +936,12 @@ PY
   if grep -q 'source' "$MSB_LOG"; then fail "status --json went through the VMs' logs"; fi
   cp "$T/ev.vms" "$T/ev.running"
   "$ROOT/cage" status --json >/dev/null 2>&1 || fail "status --json said something needs you, with everyone ready"
-  "$ROOT/cage" chat rm telegram claude </dev/null 2>"$T/ev.err" || fail "chat rm telegram: $(cat "$T/ev.err")"
+  grep -q '^type = "telegram"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude isn't on Telegram to begin with"
+  printf 'y\n' | CAGE_PROTO=1 "$ROOT/cage" chat rm telegram claude 2>"$T/ev.err" || fail "chat rm telegram: $(cat "$T/ev.err")"
   if grep -q 'TELEGRAM_TOKEN_claude\|TELEGRAM_BOT_claude' "$CAGE_HOME/cage.env"; then fail "Telegram settings left behind"; fi
+  # it's awake, so it restarts (a yes) without the bot: nobody reaches it through Telegram any more
+  grep -q '"t":"ok","text":"started cage-claude' "$T/ev.err" || fail "claude wasn't restarted: $(cat "$T/ev.err")"
+  if grep -q 'telegram\|1:abc' "$CAGE_HOME/agents/claude/cc-connect.toml"; then fail "restarted with the Telegram bot still on: $(cat "$CAGE_HOME/agents/claude/cc-connect.toml")"; fi
   if "$ROOT/cage" remove cursor </dev/null 2>"$T/ev.err"; then fail "remove deleted without asking"; fi
   grep -q 'asks before it deletes' "$T/ev.err" && grep -qx 'cage-cursor' "$MSB_EXISTING" || fail "remove without asking: $(cat "$T/ev.err")"
   "$ROOT/cage" remove cursor --keep-login --yes 2>"$T/ev.err" || fail "remove --keep-login: $(cat "$T/ev.err")"
