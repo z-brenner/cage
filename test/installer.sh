@@ -444,6 +444,7 @@ grep -q "couldn't delete these, which hold your agents' logins and files: cage-c
 [ "$(readlink "$HOME/.local/bin/cage")" = "$T/src/cage" ] || fail "uninstall removed a cage command that isn't this cage's"
 rm -f "$HOME/.local/bin/cage"
 mkdir -p "$T/nomsb" && cp "$T/stub/systemctl" "$T/stub/launchctl" "$T/nomsb/"
+ln -s "$(command -v bash)" "$T/nomsb/bash"   # bash may live outside /usr/bin and /bin (Homebrew, the bash:3.2 image)
 bash "$ROOT/install.sh" 2>"$T/err" || fail "reinstall: $(cat "$T/err")"
 mkdir -p "$CAGE_HOME" && printf 'CAGE_AGENTS="claude codex"\n' > "$CAGE_HOME/cage.env"
 PATH="$T/nomsb:/usr/bin:/bin" "$HOME/cage/cage" uninstall --yes --everything 2>"$T/err" || fail "uninstall without msb: $(cat "$T/err")"
