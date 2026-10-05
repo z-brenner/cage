@@ -53,10 +53,12 @@ jobs:
           CAGE_TEST_CC_CONNECT: ${{ runner.temp }}/cc-connect-v1.5.0-linux-amd64
           PLAYWRIGHT_MODULE: ${{ runner.temp }}/pw/node_modules/playwright
         run: CAGE_TEST_CHROME="$(command -v google-chrome)" test/all.sh --skip mask unit
-      - name: host + setup tests (bash 3.2, as shipped on macOS)
+      # util-linux's script gives the tests a terminal, for the colour and mascot test (busybox has no script)
+      - name: host, setup, sign-in and privacy mask tests (bash 3.2, as shipped on macOS)
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2
-          sh -c 'apk add -q python3 curl tar openssl >/dev/null && bash test/host.sh && bash test/setup.sh'
+          sh -c 'apk add -q python3 curl tar openssl util-linux-misc >/dev/null
+          && bash test/host.sh && bash test/setup.sh && bash test/oauth.sh && bash test/mask.sh'
 
   windows-installer:
     name: windows installer (check only)
