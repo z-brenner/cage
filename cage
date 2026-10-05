@@ -192,6 +192,7 @@ banner() { # the big hello: mascot with the name beside it
 brand() { [ -z "$PROTO" ] || return 0; printf '%s[%s%s•%s%s|%s%s•%s%s]%s' "$C_AMBER" "$C_0" "$C_B" "$C_0" "$C_AMBER" "$C_0" "$C_B" "$C_0" "$C_AMBER" "$C_0"; }
 
 # --- config ----------------------------------------------------------------------------------------------------
+SHIPPED_CC_CONNECT="v1.5.0"   # the cc-connect versions earlier cages wrote into cage.env (cmd_init copied them)
 load_env() {
   [ -f "$CAGE_ENV" ] || die "no config at $CAGE_ENV yet; run cage to set things up"
   # shellcheck disable=SC1090
@@ -202,6 +203,9 @@ load_env() {
   CAGE_ROOT_DISK="${CAGE_ROOT_DISK:-16G}"
   CAGE_MODE="${CAGE_MODE:-yolo}"
   CAGE_IMAGE="${CAGE_IMAGE:-ubuntu:24.04}"
+  # A version an earlier cage froze in cage.env meant "the one cage is tested with", so this cage's applies instead,
+  # also when cage was updated by running the installer again (cage update takes the line out, the installer doesn't)
+  case " $SHIPPED_CC_CONNECT " in *" ${CAGE_CC_CONNECT_VERSION:-none} "*) CAGE_CC_CONNECT_VERSION="" ;; esac
   CAGE_CC_CONNECT_VERSION="${CAGE_CC_CONNECT_VERSION:-v1.5.0}"
   CAGE_TELEGRAM_GROUP_REPLY_ALL="${CAGE_TELEGRAM_GROUP_REPLY_ALL:-false}"
   CAGE_TELEGRAM_ALLOW="${CAGE_TELEGRAM_ALLOW:-}"
@@ -2772,7 +2776,6 @@ cage_version() {
 # branch a git install follows; --to: that release, older ones too), then microsandbox if it's older than the one cage
 # is tested with, then the agents rebuilt with the newest CLIs. A development checkout is left to git. Offline it
 # changes nothing: a VM rebuilt without the internet would have nothing to install, and your agents would be down.
-SHIPPED_CC_CONNECT="v1.5.0"   # the cc-connect versions earlier cages wrote into cage.env (cmd_init copied them)
 cmd_update() {
   local want="" v agents=()
   while [ $# -gt 0 ]; do   # agents are checked before anything changes, and --to can come anywhere
