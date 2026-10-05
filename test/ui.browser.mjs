@@ -594,6 +594,7 @@ await p5.addInitScript(() => { // cage's state never comes
   window.fetch = (url, o) => String(url).startsWith('/api/state') ? new Promise(() => {}) : real(url, o)
 })
 await p5.goto(base + '/#pair=' + pairing())
+for (let i = 0; i < 100 && !(await p5.evaluate(() => started)); i++) await new Promise((resolve) => setTimeout(resolve, 100))   // paired, and waiting
 await p5.getByText('Waking up…').waitFor({ timeout: 10000 })
 await p5.clock.fastForward(9000)
 await p5.getByText('Still starting… This can take a minute after your computer wakes up.').waitFor({ timeout: 5000 })
