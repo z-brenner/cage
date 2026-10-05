@@ -759,7 +759,20 @@ dialog.confirm p { margin: 0 0 18px; color: var(--ink); font-size: 14.5px; line-
 .crumb:hover, .linkish:hover { background: var(--hover); }
 .linkish { padding: 0; }
 .usage-card { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
-.usage .choices { border: 0; padding: 0; box-shadow: none; background: none; max-width: none; }
+.usage p { margin: 0; }
+.usage-bars { display: flex; flex-direction: column; gap: 10px; }
+.usage-bar { display: flex; flex-direction: column; gap: 5px; }
+.usage-label { color: var(--fg); font-size: 13px; }
+.usage-label b { color: var(--ink); font-weight: 600; }
+.usage-bar.warn .usage-label, .usage-bar.bad .usage-label { color: var(--tone-fg); }
+.meter { display: block; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.meter > span { display: block; height: 100%; border-radius: 3px; background: var(--tone); }
+.usage .usage-bars + p { margin-top: 8px; }
+.plan-out { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; margin-top: 10px; color: var(--fg); font-size: 13px; }
+.plan-out select { width: auto; }
+.list.plans > li { align-items: flex-start; }
+.plan-who { width: 120px; flex: none; padding-top: 1px; color: var(--ink); font-weight: 600; }
+.plan-note { margin: 2px 6px 0; }
 
 @media (max-width: 860px) {
   .starters { grid-template-columns: repeat(2, minmax(0, 1fr)); }

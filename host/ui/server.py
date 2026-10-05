@@ -44,7 +44,9 @@ and only pictures are shown in the page (everything else downloads).
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
   POST /api/chat/<a>/action             {"action", "label"?}  (a button in the chat)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
-  POST /api/chat/<a>/usage              your plan's usage, as cc-connect's /usage answers it
+  POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
+                                        seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
+                                        Asked at most every 10 minutes, or 30 seconds with "fresh"
   GET  /api/chat/<a>/file?p=files/…     a file from the chat (pictures shown, the rest downloaded)
 """
 import base64, fcntl, hashlib, hmac, http.server, json, os, pty, re, secrets, signal, socket, stat, struct, subprocess, sys
@@ -418,6 +420,19 @@ class Chat:
             os.close(d)
         return f"{folder}/{name}"
 
+    def waiting(self, rid):
+        """Is that request still in in/, not yet taken by the VM (whose relay isn't running, say)?"""
+        try:
+            d = os.open("in", self.D, dir_fd=self.fd)
+        except OSError:
+            return False
+        try:
+            return stat.S_ISREG(os.stat(f"{rid}.json", dir_fd=d, follow_symlinks=False).st_mode)
+        except OSError:
+            return False
+        finally:
+            os.close(d)
+
     def send(self, req):
         req["id"] = req.get("id") or f"{int(time.time() * 1000):013d}-{os.urandom(3).hex()}"
         self.write_new("in", req["id"] + ".json", json.dumps(req).encode())
@@ -540,6 +555,51 @@ def activity(c, since):
             if key:
                 today[key] += 1
     return {"pending": pending, "typing": typing, "last": last, "today": today}
+
+
+def ask_usage(c, timeout=25):
+    """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show): the
+    question's id, and the card, reply or error cc-connect answers with (None if none comes in time)."""
+    start, _ = c.size()
+    rid = c.send({"type": "message", "session": "usage", "text": "/usage"})
+    end = time.time() + timeout
+    while time.time() < end:
+        entries, _ = c.read_log(start)
+        for _, e in entries:
+            if e.get("session") == "usage" and e.get("ctx") == rid and e.get("t") in ("reply", "card", "error"):
+                return rid, e
+        time.sleep(0.4)
+    return rid, None
+
+
+class Usage:
+    """Each agent's plan usage, as its /usage card says it ("5h limit\nRemaining: 58%\nResets: 2h 13m"). Home shows it,
+    so an agent is asked at most every 10 minutes ("Check again": every 30 seconds), and after no answer at all, once a
+    minute. Asking costs no quota, but it's a request to the AI company each time. The last good answer (a card) is
+    kept with when it came, for when a later one is an error."""
+    EVERY, SOONEST, RETRY = 600, 30, 60
+    lock, asking, last, good = threading.Lock(), {}, {}, {}
+    ask = staticmethod(ask_usage)
+
+    @classmethod
+    def get(cls, c, fresh=False):
+        with cls.lock:
+            one = cls.asking.setdefault(c.agent, threading.Lock())
+        with one:   # one question at a time per agent: another page waits for its answer instead of asking again
+            last = cls.last.get(c.agent)
+            wait = cls.RETRY if last and not last["entry"] else cls.SOONEST if fresh else cls.EVERY
+            if not last or time.time() - last["asked"] >= wait:
+                if last and not last["entry"] and c.waiting(last["rid"]):   # it hasn't taken the last one: no second
+                    rid, entry = last["rid"], None
+                else:
+                    rid, entry = cls.ask(c)
+                last = cls.last[c.agent] = {"asked": time.time(), "entry": entry, "rid": rid}
+                if entry and entry.get("t") == "card":
+                    cls.good[c.agent] = last
+            good = cls.good.get(c.agent)
+        if good and good is not last:   # this one didn't say (its service is down, say): the last good answer, marked
+            return dict(good["entry"], asked=good["asked"], stale=True)
+        return dict(last["entry"], asked=last["asked"]) if last["entry"] else None
 
 
 class State:
@@ -1003,16 +1063,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ans = c.answer(c.send(req))
                 return self.send(200, ans) if ans is not None else self.send(504, {"error": "the agent didn't answer; is it awake?"})
             if what == "usage":
-                start, _ = c.size()
-                rid = c.send({"type": "message", "session": "usage", "text": "/usage"})
-                end = time.time() + 25
-                while time.time() < end:
-                    entries, _ = c.read_log(start)
-                    for _, e in entries:
-                        if e.get("session") == "usage" and e.get("ctx") == rid and e.get("t") in ("reply", "card", "error"):
-                            return self.send(200, e)
-                    time.sleep(0.4)
-                return self.send(504, {"error": "the agent didn't answer; is it awake?"})
+                # (no answer is an answer too: Home asks every minute, and a page shows each failed request as an error)
+                return self.send(200, Usage.get(c, b.get("fresh") is True) or {"error": "It didn’t answer. Is it awake?"})
         return self.send(404, {"error": "no such endpoint"})
 
     def events_head(self):

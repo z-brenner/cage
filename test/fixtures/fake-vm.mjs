@@ -18,12 +18,16 @@ const permission = (tool, input) => `⚠️ **Permission Request**\n\nAgent want
 const PERM_BUTTONS = [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }], [{ text: 'Allow All (this session)', data: 'perm:allow_all' }]]
 const EMAIL = JSON.stringify({ body: 'Hi Bob,\n\nThe brief is ready. It covers:\n\n1. Scope\n2. Timeline\n3. Budget\n\nTell me if anything is missing.\n\nBest,\nSam',
   subject: 'The brief is ready', to: 'bob@acme.com' })
+// and its /usage card (engine.go, renderUsageCard; bridge.go, serializeCard): what's left in each window, word for word
+const USAGE = { header: { title: 'Usage', color: 'indigo' }, elements: [
+  { type: 'markdown', content: 'Account: sam@example.com (max)\n\n5h limit\nRemaining: 58%\nResets: 2h 13m\n\n7d limit\nRemaining: 17%\nResets: 3d 4h 0m' },
+  { type: 'actions', buttons: [{ text: 'Back', btn_type: 'default', value: 'nav:/help' }], layout: '' }] }
 log({ t: 'status', connected: true })
 async function handle (r) {
   const session = r.session || 'you'
   if (r.type === 'message') {
     if (session === 'you') log({ t: 'you', session, id: r.id, text: r.text, files: (r.files || []).map((f) => ({ ...f, size: fs.statSync(path.join(dir, f.path)).size })) })
-    if (r.text === '/usage') return log({ t: 'card', session, ctx: r.id, card: { header: { title: 'Usage' }, elements: [{ type: 'markdown', content: '**5-hour limit:** 42% used, resets in 2 h' }, { type: 'note', text: 'Weekly: 17% used' }] } })
+    if (r.text === '/usage') return log({ t: 'card', session, ctx: r.id, card: USAGE })
     log({ t: 'typing', session, on: true })
     if (/email/i.test(r.text)) {
       await sleep(300)

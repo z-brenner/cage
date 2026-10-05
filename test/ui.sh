@@ -455,6 +455,14 @@ p="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "
 head_of "${H[@]}" "$B/api/chat/claude/file?p=$p&dl=1" | grep -qi "filename=\"q3-results.txt\"; filename\*=UTF-8''q3-results.txt" || fail "q3-results.txt lost part of its name"
 ok "a work-folder file downloads under its own name"
 
+# Plan usage on Home asks the agent (/usage) at most every 10 minutes, however often the page asks, also with "fresh"
+for body in '{}' '{}' '{"fresh":true}'; do
+  curl --noproxy '*' -s "${H[@]}" -X POST -d "$body" "$B/api/chat/claude/usage" > "$T/usage.json"
+done
+python3 -c 'import json,sys,time; u=json.load(open(sys.argv[1])); assert "Remaining: 58%" in u["card"]["elements"][0]["content"] and time.time() - u["asked"] < 60, u' "$T/usage.json" \
+  && [ "$(grep -c '"t":"card","session":"usage"' "$A/claude/log.jsonl")" = 1 ] || fail "plan usage, asked three times: $(cat "$T/usage.json"); $(grep -c usage "$A/claude/log.jsonl")"
+ok "plan usage: the agent is asked once, however often the page asks"
+
 # An installed release (a VERSION file), for updating while the app is open: the server restarts itself with the new
 # code once nothing is running, and the page reloads to get the new page
 mkdir -p "$T/inst" && tar --exclude=.git --exclude=node_modules -C "$ROOT" -cf - . | tar -C "$T/inst" -xf - && echo v1.0.0 > "$T/inst/VERSION"

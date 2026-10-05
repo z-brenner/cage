@@ -877,10 +877,13 @@ function pageHome () {
   return h('div', { class: 'page' }, h('h1', { class: 'sr-only' }, 'Home'),
     todo.length ? section('Needs you', '', h('ul', { class: 'list attn-list' }, todo)) : null,
     h('section', { class: 'section hero' }, h('div', { class: 'section-head' }, h('h2', {}, 'Ask your agents'),
-      h('p', {}, 'Each awake agent answers on its own, side by side. When they agree, you can be fairly sure; when they don’t, that’s the part worth a closer look.')), composer(), answers()),
+      h('p', {}, 'Each awake agent answers on its own, side by side. When they agree, you can be fairly sure; when they don’t, that’s the part worth a closer look.')), composer(),
+    h('p', { class: 'small muted plan-note' }, 'Each agent you ask uses its own plan.'), answers()),
     section('Your agents', '', h('div', { class: 'section-tools' }, sleepy.length ? btn('Wake everyone', () => runJob(['up'], 'Waking your agents'), 'sm ghost', 'power') : null),
       h('ul', { class: 'list agents' }, S.agents.slice().sort((a, b) => b.enabled - a.enabled).map(agentRow)),
-      h('p', { class: 'small muted foot' }, S.settings.ask_all === 'on' ? 'In any chat, start a message with /all to ask all of them from there too.' : 'Tip: turn on “Ask everyone from chat” in Settings to do this from your phone too.')))
+      h('p', { class: 'small muted foot' }, S.settings.ask_all === 'on' ? 'In any chat, start a message with /all to ask all of them from there too.' : 'Tip: turn on “Ask everyone from chat” in Settings to do this from your phone too.')),
+    agentsOn().length ? section('Plan left', 'How much each one has left before its plan’s limit. Checked every 10 minutes.',
+      h('ul', { class: 'list boxed plans' }, agentsOn().map((a) => { wantUsage(a); return h('li', {}, avatar(a.name, 24), h('b', { class: 'plan-who' }, a.label), h('div', { class: 'grow usage', 'data-usage': a.name, 'data-offer': '1' }, usageView(a, true))) }))) : null)
 }
 
 function pageWelcome () {
@@ -1593,8 +1596,56 @@ function pageFiles (a) {
   ]
 }
 
+// Plan usage, as each agent's /usage card says it: "5h limit\nRemaining: 58%\nResets: 2h 13m", for each window.
+// cage's web app asks the agent at most every 10 minutes (server.py's Usage); this page asks the web app every minute.
+// Only Claude Code and Codex can tell.
+let USAGE = {}   // agent → its last answer (with "asked", and "stale" if a newer one wasn't good), or {error}
+const USAGE_ASKING = {}
+const TELLS_USAGE = ['claude', 'codex']
+const WINDOWS = { '5h': '5-hour', '7d': 'Weekly' }
+function usageOf (u) { // [{label, left, reset}]: what's left in each window; [] if the answer says something else
+  const card = u && u.card && typeof u.card === 'object' ? u.card : null
+  const text = card ? (card.elements || []).filter((e) => e && e.type === 'markdown').map((e) => String(e.content || '')).join('\n') : String((u && u.text) || '')
+  return [...text.matchAll(/(\S+) limit\s*\n\s*Remaining:\s*(\d+)%[\s\S]*?Resets:\s*([^\n]+)/g)]
+    .map(([, w, left, reset]) => ({ label: WINDOWS[w] || w + ' limit', left: Math.min(100, +left), reset: reset.trim() }))
+}
+function wantUsage (a) { // ask again if it's been a minute (the web app answers from what it has)
+  const u = USAGE[a.name]
+  if (a.state === 'ready' && TELLS_USAGE.includes(a.name) && !USAGE_ASKING[a.name] && (!u || Date.now() - u.got > 60000)) loadUsage(a.name)
+}
+async function loadUsage (name, fresh) {
+  if (USAGE_ASKING[name]) return
+  USAGE_ASKING[name] = true
+  try { USAGE[name] = { ...(await api(`/api/chat/${name}/usage`, { method: 'POST', body: fresh ? { fresh: true } : {} })), got: Date.now() } } catch (e) { USAGE[name] = { error: e.message, got: Date.now() } }
+  USAGE_ASKING[name] = false
+  drawUsage(name)
+}
+function drawUsage (name) { // wherever its usage is shown (Home, its settings), without drawing the whole page again
+  const a = STATE && agentOf(name)
+  if (a) document.querySelectorAll(`[data-usage="${name}"]`).forEach((el) => el.replaceChildren(...[usageView(a, el.dataset.offer === '1')].flat().filter(Boolean)))
+}
+function usageView (a, offer) { // bars, or why there are none; offer: a stand-in, for an agent that has used it all up
+  const say = (text) => h('p', { class: 'muted small' }, text)
+  if (!TELLS_USAGE.includes(a.name)) return say('Not reported')
+  if (a.state !== 'ready') return say(a.state === 'login' ? 'Sign it in to see how much is left.' : 'Wake it up to see how much is left.')
+  const u = USAGE[a.name]
+  if (!u || (USAGE_ASKING[a.name] && !u.got)) return say('Checking…')
+  if (u.error) return say(u.error)
+  const windows = usageOf(u)
+  if (!windows.length) return say(plainLine(u.text || (u.card && u.card.elements || []).map((e) => (e && (e.content || e.text)) || '').join(' '), 200) || 'It didn’t say.')
+  const others = agentsOn().filter((b) => b.name !== a.name)
+  return [
+    h('div', { class: 'usage-bars' }, windows.map((w) => h('div', { class: 'usage-bar ' + (w.left <= 0 ? 'bad' : w.left < 20 ? 'warn' : 'ok') },
+      h('span', { class: 'usage-label' }, h('b', {}, w.label + ': '), `${w.left}% left` + (w.reset && w.reset !== '-' ? `, resets in ${w.reset}` : '')),
+      h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { style: { width: w.left + '%' } }))))),
+    u.stale ? say('It didn’t answer the last time; this is from ' + when(u.asked * 1000) + '.') : null,
+    offer && windows.some((w) => w.left <= 0) && !a.fallback && others.length
+      ? h('div', { class: 'plan-out' }, h('span', {}, `${a.label} has used up its plan for now. Until it resets, another agent can answer its messages:`), fallbackSelect(a, others))
+      : null
+  ]
+}
+
 // Settings for one agent: chat apps, asking first, plan usage, privacy, stand-in, troubleshooting
-let USAGE = {}
 function agentSettings (a) {
   const s = statusOf(a)
   const meta = AGENT[a.name]
@@ -1619,23 +1670,12 @@ function agentSettings (a) {
       h('span', { class: 'grow' }, h('b', {}, label), h('span', { class: 'sub' + (on ? ' on' : '') }, detail)), open, acts)
   }
   const others = agentsOn().filter((b) => b.name !== a.name)
-  const usageBox = h('div', { class: 'usage' })
-  const showUsage = () => {
-    const u = USAGE[a.name]
-    usageBox.replaceChildren(!u ? h('p', { class: 'muted small' }, 'Checking…')
-      : u.error ? h('p', { class: 'muted small' }, u.error)
-        : u.card ? cardOf({ agent: a.name }, u.card) : md(u.text || ''))
-  }
-  const checkUsage = async () => {
-    USAGE[a.name] = null
-    showUsage()
-    try { USAGE[a.name] = await api(`/api/chat/${a.name}/usage`, { method: 'POST', body: {} }) } catch (e) { USAGE[a.name] = { error: e.message } }
-    showUsage()
-  }
-  if (a.state === 'ready') { if (!(a.name in USAGE)) checkUsage(); else showUsage() } else usageBox.append(h('p', { class: 'muted small' }, 'Wake it up and sign it in to see how much is left.'))
+  wantUsage(a)
+  const again = () => { USAGE[a.name] = null; drawUsage(a.name); loadUsage(a.name, true) }
   return [
-    section('Plan usage', `How much is left on its plan (${a.plan}). Only Claude Code and Codex can tell.`, h('div', { class: 'card usage-card' }, usageBox,
-      a.state === 'ready' ? h('div', { class: 'row' }, btn('Check again', checkUsage, 'sm ghost', 'refresh-cw')) : null)),
+    section('Plan usage', `How much is left on its plan (${a.plan}). Only Claude Code and Codex can tell.`, h('div', { class: 'card usage-card' },
+      h('div', { class: 'usage', 'data-usage': a.name }, usageView(a)),
+      a.state === 'ready' && TELLS_USAGE.includes(a.name) ? h('div', { class: 'row' }, btn('Check again', again, 'sm ghost', 'refresh-cw')) : null)),
     section('Asking first', '', h('div', { class: 'card' },
       setting('Ask before acting in your apps', a.name === 'claude'
         ? 'Before it sends an email, books a meeting or changes anything in an app you connected, it asks you in the chat. Work on its own computer goes ahead.'
