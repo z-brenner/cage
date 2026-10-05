@@ -1362,7 +1362,14 @@ cage update claude 2>/dev/null
 grep -qx 'CAGE_CC_CONNECT_VERSION="v1.4.2"' "$CAGE_HOME/cage.env" || fail "update dropped a cc-connect version the user picked"
 grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- '-e | CC_CONNECT_VERSION=v1.4.2 |' || fail "the user's cc-connect version isn't used"
 sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
-ok "cage update drops the cc-connect pin earlier versions froze in cage.env, and keeps one you picked"
+stable="$(sed -n 's/^STABLE_CC_CONNECT="\([^"]*\)".*/\1/p' "$ROOT/cage")"
+[ -n "$stable" ] || fail "can't find STABLE_CC_CONNECT in cage; update this test"
+echo 'CAGE_CC_CONNECT_VERSION=stable' >> "$CAGE_HOME/cage.env"
+cage update claude 2>/dev/null
+grep -qx 'CAGE_CC_CONNECT_VERSION=stable' "$CAGE_HOME/cage.env" || fail "update dropped CAGE_CC_CONNECT_VERSION=stable"
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "-e | CC_CONNECT_VERSION=$stable |" || fail "with stable, the VM didn't get cc-connect $stable"
+sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
+ok "cage update drops the cc-connect pin earlier versions froze in cage.env, and keeps one you picked (stable too)"
 
 # Running the installer again updates cage but leaves cage.env as it is: a pin an earlier cage froze there still gives
 # way to the version this cage is tested with. Shown with a copy of cage that is tested with another version.
@@ -1383,8 +1390,13 @@ ok "cage update drops the cc-connect pin earlier versions froze in cage.env, and
   echo 'CAGE_CC_CONNECT_VERSION="v1.4.2"' >> "$CAGE_HOME/cage.env"
   [ "$(vm_cc)" = v1.4.2 ] || fail "the cc-connect version you picked gave way: $(vm_cc)"
   sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
+  # "stable" (what you set to leave a preview cc-connect) is the stable release whatever this cage's own is
+  stable="$(sed -n 's/^STABLE_CC_CONNECT="\([^"]*\)".*/\1/p' "$ROOT/cage")"
+  echo 'CAGE_CC_CONNECT_VERSION=stable' >> "$CAGE_HOME/cage.env"
+  [ "$(vm_cc)" = "$stable" ] || fail "with CAGE_CC_CONNECT_VERSION=stable, the VM gets cc-connect $(vm_cc), not $stable"
+  sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
   [ "$(vm_cc)" = v9.9.9 ] || fail "without a pin, the VM gets cc-connect $(vm_cc)" )
-ok "a cc-connect pin an earlier cage froze in cage.env gives way to this cage's version without cage update too; one you picked stays"
+ok "a cc-connect pin an earlier cage froze in cage.env gives way to this cage's version without cage update too; one you picked (or stable) stays"
 
 # microsandbox: cage installs the version it pins, with the official installer (here a stand-in), and says so when
 # the installed one isn't that version

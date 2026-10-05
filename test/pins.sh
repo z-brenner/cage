@@ -51,6 +51,16 @@ for f in guest/provision.sh .github/workflows/ci.yml; do
 done
 ok "cc-connect $cc everywhere:$where"
 
+# CAGE_CC_CONNECT_VERSION=stable, the way back from a preview cc-connect, must name a release the VM can check fully
+stable="$(sed -nE "s/^STABLE_CC_CONNECT=\"($V)\".*/\1/p" cage)"
+[ -n "$stable" ] || fail "can't find cage's STABLE_CC_CONNECT=\"v...\"; update test/pins.sh"
+case "$stable" in *-*) fail "STABLE_CC_CONNECT is a pre-release ($stable); it has to be a stable release" ;; esac
+for arch in amd64 arm64; do
+  grep -qE "^ *${stable//./\\.}-$arch\) echo [0-9a-f]{64} ;;" guest/provision.sh ||
+    fail "guest/provision.sh keeps no checksum for cc-connect $stable ($arch), the one CAGE_CC_CONNECT_VERSION=stable picks"
+done
+ok "cc-connect stable is $stable, a release the VM keeps checksums for"
+
 msb="$(grep -oE "MSB_VERSION(=|:-)[\"']?$V" cage | grep -oE "$V" | sort -u || true)"
 [ -n "$msb" ] || fail "can't find cage's microsandbox version (MSB_VERSION=v...); update test/pins.sh"
 [ "$(wc -l <<<"$msb")" = 1 ] || fail "cage pins more than one microsandbox version: $(echo $msb)"
