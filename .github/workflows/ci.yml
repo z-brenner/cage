@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: shellcheck
         run: shellcheck -S warning cage install.sh guest/*.sh test/*.sh scripts/*.sh
       - name: install.ps1 parses and stays ASCII (Windows PowerShell 5.1 reads files in the system code page)
@@ -51,7 +53,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Windows PowerShell 5.1, as a file
         shell: powershell
         run: |
@@ -78,7 +82,9 @@ jobs:
       matrix:
         agent: [claude, codex, cursor, antigravity]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - run: test/guest-smoke.sh ${{ matrix.agent }}
       - name: waking up with no network at all (from the agent's cache)
         run: test/offline-wake.sh ${{ matrix.agent }}
@@ -92,7 +98,9 @@ jobs:
       matrix:
         agent: [claude, codex, cursor, antigravity]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: enable KVM for the runner user
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules

@@ -1,0 +1,11 @@
+# The workflows pin each GitHub Action to a commit, so nothing changes under them unnoticed. This opens a weekly pull
+# request when there are newer versions (all of them in one), which CI then checks like any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
