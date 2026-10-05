@@ -807,13 +807,22 @@ agents_for() { if [ "$1" = all ]; then echo "$CAGE_AGENTS"; else echo "$1"; fi; 
 agents_label() { if [ "$1" = all ]; then echo "all agents"; else echo "${1// /, }"; fi; }
 for_agent() { [ "$1" = all ] || [[ " $1 " == *" $2 "* ]]; }   # for_agent <agents|all> <agent>
 
+# Host lists are split by hand, never by the shell: it would turn a pattern like *.example.com into the names of
+# files in the folder cage runs from.
+host_words() { IFS=', ' read -r -a "$1" <<<"$2" || true; }   # host_words <array> <"a,b c">
+
 hosts_check() { # hosts_check HOST[,HOST...] <agents|all>: dies on a bad host, or on an agent's own service
-  local h a b
-  for h in ${1//,/ }; do
+  local h a b hs=() bs=()
+  host_words hs "$1"
+  for h in ${hs[@]+"${hs[@]}"}; do
+    [ -n "$h" ] || continue
     host_ok "$h" || die "\"$h\" isn't a host name (like api.github.com, or *.example.com)"
     for a in $(agents_for "$2"); do
-      for b in $(tls_bypass_for "$a"); do
-        host_matches "${h#\*.}" "$b" && die "$h is $a's own service; cage doesn't intercept it, so a key can't be protected there for $a (name the agents that should get it)"
+      host_words bs "$(tls_bypass_for "$a" | tr '\n' ' ')"
+      for b in ${bs[@]+"${bs[@]}"}; do
+        if host_matches "${h#\*.}" "$b"; then
+          die "$h is $a's own service; cage doesn't intercept it, so a key can't be protected there for $a (name the agents that should get it)"
+        fi
       done
     done
   done
@@ -885,7 +894,12 @@ cmd_secret() {
   esac
 }
 
-yaml_list() { local h out=""; for h in ${1//,/ }; do out="$out${out:+, }\"$h\""; done; printf '[%s]' "$out"; }
+yaml_list() { # yaml_list <"a,b c">: ["a", "b", "c"]
+  local h hs=() out=""
+  host_words hs "$1"
+  for h in ${hs[@]+"${hs[@]}"}; do if [ -n "$h" ]; then out="$out${out:+, }\"$h\""; fi; done
+  printf '[%s]' "$out"
+}
 
 SECRET_ARGS=() SECRET_ENV=()
 # secret_plan <agent>: its secrets as a microsandbox config file, and what the VM may know about them. The file
@@ -1409,7 +1423,10 @@ chat_add_slack() {
       everyone) if share_warning "$a" "${team:-the workspace}"; then allow="*"; fi ;;
       *)
         share_warning "$a" "the list" || who=""
-        for e in ${who//,/ }; do
+        local es=()
+        host_words es "$who"
+        for e in ${es[@]+"${es[@]}"}; do
+          [ -n "$e" ] || continue
           r="$(api GET "$SLACK_API/users.lookupByEmail?email=$(urlencode "$e")" "Bearer $bt" 2>/dev/null || true)"
           id="$(printf '%s' "$r" | jget id)"
           if [[ "$r" == *'"ok":true'* ]] && id_ok "$id"; then allow="$allow,$id"; else warn "skipped $e (not found)"; fi
@@ -1526,7 +1543,7 @@ qr_redraw() { # qr_redraw <text>: draws a QR code in place of the one drawn befo
 }
 
 whatsapp_link() { # whatsapp_link <agent>: shows the code to scan until the phone has linked
-  local a="$1" st state last="" code="" num i shown=0
+  local a="$1" st state last="" code="" num i shown=0 me pc
   [ -n "$(cvar WHATSAPP_MODE "$a")" ] || die "WhatsApp isn't on for $a: cage chat add whatsapp $a"
   refresh_running
   [[ "$RUNNING" == *" $(vm "$a") "* ]] || die "$a is asleep: cage up $a"
@@ -1545,14 +1562,19 @@ whatsapp_link() { # whatsapp_link <agent>: shows the code to scan until the phon
     state="$(printf '%s' "$st" | jget state)"
     case "$state" in
       linked)
+        # status.json is written in the VM: only a phone number is shown from it, never other text
+        me="$(printf '%s' "$st" | jget me)"
+        [[ "$me" =~ ^[0-9]{6,15}$ ]] || me=""
         [ "$QR_LINES" -gt 0 ] && printf '\033[%sA\033[J' "$QR_LINES" >&2
-        ok "linked to +$(printf '%s' "$st" | jget me)"
+        ok "linked${me:+ to +$me}"
         if [ "$(cvar WHATSAPP_MODE "$a")" = own ]; then hint "talk to $a in your \"Message yourself\" chat"
-        else hint "message +$(printf '%s' "$st" | jget me) from your phone to talk to $a"; fi
+        elif [ -n "$me" ]; then hint "message +$me from your phone to talk to $a"
+        else hint "message $a's number from your phone to talk to it"; fi
         return 0 ;;
       qr) code="$(printf '%s' "$st" | jget qr)"; [ "$code" = "$last" ] || { last="$code"; qr_redraw "$code"; } ;;
-      code) if [ $shown = 0 ]; then
-              say "Tap ${C_B}Link with phone number instead${C_0} and enter: ${C_B}$(printf '%s' "$st" | jget code)${C_0}"; shown=1
+      code) pc="$(printf '%s' "$st" | jget code)"
+            if [ $shown = 0 ] && [[ "$pc" =~ ^[A-Z0-9-]{4,12}$ ]]; then
+              say "Tap ${C_B}Link with phone number instead${C_0} and enter: ${C_B}$pc${C_0}"; shown=1
             fi ;;
       *) [ "$UI" = 1 ] && [ "$QR_LINES" = 0 ] && printf '\r%s%s getting WhatsApp ready…' "$IND" "$(face "$a" "busy$(( i % 2 + 1 ))")" >&2 ;;
     esac
@@ -2741,7 +2763,7 @@ network_applies() { # a VM takes network rules when it's (re)created: offer that
 
 cmd_allow() { # cage allow <host> [agents|all] / cage allow rm <host> [agents|all]
   load_env
-  local rm=0 host agents var cur new h a
+  local rm=0 host agents var cur new h a cs=() found=0
   if [ "${1:-}" = rm ]; then rm=1; shift; fi
   host="$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')"
   host="${host#https://}" host="${host#http://}" host="${host%%/*}"
@@ -2752,12 +2774,16 @@ cmd_allow() { # cage allow <host> [agents|all] / cage allow rm <host> [agents|al
   for a in $agents; do
     if [ "$a" = all ]; then var=CAGE_ALLOW_HOSTS; else check_agent "$a"; var="CAGE_ALLOW_HOSTS_$a"; fi
     cur="${!var:-}" new=""
-    for h in $cur; do [ "$h" = "$host" ] || new="$new${new:+ }$h"; done
+    host_words cs "$cur"
+    for h in ${cs[@]+"${cs[@]}"}; do
+      if [ "$h" = "$host" ]; then found=1; elif [ -n "$h" ]; then new="$new${new:+ }$h"; fi
+    done
     if [ "$rm" = 0 ]; then new="$new${new:+ }$host"; fi
     set_env "$var" "$new"
     printf -v "$var" '%s' "$new"
   done
-  if [ "$rm" = 1 ]; then ok "$host is no longer on the allow list (${agents/all/everyone})"
+  if [ "$rm" = 1 ] && [ $found = 0 ]; then say "$host wasn't on the allow list (${agents/all/everyone}); nothing changed"; return 0
+  elif [ "$rm" = 1 ]; then ok "$host is no longer on the allow list (${agents/all/everyone})"
   else ok "$host is allowed (${agents/all/everyone})"; fi
   [ "${CAGE_NETWORK:-open}" = strict ] || { hint "the network is open anyway; this applies once it's strict: cage network strict"; return 0; }
   network_applies
@@ -2832,6 +2858,7 @@ cmd_security() {
   # newest first, grouped by agent+kind+subject+detail, with a count and the latest time
   while IFS='|' read -r c t a k s d; do
     n=$((n + 1))
+    s="$(printf '%s' "$s" | safe_text)" d="$(printf '%s' "$d" | safe_text)"   # names a VM asked for: text only
     case "$k" in
       secret) printf '  %s‼%s %s tried to send %s%s%s to %s%s%s · blocked, it never left (%s×, %s)\n' "$C_ERR" "$C_0" "$a" \
                 "$C_B" "$s" "$C_0" "$C_B" "${d:-an unknown host}" "$C_0" "$c" "$(ago "$t")" >&2 ;;
