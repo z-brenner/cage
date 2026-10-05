@@ -8,8 +8,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-SERVER="" STALL=""
-trap '[ -z "$SERVER$STALL" ] || kill $SERVER $STALL 2>/dev/null; rm -rf "$T"' EXIT
+SERVER="" STALL="" HELPER=""
+trap '[ -z "$SERVER$STALL$HELPER" ] || kill $SERVER $STALL $HELPER 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -422,7 +422,16 @@ grep -q "won't delete $HOME/: your home folder is in it (nothing was removed)" "
 ok "cage uninstall never deletes backups (where cage.env puts them too, through a link too) or your home folder (however it's spelled)"
 
 : > "$MSB_LOG"
+# the background helper (cage _refresh, found by its pid file) stops with cage, not after its folder is gone
+CAGE_MSB="$T/stub/msb" nohup "$HOME/cage/cage" _refresh "$CAGE_HOME" </dev/null >/dev/null 2>&1 &
+for _ in $(seq 50); do [ -s "$CAGE_HOME/refresh.pid" ] && break; sleep 0.1; done
+HELPER="$(cat "$CAGE_HOME/refresh.pid" 2>/dev/null || true)"
+[ -n "$HELPER" ] && kill -0 "$HELPER" 2>/dev/null || fail "the background helper didn't start"
 CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fail "uninstall: $(cat "$T/err")"
+for _ in $(seq 20); do kill -0 "$HELPER" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$HELPER" 2>/dev/null; then fail "the background helper outlived cage uninstall"; fi
+[ ! -e "$CAGE_HOME/refresh.pid" ] || fail "uninstall left the helper's pid file"
+HELPER=""
 [ ! -e "$HOME/cage" ] && [ ! -e "$HOME/.local/bin/cage" ] && [ ! -e "$HOME/.local/share/applications/cage.desktop" ] || fail "cage is still here"
 [ -f "$CAGE_HOME/cage.env" ] || fail "uninstall without --everything deleted the settings"
 grep -q '^rm --force cage-claude$' "$MSB_LOG" && ! grep -q 'volume rm' "$MSB_LOG" || fail "VMs and volumes: $(cat "$MSB_LOG")"
@@ -468,6 +477,6 @@ left="$(cd "$HOME" && find . \( -type f -o -type l \) ! -path './cage-backups/*'
 [ -z "$left" ] || fail "uninstall --everything left: $left"
 [ -f "$HOME/cage-backups/cage-2026-01-01-000000.cagebackup" ] || fail "uninstall deleted a backup"
 grep -q 'microsandbox stays installed' "$T/err" || fail "no word on removing microsandbox: $(cat "$T/err")"
-ok "cage uninstall: VMs, command, PATH lines and ~/cage go; settings and volumes only with --everything; backups stay"
+ok "cage uninstall: VMs, helpers, command, PATH lines and ~/cage go; settings and volumes only with --everything; backups stay"
 
 echo "all $pass installer tests passed"

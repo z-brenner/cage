@@ -2906,7 +2906,8 @@ cmd_uninstall() {
   if [ -f "$CAGE_ENV" ]; then ( cmd_down ) || true; fi
   refresher_stop
   wsl_keepalive_stop
-  pkill -f -- "$CAGE_ROOT/host/ui/server.py" 2>/dev/null || true
+  # (its path as text in the pattern: brackets or dots in it mean only themselves, as for the helpers)
+  pkill -f -- "$(printf '%s' "$CAGE_ROOT/host/ui/server.py" | sed 's/[][\.*^$?+(){}|]/\\&/g')" 2>/dev/null || true
   ( autostart_apply off ) >/dev/null 2>&1 || true
   rm -f "$CAGE_HOME/autostart"
   if find_msb; then
