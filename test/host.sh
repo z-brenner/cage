@@ -586,7 +586,13 @@ ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is 
   printf 'the note as shown\n' > "$I/swap.md"
   { for _ in $(seq 100); do grep -q 'Keep it' "$T/j2.out" 2>/dev/null && break; sleep 0.1; done
     printf 'swapped in later\n' > "$I/swap.md"; printf 'y\n'; } | "$ROOT/cage" memory > "$T/j2.out" 2>&1
-  grep -q 'the note as shown' "$N/swap.md" && ! grep -q 'swapped in later' "$N/swap.md" || fail "kept something other than what was shown: $(cat "$N/swap.md")" )
+  grep -q 'the note as shown' "$N/swap.md" && ! grep -q 'swapped in later' "$N/swap.md" || fail "kept something other than what was shown: $(cat "$N/swap.md")"
+  # ~/.cage reached through a link, and no `timeout` command (macOS): notes are still read
+  ln -s "$CAGE_HOME" "$T/jlink" && mkdir "$T/nt"
+  for p in ${PATH//:/ }; do for x in "$p"/*; do n="${x##*/}"; [ "$n" = timeout ] || [ -e "$T/nt/$n" ] || ln -s "$x" "$T/nt/$n"; done; done
+  printf 'read through a link, without timeout\n' > "$I/linked.md"
+  printf 'y\n' | PATH="$T/nt" CAGE_HOME="$T/jlink" "$ROOT/cage" memory > "$T/j3.out" 2>&1 || fail "cage memory: $(cat "$T/j3.out")"
+  grep -q 'without timeout' "$N/linked.md" || fail "a note wasn't read with ~/.cage behind a link, or without timeout: $(cat "$T/j3.out")" )
 ok "memory review: links in the inbox removed unread, invisible characters taken out, what you see is what's kept"
 
 # links cage opens (a sign-in link comes from an app's own server): only plain web addresses, and on Windows the

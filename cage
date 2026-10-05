@@ -661,48 +661,52 @@ PY
 
 MEMORY_NOTE_MAX=16384
 memory_review() {
-  local f a name dst i n=0 kept=0 answer tmp k
+  local f a d name dst i n=0 kept=0 answer tmp k
   brain_init
   tmp="$(mktemp -d)"
-  for f in "$BRAIN"/inbox/*/*.md; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    a="$(basename "$(dirname "$f")")"
-    # The inbox is the VM's to write. A link there could point at your keys or settings, and the file can change
-    # while you decide. So only plain files count, each is read once (never through a link), and what you're shown
-    # is exactly what's kept: cage never goes back to the file.
-    if [ -L "$f" ] || [ ! -f "$f" ]; then
-      rm -rf "$f" || true
-      warn "removed $(basename "$f") from $a's memory inbox: it wasn't a plain note (cage never follows links there)"
-      continue
-    fi
-    if ! outbox_read "$f" $((MEMORY_NOTE_MAX + 1)) > "$tmp/note"; then
-      warn "couldn't read $(basename "$f") in $a's memory inbox; it's still there"; continue
-    fi
-    if [ "$(wc -c < "$tmp/note" | tr -d ' ')" -gt "$MEMORY_NOTE_MAX" ]; then
-      rm -f "$f"; warn "$a's note $(basename "$f" .md) is over 16 KB, too long to review here, so it wasn't kept"
-      continue
-    fi
-    n=$((n + 1))
-    k="$(visible_text "$tmp/note" "$tmp/clean")"
-    if [ -n "$PROTO" ]; then say "$a wants to remember:"
-    else printf '\n%s%s  %s%s wants to remember:%s\n\n' "$IND" "$(face "$a" ready)" "$C_B" "$a" "$C_0" >&2; fi
-    block "$(cat "$tmp/clean")"
-    [ -n "$PROTO" ] || printf '\n' >&2
-    if [ "${k:-0}" -gt 0 ]; then warn "cage took out $k invisible character$([ "$k" = 1 ] || echo s): they can hide instructions from you"; fi
-    prompt "Keep it? [y]es, [n]o, [s]kip: " answer
-    case "$answer" in
-      [yY]*)
-        name="$(printf '%s' "$(basename "$f" .md)" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-60)"
-        dst="$BRAIN/memory/notes/$name.md" i=2
-        while [ -e "$dst" ]; do dst="$BRAIN/memory/notes/$name-$i.md"; i=$((i + 1)); done
-        { cat "$tmp/clean"; printf '\n\n_Remembered from %s on %s._\n' "$a" "$(date +%Y-%m-%d)"; } > "$dst"
-        rm -f "$f"; kept=$((kept + 1))
-        ok "kept as notes/$(basename "$dst")" ;;
-      [nN]*) rm -f "$f"; ok "forgotten" ;;
-      *) say "left in the inbox for later" ;;
-    esac
+  trap 'rm -rf "$tmp"' EXIT
+  for d in "$BRAIN"/inbox/*/; do
+    d="$(cd "$d" 2>/dev/null && pwd -P)" || continue   # its real path: a note is read only exactly where it is
+    a="$(basename "$d")"
+    for f in "$d"/*.md; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      # The inbox is the VM's to write. A link there could point at your keys or settings, and the file can change
+      # while you decide. So only plain files count, each is read once (never through a link), and what you're
+      # shown is exactly what's kept: cage never goes back to the file.
+      if [ -L "$f" ] || [ ! -f "$f" ]; then
+        rm -rf "$f" || true
+        warn "removed $(basename "$f") from $a's memory inbox: it wasn't a plain note (cage never follows links there)"
+        continue
+      fi
+      if ! outbox_read "$f" $((MEMORY_NOTE_MAX + 1)) > "$tmp/note"; then
+        warn "couldn't read $(basename "$f") in $a's memory inbox; it's still there"; continue
+      fi
+      if [ "$(wc -c < "$tmp/note" | tr -d ' ')" -gt "$MEMORY_NOTE_MAX" ]; then
+        rm -f "$f"; warn "$a's note $(basename "$f" .md) is over 16 KB, too long to review here, so it wasn't kept"
+        continue
+      fi
+      n=$((n + 1))
+      k="$(visible_text "$tmp/note" "$tmp/clean")"
+      if [ -n "$PROTO" ]; then say "$a wants to remember:"
+      else printf '\n%s%s  %s%s wants to remember:%s\n\n' "$IND" "$(face "$a" ready)" "$C_B" "$a" "$C_0" >&2; fi
+      block "$(cat "$tmp/clean")"
+      [ -n "$PROTO" ] || printf '\n' >&2
+      if [ "${k:-0}" -gt 0 ]; then warn "cage took out $k invisible character$([ "$k" = 1 ] || echo s): they can hide instructions from you"; fi
+      prompt "Keep it? [y]es, [n]o, [s]kip: " answer
+      case "$answer" in
+        [yY]*)
+          name="$(printf '%s' "$(basename "$f" .md)" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-60)"
+          dst="$BRAIN/memory/notes/$name.md" i=2
+          while [ -e "$dst" ]; do dst="$BRAIN/memory/notes/$name-$i.md"; i=$((i + 1)); done
+          { cat "$tmp/clean"; printf '\n\n_Remembered from %s on %s._\n' "$a" "$(date +%Y-%m-%d)"; } > "$dst"
+          rm -f "$f"; kept=$((kept + 1))
+          ok "kept as notes/$(basename "$dst")" ;;
+        [nN]*) rm -f "$f"; ok "forgotten" ;;
+        *) say "left in the inbox for later" ;;
+      esac
+    done
   done
-  rm -rf "$tmp"
+  rm -rf "$tmp"; trap - EXIT
   if [ $n = 0 ]; then ok "nothing new to review"; hint "your memory: $BRAIN/memory (cage memory open)"; return 0; fi
   if [ $kept -gt 0 ]; then memory_refresh; fi
 }
@@ -2334,11 +2338,26 @@ Reply to the user's last message."
   deliver "$from" "$3" "↪ $(agent_name "$from") is out of quota for now, so $(agent_name "$to") answered:"$'\n\n'"$ans"
 }
 
+run_limited() { # run_limited <seconds> <command...>: stopped after that long (macOS has no `timeout`)
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; return; fi
+  local s="$1" pid w rc=0
+  shift
+  "$@" & pid=$!
+  ( sleep "$s" && kill "$pid" ) >/dev/null 2>&1 & w=$!
+  wait "$pid" || rc=$?
+  kill "$w" 2>/dev/null || true
+  return $rc
+}
+
 outbox_read() { # outbox_read <file> <max bytes>: a regular file that is really at that path (never via a link)
   # In a child with a time limit (a FIFO would block), read-only (never creates anything), and checked after
   # opening: the open file must resolve to exactly this path, so a swapped-in link can't point it elsewhere.
-  timeout 2 bash -c 'exec 9<"$1" || exit 1
-    [ "$(readlink /dev/fd/9)" = "$1" ] && [ -f /dev/fd/9 ] || exit 1
+  # Linux names the open file in /dev/fd; where it doesn't (macOS), it must be the very file at a path that isn't
+  # a link.
+  run_limited 2 bash -c 'exec 9<"$1" || exit 1
+    p="$(readlink /dev/fd/9 2>/dev/null || true)"
+    if [ -n "$p" ]; then [ "$p" = "$1" ] || exit 1; else [ ! -L "$1" ] && [ /dev/fd/9 -ef "$1" ] || exit 1; fi
+    [ -f /dev/fd/9 ] || exit 1
     head -c "$2" <&9' _ "$1" "$2" 2>/dev/null
 }
 
