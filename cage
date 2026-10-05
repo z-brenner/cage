@@ -1864,7 +1864,7 @@ wait_ready() { # wait_ready <agent>...: sets WAIT_STOPPED to those that stopped
 # --- Windows: cage runs inside WSL 2 -------------------------------------------------------------------------
 # WSL stops a distro ~15 s after its last wsl.exe session ends, and every microVM in it dies with it. So on WSL,
 # `cage up` holds one hidden wsl.exe session open (`cage _keepalive`, a sleep), `cage down` releases it, and
-# `cage autostart on` runs `cage up` at Windows login through the per-user Run key (no admin rights needed).
+# `cage autostart on` wakes them at Windows login (`cage _autostart`) through the per-user Run key (no admin needed).
 is_wsl() { [ -n "${WSL_DISTRO_NAME:-}" ]; }
 
 win_cmd() { # win_cmd <name.exe>: a Windows executable, reached through WSL interop
