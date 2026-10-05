@@ -209,7 +209,7 @@ load_env() {
   case " $SHIPPED_CC_CONNECT " in *" ${CAGE_CC_CONNECT_VERSION:-none} "*) CAGE_CC_CONNECT_VERSION="" ;; esac
   # "stable" is how you choose the stable release when cage's own is a preview (a plain v1.5.0 reads as frozen, above)
   [ "${CAGE_CC_CONNECT_VERSION:-}" != stable ] || CAGE_CC_CONNECT_VERSION="$STABLE_CC_CONNECT"
-  CAGE_CC_CONNECT_VERSION="${CAGE_CC_CONNECT_VERSION:-v1.5.0}"
+  CAGE_CC_CONNECT_VERSION="${CAGE_CC_CONNECT_VERSION:-v1.5.1-beta.3}"
   CAGE_TELEGRAM_GROUP_REPLY_ALL="${CAGE_TELEGRAM_GROUP_REPLY_ALL:-false}"
   CAGE_TELEGRAM_ALLOW="${CAGE_TELEGRAM_ALLOW:-}"
 }

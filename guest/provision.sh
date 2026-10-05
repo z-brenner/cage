@@ -19,7 +19,7 @@ set -Eeuo pipefail   # -E: the ERR trap below fires inside functions too
 KIND="${1:?usage: provision.sh <claude|codex|cursor|antigravity> [--refresh | --node | --browser]}"
 MODE="${2:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CC_CONNECT_VERSION="${CC_CONNECT_VERSION:-v1.5.0}"
+CC_CONNECT_VERSION="${CC_CONNECT_VERSION:-v1.5.1-beta.3}"
 CACHE=/var/cache/cage
 TOOLS=/opt/cage/tools
 MARK="/opt/cage/provisioned-$KIND"

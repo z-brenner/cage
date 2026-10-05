@@ -310,6 +310,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 
 - **`cage update` says you're offline.** Nothing was changed, and your agents keep running. Check your connection, or your company's proxy or firewall, then try again. `cage doctor` names what it can't reach.
 - **An update went wrong, or you'd rather not have it:** `cage rollback` goes back to the release you had before, without a download. `cage update --to v0.3.0` installs any release.
+- **Chats misbehave since v0.4.0** (replies stop, or arrive twice): this release's cc-connect, which connects your chats to your agents, is a preview (1.5.1-beta.3). Put `CAGE_CC_CONNECT_VERSION=stable` in `~/.cage/cage.env` and run `cage update` to go back to its stable 1.5.0.
 - **"No /dev/kvm" or "Virtualization is turned off":** turn on Intel VT-x or AMD-V in your computer's BIOS or UEFI settings, then restart. If `/dev/kvm` is there but you can't use it, `cage fix` adds you to the kvm group (then log out and back in). On Windows, see [Windows](#windows).
 - **cage runs inside a virtual machine** (VirtualBox, VMware, Parallels, Hyper-V, a cloud server): that machine has to allow nested virtualization. `cage doctor` says where to turn it on for each. In the cloud, pick an instance type that offers it.
 - **microsandbox won't install:** `cage fix` tries again, and everything its installer said is in `~/.cage/msb-install.log`. If an older microsandbox comes first on your PATH, remove it, or put `~/.local/bin` first.
