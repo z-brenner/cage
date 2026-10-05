@@ -193,6 +193,7 @@ brand() { [ -z "$PROTO" ] || return 0; printf '%s[%s%s•%s%s|%s%s•%s%s]%s' "$
 
 # --- config ----------------------------------------------------------------------------------------------------
 SHIPPED_CC_CONNECT="v1.5.0"   # the cc-connect versions earlier cages wrote into cage.env (cmd_init copied them)
+STABLE_CC_CONNECT="v1.5.0"    # CAGE_CC_CONNECT_VERSION=stable: the newest stable cc-connect the VM keeps checksums for
 load_env() {
   [ -f "$CAGE_ENV" ] || die "no config at $CAGE_ENV yet; run cage to set things up"
   # shellcheck disable=SC1090
@@ -206,6 +207,8 @@ load_env() {
   # A version an earlier cage froze in cage.env meant "the one cage is tested with", so this cage's applies instead,
   # also when cage was updated by running the installer again (cage update takes the line out, the installer doesn't)
   case " $SHIPPED_CC_CONNECT " in *" ${CAGE_CC_CONNECT_VERSION:-none} "*) CAGE_CC_CONNECT_VERSION="" ;; esac
+  # "stable" is how you choose the stable release when cage's own is a preview (a plain v1.5.0 reads as frozen, above)
+  [ "${CAGE_CC_CONNECT_VERSION:-}" != stable ] || CAGE_CC_CONNECT_VERSION="$STABLE_CC_CONNECT"
   CAGE_CC_CONNECT_VERSION="${CAGE_CC_CONNECT_VERSION:-v1.5.0}"
   CAGE_TELEGRAM_GROUP_REPLY_ALL="${CAGE_TELEGRAM_GROUP_REPLY_ALL:-false}"
   CAGE_TELEGRAM_ALLOW="${CAGE_TELEGRAM_ALLOW:-}"
