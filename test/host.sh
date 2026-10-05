@@ -1220,6 +1220,27 @@ PY
   for c in 'status \[--json\]' 'restart \[agents\]' 'logs <agent> \[-f\]' 'remove <agent>' 'version'; do grep -q "  $c" <<<"$out" || fail "help lacks $c"; done )
 ok "everyday: restart, logs (last 200 lines or -f), status --json, chat rm telegram, remove; plain words without msb or a VM"
 
+# an agent you removed passes nothing on: its privacy mask no longer sends your terms to the others (as /all from its
+# chat, or as its stand-in, did); cage mask names only your agents, and cage mask off covers the removed ones too
+( fresh mr
+  export MSB_EXISTING="$T/mr.vms"; : > "$MSB_EXISTING"
+  printf 'CAGE_AGENTS="claude codex"\nCAGE_ASK_ALL="on"\nCAGE_FALLBACK_claude="codex"\n' >> "$CAGE_HOME/cage.env"
+  "$ROOT/cage" mask add "Acme Secret Client" </dev/null 2>/dev/null
+  "$ROOT/cage" mask on claude </dev/null 2>/dev/null
+  "$ROOT/cage" up codex </dev/null 2>/dev/null
+  grep -qx 'Acme Secret Client' "$CAGE_HOME/agents/codex/mask.terms" || fail "codex has no terms, with masked claude asking it"
+  "$ROOT/cage" remove claude --yes </dev/null 2>"$T/mr.err" || fail "remove: $(cat "$T/mr.err")"
+  "$ROOT/cage" up codex </dev/null 2>/dev/null
+  [ ! -e "$CAGE_HOME/agents/codex/mask.terms" ] || fail "codex still gets your mask terms, with masked claude removed"
+  out="$("$ROOT/cage" mask 2>&1)"
+  grep -q 'privacy mask: off' <<<"$out" || fail "cage mask names a removed agent: $out"
+  "$ROOT/cage" mask on </dev/null 2>/dev/null; "$ROOT/cage" up codex </dev/null 2>/dev/null
+  grep -qx 'Acme Secret Client' "$CAGE_HOME/agents/codex/mask.terms" || fail "codex has no terms with its own mask on"
+  "$ROOT/cage" mask off </dev/null 2>/dev/null; "$ROOT/cage" up codex </dev/null 2>/dev/null
+  if grep -q '^CAGE_MASK=.*[a-z]' "$CAGE_HOME/cage.env"; then fail "cage mask off left some on: $(grep '^CAGE_MASK=' "$CAGE_HOME/cage.env")"; fi
+  [ ! -e "$CAGE_HOME/agents/codex/mask.terms" ] || fail "codex kept your terms with the mask off"
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true )
+ok "privacy mask: an agent you removed passes your terms to no one; cage mask off turns it off for removed agents too"
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.

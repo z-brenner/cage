@@ -3418,6 +3418,8 @@ mask_terms_for() { # mask_terms_for <agent>: does its VM need your terms (its ow
   mask_on "$1" && return 0
   for m in ${CAGE_MASK:-}; do
     [ "$m" != "$1" ] || continue
+    # one you removed (cage remove) relays nothing; its mask stays set for when it comes back
+    [[ " $CAGE_AGENTS " == *" $m "* ]] || continue
     [ "${CAGE_ASK_ALL:-off}" = on ] && return 0       # /all from the masked agent's chat asks this one
     [ "$(cvar FALLBACK "$m")" = "$1" ] && return 0    # it stands in for the masked agent
   done
@@ -3442,13 +3444,15 @@ cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>" 
   shift || true
   case "$sub" in
     "")
-      say "privacy mask: ${C_B}${CAGE_MASK:-off}${C_0}"
+      new=""; for a in ${CAGE_MASK:-}; do if [[ " $CAGE_AGENTS " == *" $a "* ]]; then new="$new${new:+ }$a"; fi; done
+      say "privacy mask: ${C_B}${new:-off}${C_0}"
       hint "cage mask on [agents] · cage mask add \"Client name\" · cage mask try \"text\" · cage mask forget · cage mask off"
       return 0 ;;
     on|off)
       local who=("$@")
       [ $# -gt 0 ] || read -r -a who <<<"$CAGE_AGENTS"
       cur="${CAGE_MASK:-}"
+      if [ $# = 0 ] && [ "$sub" = off ]; then cur=""; fi   # off for all: the agents you removed too
       for a in "${who[@]}"; do
         check_agent "$a"
         new=""; for t in $cur; do [ "$t" = "$a" ] || new="$new${new:+ }$t"; done
