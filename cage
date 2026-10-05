@@ -318,7 +318,8 @@ setup_manager() { # sets MANAGER_TOKEN and MANAGER_BOT; returns 1 if the user pr
   else
     say "First, one bot of your own that makes the others. In Telegram, open $(link https://t.me/BotFather @BotFather),"
     say "send /newbot and name it anything (e.g. \"My cage\"). BotFather replies with a token."
-    while true; do
+    TRIES=0
+    while another_try; do
       prompt "$(brand) token for your cage bot (stays hidden): " t secret
       if ! valid_token "$t"; then warn "that's not a bot token (they look like 123456:ABC…)"; continue; fi
       if user="$(bot_username "$t")"; then break; fi
@@ -413,19 +414,27 @@ set_env() { # set_env NAME VALUE: upserts NAME="VALUE" in the env file
   env_edit set "$1" "$2"
 }
 
+# Nobody left to answer (the end of cage's input: a script, a closed pipe) stops cage, rather than asking forever.
+no_answer() { die "no answer (nothing is connected to cage's input); run this in a terminal or the app"; }
 prompt() { # prompt <message> <varname> [secret]
   local reply=""
   if [ -n "$PROTO" ]; then
     event prompt "$1" ",\"secret\":$([ "${3:-}" = secret ] && echo true || echo false)"
-    read -r reply || true
+    read -r reply || [ -n "$reply" ] || no_answer
   elif [ -t 0 ]; then
     printf '%s%s?%s %s' "$IND" "$C_AMBER" "$C_0" "$1" >&2
-    if [ "${3:-}" = secret ]; then read -r -s reply; echo >&2; else read -r reply; fi
+    if [ "${3:-}" = secret ]; then read -r -s reply || [ -n "$reply" ] || { echo >&2; die "no answer; nothing more was done"; }; echo >&2
+    else read -r reply || [ -n "$reply" ] || { echo >&2; die "no answer; nothing more was done"; }; fi
   else
     printf '%s? %s\n' "$IND" "$1" >&2   # still show the question when answers are piped in
-    read -r reply || true
+    read -r reply || [ -n "$reply" ] || no_answer
   fi
   printf -v "$2" '%s' "$reply"
+}
+TRIES=0
+another_try() { # call before each answer to one question (TRIES=0 first): a sixth try stops cage
+  TRIES=$((TRIES + 1))
+  [ $TRIES -le 5 ] || die "that's 5 tries; nothing more was saved. Run the same command again when you have it"
 }
 interactive() { [ -t 0 ] || [ -n "$PROTO" ]; }   # someone can answer questions (a terminal, or the web app)
 skip_hint() { # skip_hint <hint> <button>: while cage waits, Enter (or the web app's button) stops the wait
@@ -435,7 +444,7 @@ yes_no() { # yes_no <question> <default y|n>: true for yes
   local answer
   if [ -n "$PROTO" ]; then
     event confirm "$1" ",\"default\":\"$2\""
-    read -r answer || true
+    read -r answer || [ -n "$answer" ] || no_answer
     case "${answer:-$2}" in [yY]*) return 0 ;; *) return 1 ;; esac
   fi
   if [ "$2" = y ]; then prompt "$1 [Y/n] " answer; case "$answer" in [nN]*) return 1 ;; *) return 0 ;; esac
@@ -1017,7 +1026,8 @@ password_add() { # password_add <site> [agent...]
   name="$(pw_name "$site")"
   if [ -f "$SECRETS/$name.conf" ] && [ -z "$(conf_get "$SECRETS/$name.conf" site)" ]; then die "you already have a secret called $name"; fi
   printf '\n%s%s %s%s%s  %sa sign-in your agents can use but never see%s\n' "$IND" "$(brand)" "$C_B" "$site" "$C_0" "$C_DIM" "$C_0" >&2
-  while true; do
+  TRIES=0
+  while another_try; do
     prompt "username or email for $site: " user
     user="$(printf '%s' "$user" | safe_text | tr -d '`')"
     [ -n "$user" ] && [ ${#user} -le 200 ] && break
@@ -1460,7 +1470,8 @@ chat_add_slack() {
   [ "$UI" = 1 ] || say "     $url"
   open_url "$url"
   say "  2. Click ${C_B}Install to Workspace${C_0} → Allow. Copy the ${C_B}Bot User OAuth Token${C_0} (xoxb-…)."
-  while true; do
+  TRIES=0
+  while another_try; do
     prompt "bot token (stays hidden): " bt secret
     slack_bot_ok "$bt" || { warn "that's not a bot token (it starts with xoxb-)"; continue; }
     r="$(api POST "$SLACK_API/auth.test" "Bearer $bt" 2>/dev/null || true)"
@@ -1471,7 +1482,8 @@ chat_add_slack() {
   ok "it's in ${team:-your workspace}"
   say "  3. Left menu: ${C_B}Basic Information${C_0} → App-Level Tokens → ${C_B}Generate Token and Scopes${C_0}."
   say "     Name it anything, add the scope ${C_B}connections:write${C_0}, Generate, and copy it (xapp-…)."
-  while true; do
+  TRIES=0
+  while another_try; do
     prompt "app token (stays hidden): " at secret
     slack_app_ok "$at" || { warn "that's not an app-level token (it starts with xapp-)"; continue; }
     r="$(api POST "$SLACK_API/apps.connections.open" "Bearer $at" 2>/dev/null || true)"
@@ -1479,7 +1491,8 @@ chat_add_slack() {
     warn "Slack didn't accept it ($(printf '%s' "$r" | jget error)); check it has connections:write"
   done
   ok "Socket Mode works (no public address needed)"
-  while true; do
+  TRIES=0
+  while another_try; do
     prompt "your email in Slack, so only you can use it: " email
     r="$(api GET "$SLACK_API/users.lookupByEmail?email=$(urlencode "$email")" "Bearer $bt" 2>/dev/null || true)"
     uid="$(printf '%s' "$r" | jget id)"
@@ -1520,7 +1533,8 @@ chat_add_discord() {
   say "  1. In the $(link https://discord.com/developers/applications "Discord Developer Portal"): New Application → name it $(agent_short "$a") → Create."
   open_url https://discord.com/developers/applications
   say "  2. Left menu: ${C_B}Bot${C_0} → ${C_B}Reset Token${C_0} → Yes, do it! → Copy."
-  while true; do
+  TRIES=0
+  while another_try; do
     prompt "bot token (stays hidden): " t secret
     discord_token_ok "$t" || { warn "that doesn't look like a Discord bot token"; continue; }
     r="$(api GET "$DISCORD_API/applications/@me" "Bot $t" 2>/dev/null || true)"
@@ -1581,12 +1595,14 @@ chat_add_whatsapp() {
   say "  $a links to WhatsApp the way WhatsApp Web does, through Baileys (an open-source, unofficial client)."
   warn "WhatsApp doesn't allow unofficial clients and has banned numbers for it, so a spare number is safest:"
   say "  a cheap prepaid SIM, or a second number in the WhatsApp Business app. Your own number works too."
-  while [ -z "$mode" ]; do
+  TRIES=0
+  while [ -z "$mode" ] && another_try; do
     prompt "which number will $a use? (spare / mine) [spare] " mode
     case "$mode" in ""|spare|s) mode=spare ;; mine|own|m) mode=own ;; *) warn "spare or mine?"; mode="" ;; esac
   done
   if [ "$mode" = spare ]; then
-    while true; do
+    TRIES=0
+    while another_try; do
       prompt "your own number, with country code, so only you can message it (e.g. +1 555 123 4567): " num
       num="${num//[^0-9]/}"
       [ ${#num} -ge 8 ] && [ ${#num} -le 15 ] && break
@@ -2095,7 +2111,8 @@ cmd_setup() {
         say "(e.g. \"Dot $(printf '%s' "$a" | awk '{print toupper(substr($0, 1, 1)) substr($0, 2)}')\"); the username must end in \"bot\". BotFather replies with a token."
         SHOWN_BOTFATHER=1
       fi
-      while true; do
+      TRIES=0
+      while another_try; do
         prompt "$(face "$a" login) token for the $a bot (stays hidden): " token secret
         if ! valid_token "$token"; then warn "that's not a bot token (they look like 123456:ABC…)"; continue; fi
         if user="$(bot_username "$token")"; then break; fi

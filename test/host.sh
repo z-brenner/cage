@@ -714,7 +714,7 @@ ok "website sign-ins: sites with look-alike names keep their own; found by site 
   if grep -qs 'VOICE_GROQ_KEY' "$CAGE_HOME/msb/claude.yaml" "$CAGE_HOME/agents/claude/secrets.md"; then fail "voice off, but the VM still gets the Groq key"; fi
   "$ROOT/cage" voice on groq </dev/null >/dev/null 2>&1 || fail "voice on groq with a key saved before"
   [ "$(cat "$CAGE_HOME/secrets/VOICE_GROQ_KEY")" = gsk_abcdefghijklmnopqrstuvwxyz ] || fail "the key changed without asking"
-  printf 'y\ngsk_NEWNEWNEWNEWNEWNEWNEWNEW\n' | CAGE_PROTO=1 "$ROOT/cage" voice on groq >/dev/null 2>"$T/u.err" || fail "replacing the key: $(cat "$T/u.err")"
+  printf 'y\ngsk_NEWNEWNEWNEWNEWNEWNEWNEW\nn\n' | CAGE_PROTO=1 "$ROOT/cage" voice on groq >/dev/null 2>"$T/u.err" || fail "replacing the key: $(cat "$T/u.err")"
   grep -q '"t":"confirm","text":"You saved a Groq key before' "$T/u.err" && [ "$(cat "$CAGE_HOME/secrets/VOICE_GROQ_KEY")" = gsk_NEWNEWNEWNEWNEWNEWNEWNEW ] \
     || fail "the Groq key couldn't be replaced: $(cat "$T/u.err")"
   "$ROOT/cage" secret rm VOICE_GROQ_KEY </dev/null >/dev/null 2>&1 && [ ! -e "$CAGE_HOME/secrets/VOICE_GROQ_KEY" ] || fail "the Groq key couldn't be deleted" )
@@ -766,6 +766,21 @@ ok "up: an agent that can't start is named, with why; the others start, and the 
   for _ in $(seq 25); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
   if kill -0 "$pid" 2>/dev/null; then pkill -f -- "$re"; fail "cage down left the helper running"; fi )
 ok "the background helper: one per CAGE_HOME whatever the install path, picks up new settings itself, stops with cage down"
+
+# nobody to answer (a script, a closed pipe): cage stops at the first question instead of asking forever; and five
+# wrong answers in a row end the asking too
+( fresh g
+  echo 'CAGE_TELEGRAM_TOKEN_claude="1:abc"' >> "$CAGE_HOME/cage.env"
+  for c in "setup codex" "password add example.com claude" "chat add whatsapp claude"; do
+    start=$SECONDS rc=0
+    # shellcheck disable=SC2086
+    timeout 20 "$ROOT/cage" $c </dev/null >/dev/null 2>"$T/g.err" || rc=$?
+    [ $rc = 1 ] && [ $((SECONDS - start)) -le 3 ] || fail "cage $c with nobody to answer: exit $rc after $((SECONDS - start)) s, $(wc -l < "$T/g.err") lines"
+    grep -q "no answer (nothing is connected to cage's input)" "$T/g.err" || fail "cage $c: $(tail -3 "$T/g.err")"
+  done
+  rc=0; printf 'not-a-token\n%.0s' 1 2 3 4 5 6 7 8 | timeout 20 "$ROOT/cage" setup codex >/dev/null 2>"$T/g.err" || rc=$?
+  [ $rc = 1 ] && grep -q "that's 5 tries" "$T/g.err" && [ "$(grep -c "not a bot token" "$T/g.err")" = 5 ] || fail "five wrong answers: $(tail -3 "$T/g.err")" )
+ok "questions: with nobody to answer, cage stops at once with a plain message; five wrong answers end the asking"
 
 # a VM that stops right after it's started: cage says so in seconds (not 15 minutes of "waking up"), with its last words
 if script --version 2>&1 | grep -q util-linux; then
