@@ -115,11 +115,15 @@ ok "release notes: the version's CHANGELOG.md section; none, an empty one or jus
 
 # --- release.yml itself
 W="$ROOT/.github/workflows/release.yml"
+run_of() { # run_of <step name>: that step's script, as written in release.yml
+  awk -v name="- name: $1" 'index($0, name) { on = 1; next }
+    on && /run: \|/ { body = 1; next }
+    body && /^$/ { print; next }
+    body && /^          / { print substr($0, 11); next }
+    body { exit }' "$W"
+}
 # its first check, run as written there: a version, a commit on main, and an existing tag must be that commit
-step="$(awk '/- name: a version, on main/ { on = 1; next }
-  on && /run: \|/ { body = 1; next }
-  body && /^          / { print substr($0, 11); next }
-  body { exit }' "$W")"
+step="$(run_of 'a version, on main')"
 [ -n "$step" ] || fail "can't find the version check in release.yml"
 g() { git -C "$T/repo" -c user.name=t -c user.email=t@t.invalid -c commit.gpgsign=false -c tag.gpgsign=false "$@"; }
 git init -q "$T/repo"
@@ -134,6 +138,40 @@ grep -q "isn't on main" <<<"$out" || fail "doesn't say why: $out"
 out="$(check v0.9.0 "$two")" && fail "released over an existing tag at another commit"
 grep -q "already exists, at another commit ($one)" <<<"$out" || fail "doesn't say why: $out"
 out="$(check 1.0 "$two")" && fail "released a tag that isn't a version"
+# The publish step, run as written there against a stub gh: by then someone may have pushed the tag at another commit
+step="$(run_of publish)"
+[ -n "$step" ] || fail "can't find the publish step in release.yml"
+mkdir -p "$T/pub/bin" "$T/pub/dist"
+cat > "$T/pub/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$T/pub/gh.log"
+[ "$1" = api ] || exit 0
+case "$(cat "$T/pub/tag")" in
+  none) echo '{"message":"No commit found for SHA: tags/v1.0.0"}'; echo "gh: No commit found for SHA: tags/v1.0.0 (HTTP 422)" >&2; exit 1 ;;
+  down) echo "gh: HTTP 502: Bad Gateway" >&2; exit 1 ;;
+  *) cat "$T/pub/tag" ;;
+esac
+EOF
+chmod +x "$T/pub/bin/gh"
+publish() { # publish <where GitHub has the tag: a commit, none or down>: output in $out, status in $rc
+  echo "$1" > "$T/pub/tag"; rm -f "$T/pub/gh.log"
+  rc=0
+  out="$(cd "$T/pub" && PATH="$T/pub/bin:$PATH" TAG=v1.0.0 GITHUB_SHA="$two" GH_REPO=o/r RUNNER_TEMP="$T/pub" \
+    bash --noprofile --norc -eo pipefail -c "$step" 2>&1)" || rc=$?
+}
+publish none
+[ "$rc" = 0 ] && grep -q "^release create v1.0.0 .*--target $two" "$T/pub/gh.log" || fail "a new tag wasn't published: $out"
+grep -q '^api repos/o/r/commits/tags/v1.0.0 ' "$T/pub/gh.log" || fail "didn't ask where the tag is: $(cat "$T/pub/gh.log")"
+publish "$two"
+[ "$rc" = 0 ] && grep -q '^release create' "$T/pub/gh.log" || fail "a tag at the built commit wasn't published: $out"
+for at in "$one" down; do
+  publish "$at"
+  [ "$rc" = 1 ] && ! grep -q '^release create' "$T/pub/gh.log" || fail "published with the tag at '$at': $out"
+  grep -q 'Nothing was published' <<<"$out" || fail "doesn't say what happened: $out"
+done
+publish "$one"; grep -q "now points at $one, not at $two" <<<"$out" || fail "doesn't say why: $out"
+ok "release.yml publishes only while the tag is missing or still at the commit it built"
+
 # and the order: notes and CI's verdict before the build, and nothing before the publish job can write
 at() { grep -n -m 1 -F -- "$1" "$W" | cut -d: -f1; }
 notes="$(at 'scripts/release-notes.sh "$TAG" > out/notes.md')" gate="$(at 'scripts/wait-for-ci.sh "$GITHUB_SHA"')"

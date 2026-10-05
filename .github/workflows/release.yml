@@ -91,6 +91,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # The build checked that an existing tag is this commit, but someone may have pushed the tag since, and
+          # GitHub ignores --target for a tag that exists: the release would show one commit and hold another's files.
+          if at="$(gh api "repos/$GH_REPO/commits/tags/$TAG" --jq .sha 2>"$RUNNER_TEMP/tag.err")"; then
+            [ "$at" = "$GITHUB_SHA" ] || { echo "$TAG now points at $at, not at $GITHUB_SHA, which was built. Nothing was published; pick a new version."; exit 1; }
+          elif ! grep -q 'HTTP 422' "$RUNNER_TEMP/tag.err"; then   # 422: no such tag yet, which is fine
+            echo "couldn't ask GitHub where $TAG is: $(cat "$RUNNER_TEMP/tag.err"). Nothing was published; re-run this job."
+            exit 1
+          fi
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
           # creates the tag at this commit when the run came from the button rather than a pushed tag;
