@@ -4,6 +4,8 @@ name: release
 # themselves, SHA256SUMS (which install.sh checks), and a signed build-provenance attestation for each file, so
 # anyone can check a download was built here from that tag:
 #   gh attestation verify cage-v0.2.0.tar.gz --repo z-brenner/cage
+# It first waits for CI on that commit and goes ahead only if CI passed (if a job failed only by chance, re-run it,
+# then start the release again). The release notes are the version's section of CHANGELOG.md, which must exist.
 on:
   push:
     tags: ['v*']
@@ -14,40 +16,91 @@ on:
         required: true
 
 permissions:
-  contents: write       # create the release
-  id-token: write       # sign the attestation (Sigstore, via GitHub's OIDC token)
-  attestations: write   # store it
+  contents: read
+
+# one release at a time, and never stop one halfway
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
+  # The checks, the wait for CI and the build, with read access only.
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 80
+    permissions:
+      contents: read
+      actions: read         # see CI's runs for this commit
     env:
       TAG: ${{ inputs.version || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          fetch-depth: 0    # every branch and tag, so origin/main and an existing tag are there for the checks below
+          persist-credentials: false
       - name: a version, on main
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "not a version: $TAG"; exit 1; }
-          git fetch -q origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG ($GITHUB_SHA) isn't on main"; exit 1; }
-      - name: quick checks
+          # the release takes an existing tag as it is, so it must be this commit, the one CI is checked on
+          at="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)"
+          [ -z "$at" ] || [ "$at" = "$GITHUB_SHA" ] || { echo "$TAG already exists, at another commit ($at). Pick a new version."; exit 1; }
+      - name: release notes, from CHANGELOG.md
         run: |
-          shellcheck -S warning cage install.sh guest/*.sh test/*.sh scripts/*.sh
-          test/installer.sh
-          test/host.sh
-      - name: build
-        run: scripts/build-release.sh "$TAG" dist
-      - uses: actions/attest-build-provenance@v4
+          mkdir -p out
+          scripts/release-notes.sh "$TAG" > out/notes.md
+      - name: wait for CI to pass on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/wait-for-ci.sh "$GITHUB_SHA"
+      - name: build (twice, under different umasks, to prove the same commit gives the same files)
+        run: |
+          scripts/build-release.sh "$TAG" out/dist
+          (umask 077; scripts/build-release.sh "$TAG" "$RUNNER_TEMP/again")
+          cmp out/dist/SHA256SUMS "$RUNNER_TEMP/again/SHA256SUMS" \
+            || { echo "two builds of the same commit differ:"; diff out/dist/SHA256SUMS "$RUNNER_TEMP/again/SHA256SUMS"; exit 1; }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Only this job can write. It runs nothing from the repository: it signs what the build made and publishes it.
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write       # create the release
+      id-token: write       # sign the attestation (Sigstore, via GitHub's OIDC token)
+      attestations: write   # store it
+    env:
+      TAG: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release
+      - name: the files are the ones the build made
+        run: cd dist && sha256sum -c SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          # The build checked that an existing tag is this commit, but someone may have pushed the tag since, and
+          # GitHub ignores --target for a tag that exists: the release would show one commit and hold another's files.
+          if at="$(gh api "repos/$GH_REPO/commits/tags/$TAG" --jq .sha 2>"$RUNNER_TEMP/tag.err")"; then
+            [ "$at" = "$GITHUB_SHA" ] || { echo "$TAG now points at $at, not at $GITHUB_SHA, which was built. Nothing was published; pick a new version."; exit 1; }
+          elif ! grep -q 'HTTP 422' "$RUNNER_TEMP/tag.err"; then   # 422: no such tag yet, which is fine
+            echo "couldn't ask GitHub where $TAG is: $(cat "$RUNNER_TEMP/tag.err"). Nothing was published; re-run this job."
+            exit 1
+          fi
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
-          # creates the tag at this commit when the run came from the button rather than a pushed tag
-          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --generate-notes --title "cage $TAG" $pre
+          # creates the tag at this commit when the run came from the button rather than a pushed tag;
+          # the notes from CHANGELOG.md come first, then GitHub's list of merged pull requests
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "cage $TAG" --notes-file notes.md --generate-notes $pre

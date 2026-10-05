@@ -12,8 +12,10 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 git -C "$ROOT" archive --format=tar --prefix=cage/ HEAD | tar -xf - -C "$work"
 printf '%s\n' "$TAG" > "$work/cage/VERSION"
-# Reproducible: fixed order, owner and time, so the same commit always gives the same tarball.
-tar -C "$work" --sort=name --owner=0 --group=0 --numeric-owner --mtime='2000-01-01 00:00Z' -cf - cage | gzip -n -9 > "$OUT/cage-$TAG.tar.gz"
+# Reproducible: fixed order, owner, modes (not whatever umask the builder has) and time, so the same commit always
+# gives the same tarball.
+tar -C "$work" --sort=name --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' --mtime='2000-01-01 00:00Z' \
+  -cf - cage | gzip -n -9 > "$OUT/cage-$TAG.tar.gz"
 cp "$work/cage/install.sh" "$work/cage/install.ps1" "$work/cage/Install-cage.cmd" "$OUT/"
 (cd "$OUT" && sha256sum "cage-$TAG.tar.gz" install.sh install.ps1 Install-cage.cmd > SHA256SUMS)
 echo "built cage $TAG in $OUT"
