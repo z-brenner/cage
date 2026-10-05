@@ -73,7 +73,7 @@ grep -A3 '^\[bridge\]$' "$f" | grep -q "^token = \"$tok\"$" && grep -A3 '^\[mana
 grep -q '^type = "line"$' "$f" && grep -q '^allow_from = "nobody"$' "$f" && grep -q '^admin_from = "you"$' "$f" || fail "placeholder platform: $(cat "$f")"
 grep -qx "APP_TOKEN=$tok" "$CAGE_HOME/agents/claude/app.env" || fail "app.env"
 [ "$(stat -c %a "$CAGE_HOME/app")" = 700 ] && [ "$(stat -c %a "$CAGE_HOME/app/claude/in")" = 777 ] || fail "chat folder modes"
-grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "--mount-dir | $CAGE_HOME/app/claude:/cage-app" || fail "chat folder not mounted"
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "--mount-dir | $CAGE_HOME/app/claude:/cage-app:quota=2G,nosuid,nodev |" || fail "chat folder not mounted (with a size limit)"
 [ "$(cat "$CAGE_HOME/agents/claude/app.token")" = "$tok" ] || fail "app token changed"
 ok "no chat app needed: the app talks to the agent through cc-connect's bridge, behind a placeholder platform"
 : > "$MSB_LOG"
@@ -110,7 +110,7 @@ ok "renders one cc-connect config per agent with the right type, mode and cmd"
 
 line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
 for want in "-d" "--mount-named | cage-claude-home:/home/agent" "--mount-dir | $ROOT/guest:/cage:ro" "--mount-dir | $CAGE_HOME/agents/claude:/cage-config:ro" \
-            "--mount-dir | $CAGE_HOME/brain/memory:/memory:ro" "--mount-dir | $CAGE_HOME/brain/inbox/claude:/memory-inbox" \
+            "--mount-dir | $CAGE_HOME/brain/memory:/memory:ro" "--mount-dir | $CAGE_HOME/brain/inbox/claude:/memory-inbox:quota=16M,nosuid,nodev |" \
             "-c | 2" "-m | 4G" "--root-disk | 16G" "--label | app=cage" "ubuntu:24.04 | -- | /bin/bash | /cage/entry.sh | claude"; do
   [[ "$line" == *"$want"* ]] || fail "msb run for claude lacks '$want': $line"
 done
@@ -392,7 +392,7 @@ grep -q '^name = "all"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "n
 grep -q '^base_url = "http://127.0.0.1:8178/v1"$' "$t" && grep -q '^provider = "openai"$' "$t" || fail "voice: no local speech-to-text"
 grep -q '^VOICE_MODE=local$' "$CAGE_HOME/agents/claude/voice.env" || fail "voice.env"
 grep -q '^command = "/bin/bash /cage/hook.sh ask"$' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex has no stand-in, only /all"
-grep '^run | .*--name | cage-claude |' "$MSB_LOG" | grep -q -- "--mount-dir | $CAGE_HOME/outbox/claude:/cage-outbox" || fail "no outbox mount"
+grep '^run | .*--name | cage-claude |' "$MSB_LOG" | grep -q -- "--mount-dir | $CAGE_HOME/outbox/claude:/cage-outbox:quota=16M,nosuid,nodev |" || fail "no outbox mount (with a size limit)"
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   out="$(HOME="$T/cc-relay" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$t" 2>&1 || true)"
   grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"

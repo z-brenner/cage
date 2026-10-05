@@ -2266,6 +2266,10 @@ UNIT
   esac
 }
 
+# The folders on this computer that a VM can write in (its chat with the app, its memory inbox, its outbox) each
+# have a size limit, so a runaway or tricked agent can't fill your disk, and nothing in them can act as a device
+# or run as another user (nodev, nosuid).
+SMALL_MOUNT="quota=16M,nosuid,nodev"
 # Wakes one agent: (re)creates its VM. cmd_up runs it as `( set -e; up_one <agent> <file> )`, so a problem with one
 # agent (a setting that's broken, msb refusing) stops only that one; what msb says goes to <file>.
 up_one() {
@@ -2278,7 +2282,7 @@ up_one() {
   app_dirs "$a"
   if [ -n "$(agent_features "$a")" ]; then
     mkdir -p "$OUTBOX/$a" && chmod 700 "$OUTBOX" && chmod 777 "$OUTBOX/$a"   # written by the VM's agent user
-    outbox=(--mount-dir "$OUTBOX/$a:/cage-outbox")
+    outbox=(--mount-dir "$OUTBOX/$a:/cage-outbox:$SMALL_MOUNT")
   fi
   if [ "${CAGE_NETWORK:-open}" = strict ]; then netlog=(--log-level debug); fi   # blocked hosts are logged at debug
   if [ "$UI" = 1 ]; then quiet=(-q); fi
@@ -2299,7 +2303,7 @@ up_one() {
     --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
     --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
     --mount-dir "$BRAIN/memory:/memory:ro" \
-    --mount-dir "$BRAIN/inbox/$a:/memory-inbox" --mount-dir "$APPDIR/$a:/cage-app" ${outbox[@]+"${outbox[@]}"} \
+    --mount-dir "$BRAIN/inbox/$a:/memory-inbox:$SMALL_MOUNT" --mount-dir "$APPDIR/$a:/cage-app:quota=2G,nosuid,nodev" ${outbox[@]+"${outbox[@]}"} \
     -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} ${tzarg[@]+"${tzarg[@]}"} \
     ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
     "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" 2>"$2"
