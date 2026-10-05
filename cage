@@ -717,7 +717,7 @@ PY
 
 MEMORY_NOTE_MAX=16384
 memory_review() {
-  local f a d name dst i n=0 kept=0 answer tmp k
+  local f a d name dst i n=0 kept=0 answer tmp k shown
   brain_init
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -726,19 +726,20 @@ memory_review() {
     a="$(basename "$d")"
     for f in "$d"/*.md; do
       [ -e "$f" ] || [ -L "$f" ] || continue
+      shown="$(printf '%s' "$(basename "$f" .md)" | LC_ALL=C tr -c 'A-Za-z0-9._ -' '?')"   # the VM chose it: no codes
       # The inbox is the VM's to write. A link there could point at your keys or settings, and the file can change
       # while you decide. So only plain files count, each is read once (never through a link), and what you're
       # shown is exactly what's kept: cage never goes back to the file.
       if [ -L "$f" ] || [ ! -f "$f" ]; then
         rm -rf "$f" || true
-        warn "removed $(basename "$f") from $a's memory inbox: it wasn't a plain note (cage never follows links there)"
+        warn "removed $shown from $a's memory inbox: it wasn't a plain note (cage never follows links there)"
         continue
       fi
       if ! outbox_read "$f" $((MEMORY_NOTE_MAX + 1)) > "$tmp/note"; then
-        warn "couldn't read $(basename "$f") in $a's memory inbox; it's still there"; continue
+        warn "couldn't read $shown in $a's memory inbox; it's still there"; continue
       fi
       if [ "$(wc -c < "$tmp/note" | tr -d ' ')" -gt "$MEMORY_NOTE_MAX" ]; then
-        rm -f "$f"; warn "$a's note $(basename "$f" .md) is over 16 KB, too long to review here, so it wasn't kept"
+        rm -f "$f"; warn "$a's note $shown is over 16 KB, too long to review here, so it wasn't kept"
         continue
       fi
       n=$((n + 1))

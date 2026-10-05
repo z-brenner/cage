@@ -600,6 +600,9 @@ ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is 
   ln -s ../../../cage.env "$I/settings.md"
   printf 'Zack likes\xe2\x80\x8b tea.\xe2\x80\xae end\xf3\xa0\x81\x81\n' > "$I/hidden.md"   # zero-width space, right-to-left override, a tag
   head -c 20000 /dev/zero | tr '\0' a > "$I/huge.md"
+  # names the VM chose, with codes for your terminal (an OSC 52 sequence would set your clipboard) in them
+  ln -s ../../../cage.env "$I/link"$'\e]52;c;cHduZWQ=\a\e[2J'"FAKE.md"
+  head -c 20000 /dev/zero | tr '\0' a > "$I/big"$'\e]52;c;cHduZWQ=\a\e[2J'"FAKE.md"
   { head -c 6000 /dev/zero | tr '\0' b; printf '\nTAIL-AFTER-6000-BYTES\n'; } > "$I/long.md"
   printf 'y\ny\ny\ny\n' | "$ROOT/cage" memory > "$T/j.out" 2>&1 || fail "cage memory: $(cat "$T/j.out")"
   N="$CAGE_HOME/brain/memory/notes"
@@ -609,6 +612,9 @@ ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is 
   if LC_ALL=C grep -q $'\xe2\x80\x8b\|\xe2\x80\xae\|\xf3\xa0' "$N/hidden.md" "$T/j.out"; then fail "invisible characters were shown or kept"; fi
   grep -q 'took out 3 invisible characters' "$T/j.out" || fail "not told about the invisible characters: $(cat "$T/j.out")"
   [ ! -e "$N/huge.md" ] && [ ! -e "$I/huge.md" ] && grep -q 'over 16 KB' "$T/j.out" || fail "a 20 KB note wasn't refused: $(ls "$N")"
+  if LC_ALL=C grep -q $'\e' "$T/j.out"; then fail "a name the VM chose put codes on the terminal: $(cat -v "$T/j.out")"; fi
+  grep -qF 'removed link??52?c?cHduZWQ????2JFAKE from' "$T/j.out" && grep -qF "codex's note big??52?c?cHduZWQ????2JFAKE is over 16 KB" "$T/j.out" \
+    || fail "names with codes in them: $(cat -v "$T/j.out")"
   grep -q TAIL-AFTER-6000-BYTES "$T/j.out" && grep -q TAIL-AFTER-6000-BYTES "$N/long.md" || fail "the whole note wasn't shown"
   printf 'the note as shown\n' > "$I/swap.md"
   { for _ in $(seq 100); do grep -q 'Keep it' "$T/j2.out" 2>/dev/null && break; sleep 0.1; done
