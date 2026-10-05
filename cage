@@ -2859,26 +2859,64 @@ state_json() { # everything the web app shows, as one JSON object
   printf ']}}\n'
 }
 
+# ui_answer: 0 if cage's web app answers on the port, 1 if something else does, 2 if nothing listens there, and 3 if
+# what answers says what an older cage web app says (one that can't prove it's cage yet, so it isn't trusted either)
+ui_answer() {
+  local n r rc=0
+  n="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # the web app proves it's ours with the token, which only it and we can read; no proxy for a local address
+  r="$(curl --noproxy '*' -sS -m 2 "http://127.0.0.1:$UI_PORT/healthz?nonce=$n" 2>/dev/null)" || rc=$?
+  [ "$rc" != 7 ] || return 2
+  [ "$rc" = 0 ] && python3 -c 'import hashlib, hmac, sys
+key = open(sys.argv[1]).read().strip().encode()
+sys.exit(0 if hmac.compare_digest(hmac.new(key, sys.argv[2].encode(), hashlib.sha256).hexdigest(), sys.argv[3]) else 1)' \
+    "$CAGE_HOME/ui.token" "$n" "$r" 2>/dev/null && return 0
+  [ "$rc" != 0 ] || [ "$r" != ok ] || return 3
+  return 1
+}
+
 cmd_ui() { # cage ui [--no-open]: the web app
   command -v python3 >/dev/null 2>&1 || die "the web app needs python3: sudo apt-get install python3"
   mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
-  local tok="$CAGE_HOME/ui.token" url
+  local tok="$CAGE_HOME/ui.token" pair="$CAGE_HOME/ui.pair" url code pid i st=0
   [ -s "$tok" ] || ( umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$tok" )
-  url="http://127.0.0.1:$UI_PORT/#$(cat "$tok")"
-  if ! curl -fsS -m 2 "http://127.0.0.1:$UI_PORT/healthz" >/dev/null 2>&1; then
+  ui_answer || st=$?
+  # something else, or an older web app: maybe the one from before an update, which restarts itself within seconds
+  for i in 1 2 3 4 5 6; do case "$st" in 1|3) sleep 1; st=0; ui_answer || st=$? ;; *) break ;; esac; done
+  if [ "$st" = 2 ]; then
     if command -v setsid >/dev/null 2>&1; then
       CAGE_UI_PORT="$UI_PORT" setsid nohup python3 "$CAGE_ROOT/host/ui/server.py" "$CAGE_ROOT/cage" >>"$CAGE_HOME/ui.log" 2>&1 < /dev/null &
     else
       CAGE_UI_PORT="$UI_PORT" nohup python3 "$CAGE_ROOT/host/ui/server.py" "$CAGE_ROOT/cage" >>"$CAGE_HOME/ui.log" 2>&1 < /dev/null &
     fi
-    local i
-    for i in $(seq 50); do curl -fsS -m 1 "http://127.0.0.1:$UI_PORT/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
-    curl -fsS -m 2 "http://127.0.0.1:$UI_PORT/healthz" >/dev/null 2>&1 || die "the web app didn't start; see $CAGE_HOME/ui.log"
+    pid=$!
+    for i in $(seq 50); do   # until it answers, or it's gone (the port is taken, say)
+      st=0; ui_answer || st=$?
+      [ "$st" = 2 ] && kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
   fi
+  [ "$st" != 3 ] || die "an older version of cage's web app is still running, so the new one can't start yet. Try again in a minute; if it says this again, restart your computer"
+  [ "$st" != 1 ] || die "something else is using port $UI_PORT, so cage didn't open it there. Use another port: CAGE_UI_PORT=7772 cage ui"
+  [ "$st" = 0 ] || die "the web app didn't start; see $CAGE_HOME/ui.log"
   if is_wsl; then wsl_keepalive_start 2>/dev/null || true; fi   # WSL stops an idle distro, and the app with it
-  ok "cage is open in your browser"
-  hint "$url"
-  [ "${1:-}" = --no-open ] || UI=1 open_url "$url" >/dev/null 2>&1 || true
+  url="http://127.0.0.1:$UI_PORT/"
+  if [ "${1:-}" = --no-open ]; then ok "cage's web app is running at $url"; hint "open it with: cage ui"; return 0; fi
+  # The address gets a pairing code, not the token: the page trades it for the token, once, within a minute, and (on
+  # Linux) only from a program of yours. So the browser's command line, which other users can read, keeps no secret.
+  code="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  ( umask 077; now="$(date +%s)"
+    { if [ -f "$pair" ]; then awk -v now="$now" '$1 > now' "$pair"; fi; echo "$((now + 60)) $code"; } > "$pair.$$" && mv -f "$pair.$$" "$pair" )
+  url="$url#pair=$code"
+  if [ -n "${SSH_CONNECTION:-}" ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && ! is_wsl; then
+    say "you're connected over SSH: open cage in the browser on your own computer"
+    hint "connect with: ssh -L $UI_PORT:127.0.0.1:$UI_PORT <this computer> (if you didn't, reconnect that way and run cage ui again)"
+    hint "then open: $url (works once, within a minute)"
+    return 0
+  fi
+  UI=1 open_url "$url" >/dev/null 2>&1 || true
+  ok "opening cage in your browser"
+  hint "if it doesn't open, go to: $url (works once, within a minute)"
 }
 
 # --- backups ----------------------------------------------------------------------------------------------------
@@ -3249,7 +3287,8 @@ main() {
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
     _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
-    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
+    # the web app first (in its own shell, so nothing there stops the agents from waking), so the installed app opens
+    _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; ( cmd_ui --no-open ) || true; cmd_up ;;
     _open) UI=1 open_url "${1:-}" ;;
     _outbox) load_env; find_msb || true; outbox_process; wait ;;   # once (the background helper does this every 3 s)
     _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT

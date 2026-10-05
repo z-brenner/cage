@@ -1,16 +1,18 @@
-// Drives cage's web app in a real (headless) browser against a stub msb: the page, its token, a question with a
-// hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one
-// (test/fixtures/fake-vm.mjs plays its VM), the phone layout, and that nothing works without the token.
-//   node test/ui.browser.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token> <its home>
-//     <an installed release's url> <its folder>
-// (test/ui.sh starts the server; needs the `playwright` package and a Chromium.)
+// Drives cage's web app in a real (headless) browser against a stub msb: the page, opening it with a one-time code, a
+// question with a hidden answer, a yes/no question, a terminal view, asking your agents, chatting with one
+// (test/fixtures/fake-vm.mjs plays its VM), jobs that keep going when their panel is hidden, switches that show what's
+// true, unsaved text, cage not answering, the phone layout, and that nothing works without the token.
+//   node test/ui.browser.mjs <base url> <token> <cage home> <the fake VM's work folder> <a fresh computer's url> <its token>
+//     <its home> <an installed release's url> <its folder> <its server's pid>
+// (test/ui.sh starts the servers; needs the `playwright` package and a Chromium.)
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 // PLAYWRIGHT_MODULE: where the playwright package is, when it isn't installed next to this file
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const [base, token, home, work, base2, token2, home2, base3, inst] = process.argv.slice(2)
+const [base, token, home, work, base2, token2, home2, base3, inst, pid3] = process.argv.slice(2)
 let pass = 0
 const ok = (m) => { pass++; console.log('ok - ' + m) }
 const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
@@ -21,22 +23,39 @@ const fresh = () => browser.newContext({ locale: 'en-US', timezoneId: 'UTC', red
 const ctx = await fresh()
 const page = await ctx.newPage()
 const errors = []
-page.on('pageerror', (e) => errors.push(e.message))
+const watch = (p) => p.on('pageerror', (e) => errors.push(e.message))
+watch(page)
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
+const pairing = () => { // what `cage ui` does: a one-time code in ui.pair, good for a minute
+  const code = crypto.randomBytes(16).toString('hex')
+  fs.appendFileSync(path.join(home, 'ui.pair'), `${Math.floor(Date.now() / 1000) + 60} ${code}\n`)
+  return code
+}
 
 // without the token: nothing but the "open it from cage" card
 await page.goto(base + '/')
 await page.getByText('Open cage from your computer').waitFor({ timeout: 10000 })
 ok('without the token, the page shows how to open it, and nothing else')
 
-// with it: the agents
-await page.goto(base + '/#' + token)
+// `cage ui` opens the page with a one-time code, which the page trades for the token
+const code = pairing()
+await page.goto(base + '/#pair=' + code)
 await page.locator('.agent', { hasText: 'Claude Code' }).getByText('Ready').waitFor({ timeout: 20000 })
-if (page.url().includes(token)) fail('the token stayed in the address bar')
+if (page.url().includes(code)) fail('the pairing code stayed in the address bar')
+if ((await page.evaluate(() => localStorage.getItem('cage-token'))) !== token) fail('the page did not keep the token')
 const card = page.locator('.agent', { hasText: 'Claude Code' })
 if (!(await card.getByRole('link', { name: 'Chat', exact: true }).count())) fail('no way to chat')
 if (!(await page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator('.dot.ok').count())) fail('no ready dot in the sidebar')
-ok('agents: Claude ready to chat, in the list and the sidebar; the token is moved out of the address bar')
+const other = await (await fresh()).newPage()   // another browser: the same code doesn't work twice
+await other.goto(base + '/#pair=' + code)
+await other.getByText('expired or was already used').waitFor({ timeout: 10000 })
+const visitor = await ctx.newPage()   // a made-up token in the address (any website can link here) doesn't replace the real one
+await visitor.goto(base + '/#' + 'ab'.repeat(24))
+await visitor.locator('.agent', { hasText: 'Claude Code' }).getByText('Ready').waitFor({ timeout: 20000 })
+if ((await visitor.evaluate(() => localStorage.getItem('cage-token'))) !== token) fail('a made-up token replaced the real one')
+await other.context().close()
+await visitor.close()
+ok('opening with a one-time code: agents shown, the code works once, and a made-up token in the address changes nothing')
 
 // ask your agents: the awake ones answer side by side
 await page.getByLabel('Question for your agents').fill('capital of France?')
@@ -58,11 +77,12 @@ await round1.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Pari
 if (!(await round1.locator('.answer-card em', { hasText: 'the other' }).count()) || !(await round1.getByText('snake_case_ok').count())) fail('*italic* is not shown as italic, or snake_case lost its underscores')
 await page.getByRole('button', { name: 'Where do they disagree?' }).click()
 await page.locator('.compare-card', { hasText: 'Where they agree and differ' }).getByText('Paris').waitFor({ timeout: 15000 })
-await page.getByLabel('Follow-up question').fill('and the second city?')
+await page.getByLabel('Follow-up question').fill('and the second city? ' + 'Please be thorough. '.repeat(1000))   // 20,000 characters
 await page.getByLabel('Follow-up question').press('Enter')
 const round2 = page.locator('.round').nth(1)
 await round2.getByText('and the second city?').waitFor({ timeout: 10000 })
 await round2.locator('.answer-card', { hasText: 'Codex' }).getByText('Lyon').waitFor({ timeout: 15000 })
+if (await round2.locator('.note.bad').count()) fail('the long follow-up failed: ' + await round2.locator('.note.bad').innerText())
 if (await page.locator('.compare-card').count()) fail('the comparison of the last round stayed after a follow-up')
 await page.reload()
 const earlier = page.locator('details.history')
@@ -73,7 +93,7 @@ fs.rmSync(process.env.STUB_AWAKE)
 await page.getByRole('button', { name: 'Clear' }).click()
 await page.reload()
 await page.locator('.composer input[value=codex][disabled]').waitFor({ state: 'attached', timeout: 15000 })
-ok('ask v2: where they disagree, a follow-up with the earlier answers, earlier questions kept in this browser')
+ok('ask v2: where they disagree, a 20,000-character follow-up with the earlier answers, earlier questions kept in this browser')
 
 // chat with an agent in the app: a starter, a file, a streamed answer, a file back, asking before acting
 await card.getByRole('link', { name: 'Chat', exact: true }).click()
@@ -101,33 +121,62 @@ if (!(await approval.getByText('You chose:').count())) fail('the choice is not s
 if (!fs.readFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), 'utf8').includes('"action":"perm:allow"')) fail('the approval did not reach the agent')
 ok('chat: starters, a file each way, a streamed answer, and asking before acting (Allow reaches the agent)')
 
+// the VM starts a new chat log now and then (at 8 MB): what was said before stays on the screen, and after a reload
+const dir = path.join(home, 'app', 'claude')
+fs.renameSync(path.join(dir, 'log.jsonl'), path.join(dir, 'log.1.jsonl'))
+fs.writeFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'A fresh log. [Check your account](https://evil.example/login)' }) + '\n')
+await chat.getByText('A fresh log.').waitFor({ timeout: 10000 })
+const before = chat.locator('.msg-you', { hasText: 'Summarize the attached document' })
+if (!(await before.count())) fail('the conversation before the new log vanished')
+if ((await chat.locator('.msg-agent', { hasText: 'A fresh log.' }).locator('.link-host').innerText()) !== ' (evil.example)') fail('a link with words of its own does not say where it goes')
+await page.reload()
+await chat.getByText('A fresh log.').waitFor({ timeout: 10000 })
+if (!(await before.count())) fail('after a reload, the conversation before the new log is gone')
+fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'status', connected: false }) + '\n')
+await page.locator('.chat-banner', { hasText: 'Claude Code’s chat service is reconnecting' }).waitFor({ timeout: 10000 })
+fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'status', connected: true }) + '\n')
+await page.locator('.chat-banner').waitFor({ state: 'hidden', timeout: 10000 })
+ok('a new chat log keeps the conversation on screen, also after a reload; a link says where it really goes; a dropped relay is shown')
+
 // its files and its plan usage
 await page.locator('.tabs').getByRole('link', { name: 'Files' }).click()
 await page.locator('.card', { hasText: 'notes.md' }).waitFor({ timeout: 15000 })
 await page.getByRole('button', { name: 'reports' }).click()
-const q3 = page.locator('li', { hasText: 'q3.txt' })
+const q3 = page.locator('li', { hasText: 'q3-results.txt' })
 await q3.waitFor({ timeout: 15000 })
 const [dl2] = await Promise.all([page.waitForEvent('download'), q3.getByRole('button', { name: 'Download' }).click()])
 if (!fs.readFileSync(await dl2.path(), 'utf8').startsWith('Q3: up 12%')) fail('download from the work folder')
+if (dl2.suggestedFilename() !== 'q3-results.txt') fail('the download lost part of its name: ' + dl2.suggestedFilename())
 if (!(await page.locator('.card', { hasText: 'brief.pdf' }).count())) fail('files of the chat are not listed')
 await page.locator('.tabs').getByRole('link', { name: 'Settings' }).click()
 await page.locator('.usage').getByText('42% used').waitFor({ timeout: 15000 })
 if (!(await page.getByRole('link', { name: '@my_claude_bot' }).count())) fail('no link to the bot in its settings')
-ok("files: what you sent each other, and its work folder to download from; its plan's usage in its settings")
+ok("files: what you sent each other, and its work folder to download from (under its own name); its plan's usage")
 
 // signing in without a terminal: the link as a button, and a box for the code it gives you
 await page.getByRole('button', { name: 'Sign in again' }).click()
-const signin = page.locator('dialog#job .signin')
+const dialog = page.locator('dialog#job')
+const signin = dialog.locator('.signin')
 const link = signin.getByRole('link', { name: 'Open sign-in page' })
 await link.waitFor({ timeout: 15000 })
 if (!(await link.getAttribute('href')).startsWith('https://claude.ai/oauth/authorize?code=true&client_id=9d1c')) fail('the sign-in link: ' + await link.getAttribute('href'))
-if (await page.locator('dialog#job .job-term').isVisible()) fail('the terminal shows during a sign-in')
+if (!/\bprimary\b/.test(await link.getAttribute('class')) || !(await signin.getByText('Goes to claude.ai').count())) fail('the sign-in link is not the main button, or does not say where it goes')
+if (await dialog.locator('.job-term').isVisible()) fail('the terminal shows during a sign-in')
 await signin.getByPlaceholder('Paste the code here').fill('CODE-123')
 await signin.getByRole('button', { name: 'Send' }).click()
 await page.locator('#job-status', { hasText: 'Done' }).waitFor({ timeout: 15000 })
-await page.locator('dialog#job').getByText('claude is signed in').waitFor({ timeout: 5000 })
-await page.locator('dialog#job').getByRole('button', { name: 'Close' }).click()
-ok('signing in: the link as a button and a box for the code, no terminal')
+await dialog.getByText('claude is signed in').waitFor({ timeout: 5000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+// an agent tricked into printing someone else's sign-in page: still shown, but not as the big button, and with a warning
+fs.writeFileSync(process.env.STUB_EVIL, '')
+await page.getByRole('button', { name: 'Sign in again' }).click()
+await signin.getByText('This link goes to claude-login.evil.example, not Anthropic.').waitFor({ timeout: 15000 })
+if (/\bprimary\b/.test(await link.getAttribute('class'))) fail('a sign-in page somewhere else is the main button')
+await dialog.getByRole('button', { name: 'Stop' }).click()
+await page.locator('#job-status', { hasText: 'didn’t work' }).waitFor({ timeout: 15000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+fs.rmSync(process.env.STUB_EVIL)
+ok('signing in: the link as a button, a box for the code, no terminal; a link to anywhere else comes with a warning')
 
 // scheduled tasks: add one in plain words, run it now (it answers in the chat), delete it
 await page.locator('.tabs').getByRole('link', { name: 'Schedule' }).click()
@@ -149,22 +198,30 @@ await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByRole('but
 await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
 ok('scheduled tasks: added in plain words (weekdays at 8), run now answers in the chat, deleted')
 
-// an asleep agent: sending wakes it up, and the message waits in its folder
+// an asleep agent: sending wakes it up, and the message waits in its folder; if it can't be woken, the page says so
 await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
 await page.locator('.chat-banner', { hasText: 'asleep' }).waitFor({ timeout: 10000 })
+fs.writeFileSync(process.env.STUB_NOWAKE, '')
 await page.locator('.chat textarea').fill('hello codex')
 await page.locator('.chat textarea').press('Enter')
+const wakeBanner = page.locator('.chat-banner', { hasText: 'Couldn’t wake Codex. Your message is waiting for it.' })
+await wakeBanner.waitFor({ timeout: 15000 })
+if (await page.locator('.chat .typing').isVisible()) fail('it still looks like Codex is working')
+await wakeBanner.getByRole('button', { name: 'See what happened' }).click()
+await page.waitForFunction(() => document.querySelector('dialog#job').innerText.includes('no room for another VM'), null, { timeout: 10000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+fs.rmSync(process.env.STUB_NOWAKE)
+await wakeBanner.getByRole('button', { name: 'Try again' }).click()
 await page.locator('.chat-banner', { hasText: 'Waking Codex up' }).waitFor({ timeout: 10000 })
 const waiting = fs.readdirSync(path.join(home, 'app', 'codex', 'in')).filter((n) => n.endsWith('.json'))
 if (waiting.length !== 1 || !fs.readFileSync(path.join(home, 'app', 'codex', 'in', waiting[0]), 'utf8').includes('hello codex')) fail('the message is not waiting for codex')
-ok('an asleep agent wakes up when you message it; the message waits for it')
+ok('an asleep agent wakes up when you message it, and the message waits for it; when it can\'t be woken, the page says why')
 
 // a question with a hidden answer: add a key
 await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
 await page.getByPlaceholder('GITHUB_TOKEN').fill('UI_KEY')
 await page.getByPlaceholder('api.github.com').fill('api.ui.example')
 await page.getByRole('button', { name: 'Add a key' }).click()
-const dialog = page.locator('dialog#job')
 const secret = dialog.locator('input[type=password]')
 await secret.waitFor({ timeout: 15000 })
 await secret.fill('ui-s3cret')
@@ -177,9 +234,86 @@ await dialog.getByRole('button', { name: 'Close' }).click()
 await page.locator('.list li', { hasText: 'UI_KEY' }).waitFor({ timeout: 10000 })
 ok('a hidden question: the key goes in through the job, is saved, listed, and never shown')
 
-// a yes/no question: /all in chat offers to restart the running agent
+// Esc hides a job instead of stopping it: a pill says it's waiting for you and brings it back, also after a reload.
+// One job at a time: a switch flipped meanwhile brings that job back instead, and doesn't move.
+const pill = page.locator('#job-pill')
+await page.getByPlaceholder('GITHUB_TOKEN').fill('UI_LATER')
+await page.getByPlaceholder('api.github.com').fill('api.later.example')
+await page.getByRole('button', { name: 'Add a key' }).click()
+await secret.waitFor({ timeout: 15000 })
+await page.keyboard.press('Escape')
+await dialog.waitFor({ state: 'hidden' })
+await pill.getByText('Waiting for you: Add UI_LATER').waitFor({ timeout: 10000 })
 await page.getByRole('link', { name: 'Settings' }).click()
-await page.locator('.setting', { hasText: 'Ask everyone from chat' }).getByRole('checkbox').check()
+const maskBox = page.getByRole('checkbox', { name: 'Mask for Claude Code' })
+if (await maskBox.isChecked()) fail('the privacy mask is on to begin with')
+await maskBox.click()
+await secret.waitFor({ timeout: 10000 })
+if ((await page.locator('#job-title').innerText()) !== 'Add UI_LATER') fail('another job started while one was running')
+await page.keyboard.press('Escape')
+await dialog.waitFor({ state: 'hidden' })
+if (await maskBox.isChecked()) fail('the switch shows the click, though nothing changed')
+await page.reload()
+await pill.getByText('Add UI_LATER').waitFor({ timeout: 15000 })
+await pill.click()
+await secret.waitFor({ timeout: 10000 })
+await secret.fill('later-s3cret')
+await dialog.getByRole('button', { name: 'Send' }).click()
+await dialog.getByText('Done.').waitFor({ timeout: 15000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+if (fs.readFileSync(path.join(home, 'secrets', 'UI_LATER'), 'utf8') !== 'later-s3cret') fail('the hidden job did not carry on')
+if (await pill.isVisible()) fail('the pill stayed after the job was closed')
+// the switch waits for cage: flip it, hide the question it asks; the page shows what's true and that it's busy
+await maskBox.click()
+await dialog.getByRole('button', { name: 'No' }).waitFor({ timeout: 15000 })
+await page.keyboard.press('Escape')
+await pill.getByText('Waiting for you: Privacy mask for Claude Code').waitFor({ timeout: 10000 })
+const maskOn = () => /^CAGE_MASK=".*\bclaude\b/m.test(fs.readFileSync(path.join(home, 'cage.env'), 'utf8'))
+const mask = (on, busy) => page.waitForFunction(([on, busy]) => {
+  const el = document.querySelector('input[aria-label="Mask for Claude Code"]')
+  return el && el.checked === on && (el.getAttribute('aria-busy') === 'true') === busy
+}, [on, busy], { timeout: 10000 })
+await mask(maskOn(), true).catch(() => fail('the switch does not show what cage.env says (and that cage is busy with it)'))
+await pill.click()
+await dialog.getByRole('button', { name: 'No' }).click()
+await dialog.getByText('Done.').waitFor({ timeout: 15000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+await mask(true, false)
+if (!maskOn()) fail('the mask is not on')
+await maskBox.click()
+await dialog.getByRole('button', { name: 'No' }).click({ timeout: 15000 })
+await dialog.getByText('Done.').waitFor({ timeout: 15000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+await mask(false, false)
+ok('Esc hides a job, the pill brings it back (also after a reload); a switch shows what cage did, not the click')
+
+// a question answered before a reload stays answered when the job comes back: only the one still waiting asks again
+await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
+await page.getByPlaceholder('example.com').fill('intranet.example')
+await page.getByRole('button', { name: 'Add a sign-in' }).click()
+await dialog.getByLabel(/username or email/).fill('sam')
+await dialog.getByRole('button', { name: 'Send' }).click()
+await secret.waitFor({ timeout: 15000 })
+await page.keyboard.press('Escape')
+await pill.getByText('Waiting for you: A sign-in for intranet.example').waitFor({ timeout: 10000 })
+await page.reload()
+await pill.click({ timeout: 15000 })
+await secret.waitFor({ timeout: 10000 })
+if ((await dialog.locator('.ask-box').count()) !== 1 || !(await dialog.locator('.answered', { hasText: 'Answered' }).count())) fail('the username question asks again after a reload')
+await secret.fill('intranet-s3cret')
+await dialog.getByRole('button', { name: 'Send' }).click()
+for (let i = 0; i < 60 && !(await dialog.getByText('Done.').count()); i++) { // it may offer to restart the agent
+  const no = dialog.getByRole('button', { name: 'No' })
+  if (await no.count()) await no.click(); else await page.waitForTimeout(250)
+}
+await dialog.getByText('Done.').waitFor({ timeout: 15000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+await page.locator('.list li', { hasText: 'intranet.example' }).waitFor({ timeout: 10000 })
+await page.getByRole('link', { name: 'Settings' }).click()
+ok('a job brought back after a reload shows the questions you answered as answered, and asks only the one still waiting')
+
+// a yes/no question: /all in chat offers to restart the running agent
+await page.locator('.setting', { hasText: 'Ask everyone from chat' }).getByRole('checkbox').click()
 await dialog.getByRole('button', { name: 'No' }).waitFor({ timeout: 15000 })
 await dialog.getByRole('button', { name: 'No' }).click()
 await dialog.getByText('Done.').waitFor({ timeout: 15000 })
@@ -204,7 +338,50 @@ await page.getByRole('button', { name: 'Activity log' }).click()
 await dialog.locator('.job-term .xterm').waitFor({ timeout: 15000 })
 await page.waitForFunction(() => document.querySelector('.job-term')?.innerText.includes('cc-connect: line 3'), null, { timeout: 15000 })
 await dialog.getByRole('button', { name: 'Close' }).click()
-ok("raw output (an agent's logs) shows in a terminal view")
+// a log that's still open when the page goes away (a reload, a closed tab) stops: nobody can look at it any more. Also
+// in a page the app's service worker brought (as the installed app's are), which a request sent on the way out has to
+// get past
+const running = async () => (await (await fetch(base + '/api/jobs', { headers: { 'X-Cage-Token': token } })).json()).jobs.map((j) => j.title)
+const p4 = await (await fresh()).newPage()
+watch(p4)
+await p4.goto(base + '/#pair=' + pairing())
+await p4.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 15000 })
+for (let round = 1; round <= 3; round++) {
+  await p4.reload()   // this page, and the next, come through the service worker
+  await p4.locator('.agent').first().waitFor({ timeout: 15000 })
+  await p4.evaluate(() => runJob(['logs', 'codex'], 'Codex: activity log'))
+  await p4.waitForFunction(() => document.querySelector('.job-term')?.innerText.includes('codex: still here'), null, { timeout: 15000 })
+  if (!(await running()).includes('Codex: activity log')) fail('the open log is not listed as running')
+  await p4.reload()
+  for (let i = 0; i < 50 && (await running()).includes('Codex: activity log'); i++) await p4.waitForTimeout(100)
+  if ((await running()).includes('Codex: activity log')) fail(`a log left open goes on after the page went away (${round})`)
+}
+await p4.context().close()
+ok("raw output (an agent's logs) shows in a terminal view; a log left open stops when the page goes away")
+
+// what you write about yourself isn't lost to a redraw, and leaving without saving asks first
+await page.getByRole('link', { name: 'Memory' }).click()
+const about = page.getByLabel('About you')
+await about.fill('I am Sam, a contracts lawyer in Berlin.')
+await page.getByRole('heading', { name: 'Memory' }).click()   // out of the box, so the page may be redrawn
+await page.getByText('Unsaved changes').waitFor({ timeout: 5000 })
+await about.evaluate((el) => { el.dataset.old = '1' })
+fs.writeFileSync(process.env.STUB_AWAKE, '')   // Codex wakes up: the state changes, and the page is drawn again
+await page.waitForFunction(() => { const el = document.querySelector('[data-keep="about"]'); return el && !el.dataset.old }, null, { timeout: 15000 })
+if ((await about.inputValue()) !== 'I am Sam, a contracts lawyer in Berlin.') fail('a redraw wiped what you wrote: ' + await about.inputValue())
+let asked = ''
+page.once('dialog', (d) => { asked = d.message(); d.dismiss() })
+await page.getByRole('link', { name: 'Security' }).click()
+await page.waitForFunction(() => location.hash === '#memory', null, { timeout: 5000 })
+if (!/haven’t saved/.test(asked)) fail('leaving did not ask first: ' + asked)
+if (!(await page.getByRole('heading', { name: 'Memory' }).count()) || (await about.inputValue()) !== 'I am Sam, a contracts lawyer in Berlin.') fail('left the page without asking')
+await page.getByRole('button', { name: 'Save' }).click()
+await page.getByText('Saved. Your agents see it').waitFor({ timeout: 5000 })
+if (fs.readFileSync(path.join(home, 'brain', 'memory', 'about-me.md'), 'utf8') !== 'I am Sam, a contracts lawyer in Berlin.') fail('about you was not saved')
+await page.getByRole('link', { name: 'Security' }).click()
+await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 })
+fs.rmSync(process.env.STUB_AWAKE)
+ok('memory: unsaved text survives a redraw, says it is unsaved, and leaving asks first')
 
 // Ctrl+K: jump to anything
 await page.keyboard.press('Control+k')
@@ -214,9 +391,10 @@ await page.getByRole('heading', { name: 'Security' }).waitFor({ timeout: 10000 }
 if (await page.locator('dialog#palette[open]').count()) fail('the palette stayed open')
 ok('Ctrl+K jumps to a page by name')
 
-// setting up a fresh computer: checks, picking agents, signing in by device code, about you
+// setting up a fresh computer: checks, picking agents, signing in by device code, about you (opened the older way,
+// with the token in the address, which still works)
 const p2 = await (await fresh()).newPage()
-p2.on('pageerror', (e) => errors.push(e.message))
+watch(p2)
 await p2.goto(base2 + '/#' + token2)
 await p2.getByRole('button', { name: 'Set up cage' }).click()
 await p2.locator('.check-row').first().waitFor({ timeout: 60000 })
@@ -246,7 +424,7 @@ await p2.close()
 ok('setting up: the computer checked, agents picked (no bot), signed in by device code, about you saved, then the chat')
 
 // desktop notifications: on in Settings; a reply while you're elsewhere notifies and marks the agent unread
-await page.context().grantPermissions(['notifications'], { origin: base })
+await ctx.grantPermissions(['notifications'], { origin: base })
 await page.addInitScript(() => {
   window.__notes = []
   const note = (title, o) => window.__notes.push({ title, body: (o && o.body) || '' })
@@ -259,6 +437,8 @@ const notify = page.getByRole('checkbox', { name: 'Desktop notifications' })
 await notify.waitFor({ state: 'attached', timeout: 15000 })
 await notify.click({ force: true })
 await page.waitForFunction(() => localStorage.getItem('cage-notify') === 'on', null, { timeout: 10000 })
+await page.waitForFunction(() => { const el = document.querySelector('input[aria-label="Desktop notifications"]'); return el && el.checked && !el.hasAttribute('aria-busy') }, null, { timeout: 5000 })
+  .catch(() => fail('the notifications switch is not on, or still waits for a job it never started'))
 await page.goto(base + '/#home')
 await page.waitForFunction(() => document.body.dataset.live === 'on', null, { timeout: 15000 })   // the live stream is connected
 fs.appendFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'Your **report** is ready' }) + '\n')
@@ -273,7 +453,7 @@ ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and
 
 // updating while the app is open: the server restarts with the new code, and the page reloads with the new page
 const p3 = await ctx.newPage()
-p3.on('pageerror', (e) => errors.push(e.message))
+watch(p3)
 await p3.goto(base3 + '/#' + token)
 await p3.locator('#version', { hasText: 'cage v1.0.0' }).waitFor({ timeout: 15000 })
 await p3.evaluate(() => { window.__oldPage = true })
@@ -285,8 +465,19 @@ for (let i = 0; i < 50 && (await healthz()) !== 'ok, updated'; i++) await p3.wai
 if ((await healthz()) !== 'ok, updated') fail('the server did not restart with its new code')
 await p3.waitForFunction(() => !window.__oldPage, null, { timeout: 20000 })   // a new page, not just a redraw
 await p3.locator('#version', { hasText: 'cage v1.0.1' }).waitFor({ timeout: 20000 })
-await p3.close()
 ok('updating while the app is open: the server restarts with its new code, and the page reloads')
+
+// cage stops answering: within 15 seconds the page says so, greys out the agents and won't send; the installed app
+// (the service worker) shows a page that says what to do instead of the browser's error
+await p3.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 15000 })
+process.kill(Number(pid3))
+await p3.locator('#notice', { hasText: 'cage isn’t answering' }).waitFor({ timeout: 15000 })
+if (!(await p3.locator('.composer .send').isDisabled())) fail('Ask still works while cage is down')
+if (!(await p3.evaluate(() => document.body.classList.contains('is-down')))) fail('the agents still look ready')
+await p3.reload()
+await p3.getByRole('heading', { name: 'cage isn’t running on this computer' }).waitFor({ timeout: 10000 })
+await p3.close()
+ok('cage not answering: a banner within 15 s, sending off; reloading shows what to do, not a browser error')
 
 // on a phone: the sidebar is a menu
 const offscreen = () => page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().right <= 0, null, { timeout: 5000 })
