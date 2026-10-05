@@ -250,16 +250,55 @@ install_browser() { # the browser's part of the system (provision.sh --browser);
   browser_libs "$cli"
 }
 
+CC_CONNECT_RELEASES=https://github.com/chenhg5/cc-connect/releases/download
+CC_CONNECT_BIN=/usr/local/bin/cc-connect
+cc_connect_sha256() { # cc_connect_sha256 <version> <arch>: the SHA-256 of that release's tarball, as published
+  case "$1-$2" in
+    v1.5.0-amd64) echo 72859035a1ee011b710204fc508de711838f919eb2ae6f104f1ddb3e5cd8ca87 ;;
+    v1.5.0-arm64) echo 360916e64c81714b4b295905b7aa95a62d3b5bfba0fb306f29a4560224d07ca3 ;;
+    v1.5.1-beta.3-amd64) echo 4c969474d9e971395f36842646ef42a519557e90e0fee4eba128a4ba786ac21a ;;
+    v1.5.1-beta.3-arm64) echo bf723db0df33177bfafae4a2e4e91f4f0d17579a0273f358f137913fd680d83c ;;
+    *) return 1 ;;
+  esac
+}
+sha256_is() { [ -n "$1" ] && [ "$(sha256sum "$2" 2>/dev/null | cut -d' ' -f1)" = "$1" ]; }   # sha256_is <hash> <file>
+
+# cc-connect holds the chat apps' tokens and runs every turn, so its download is checked against the SHA-256 kept
+# above. The copy in the cache is checked again before each use: the cache is the VM's to write.
 install_cc_connect() {
-  local arch os=linux
-  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; esac
-  local bin="$CACHE/cc-connect-$CC_CONNECT_VERSION-$os-$arch"
-  if [ "$CACHED" = 1 ] && [ -x "$bin" ]; then install -m 0755 "$bin" /usr/local/bin/cc-connect; return 0; fi
-  log "cc-connect $CC_CONNECT_VERSION"
-  local tmp; tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/chenhg5/cc-connect/releases/download/$CC_CONNECT_VERSION/cc-connect-$CC_CONNECT_VERSION-$os-$arch.tar.gz" | tar -xz -C "$tmp"
-  install -m 0755 "$(find "$tmp" -type f -name 'cc-connect*' | head -1)" /usr/local/bin/cc-connect
-  [ "$CACHED" = 0 ] || install -m 0755 /usr/local/bin/cc-connect "$bin"
+  local arch name want pinned=1 tmp f
+  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) log "unsupported arch $(uname -m)"; return 1 ;; esac
+  name="cc-connect-$CC_CONNECT_VERSION-linux-$arch.tar.gz"
+  tmp="$(mktemp -d)"
+  f="$tmp/$name"
+  [ "$CACHED" = 0 ] || f="$CACHE/$name"
+  want="$(cc_connect_sha256 "$CC_CONNECT_VERSION" "$arch")" || { pinned=0; want="$(cat "$f.sha256" 2>/dev/null || true)"; }
+  if ! { [ -s "$f" ] && sha256_is "$want" "$f"; }; then
+    step "cc-connect $CC_CONNECT_VERSION"
+    if [ "$pinned" = 0 ]; then
+      # A version cage hasn't checked itself: the release's own list catches a broken download, but not a changed
+      # release, since it comes from the same place.
+      log "no checksum kept for cc-connect $CC_CONNECT_VERSION; checking it against the release's checksums.txt (a weaker check)"
+      want="$(curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 60 \
+        "$CC_CONNECT_RELEASES/$CC_CONNECT_VERSION/checksums.txt" | awk -v n="$name" '$2 == n { print $1; exit }')" || want=""
+      [ -n "$want" ] || { log "couldn't get cc-connect $CC_CONNECT_VERSION's checksums.txt"; rm -rf "$tmp"; return 1; }
+    fi
+    curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 -o "$f.part" \
+      "$CC_CONNECT_RELEASES/$CC_CONNECT_VERSION/$name" || { log "couldn't download cc-connect"; rm -rf "$f.part" "$tmp"; return 1; }
+    if ! sha256_is "$want" "$f.part"; then
+      log "cc-connect's download doesn't match its checksum; not using it"
+      rm -rf "$f.part" "$tmp"
+      return 1
+    fi
+    mv "$f.part" "$f"
+    if [ "$CACHED" = 1 ]; then
+      if [ "$pinned" = 0 ]; then echo "$want" > "$f.sha256"; fi
+      rm -f "$CACHE/cc-connect-$CC_CONNECT_VERSION-linux-$arch"   # what older cage kept: the binary, unchecked
+    fi
+  fi
+  mkdir "$tmp/x"
+  tar -xzf "$f" -C "$tmp/x" && install -m 0755 "$(find "$tmp/x" -type f -name 'cc-connect*' | head -n 1)" "$CC_CONNECT_BIN" \
+    || { log "couldn't unpack cc-connect"; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
 }
 

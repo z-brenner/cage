@@ -121,6 +121,34 @@ grep -q "^node $T/npm/@playwright/mcp/cli.js --headless --no-sandbox --no-webmcp
   || fail "cage-browser's Playwright MCP: $(shown)"
 ok "cage-browser says the browser is still being set up until it's ready, then starts Playwright MCP without WebMCP"
 
+# --- cc-connect: checked against its SHA-256 (pinned, or the release's own list for other versions) ----------------
+case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
+mkdir -p "$T/pkg"
+printf '#!/bin/sh\necho cc-connect stub\n' > "$T/pkg/cc-connect-v9.9.9-linux-$arch"
+chmod +x "$T/pkg/cc-connect-v9.9.9-linux-$arch"
+tar -czf "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" -C "$T/pkg" "cc-connect-v9.9.9-linux-$arch"
+cp "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" "$T/www/cc-connect-v1.5.0-linux-$arch.tar.gz"   # not v1.5.0's real file
+cc() { # cc <version>
+  CC_CONNECT_VERSION="$1" CACHED=1 CC_CONNECT_BIN="$T/cc-connect"
+  mkdir -p "$CACHE"
+  install_cc_connect
+}
+if lib cc v1.5.0; then fail "a cc-connect that doesn't match its pinned checksum was installed: $(shown)"; fi
+grep -q "cc-connect's download doesn't match its checksum; not using it" "$T/out" || fail "no plain message: $(shown)"
+[ ! -e "$T/cc-connect" ] && [ -z "$(ls -A "$T/cache")" ] || fail "the mismatched download was kept: $(ls -R "$T/cache")"
+echo "$(sha256sum "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" | cut -d' ' -f1)  cc-connect-v9.9.9-linux-$arch.tar.gz" > "$T/www/checksums.txt"
+lib cc v9.9.9 || fail "cc-connect matching its release's checksums.txt: $(shown)"
+[ "$("$T/cc-connect")" = "cc-connect stub" ] && grep -q 'a weaker check' "$T/out" || fail "unknown version: $(shown)"
+lib cc v9.9.9 || fail "cc-connect from the cache: $(shown)"
+grep -q '^curl' "$T/calls" && fail "a checked copy in the cache was downloaded again: $(shown)"
+echo tampered >> "$T/cache/cc-connect-v9.9.9-linux-$arch.tar.gz"
+lib cc v9.9.9 || fail "cc-connect after a changed cache: $(shown)"
+grep -q "^curl .*/v9.9.9/cc-connect-v9.9.9-linux-$arch.tar.gz" "$T/calls" || fail "a changed copy in the cache was used: $(shown)"
+echo "0000000000000000000000000000000000000000000000000000000000000000  cc-connect-v9.9.8-linux-$arch.tar.gz" > "$T/www/checksums.txt"
+cp "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" "$T/www/cc-connect-v9.9.8-linux-$arch.tar.gz"
+if lib cc v9.9.8; then fail "a cc-connect that doesn't match its release's checksums.txt was installed: $(shown)"; fi
+ok "cc-connect: a download that doesn't match its checksum is refused; the cached copy is checked before each use"
+
 # --- CAGE_APT_MIRROR: Ubuntu's archive from that mirror first; security updates as before -----------------------------
 mirror() {
   SOURCES="$T/ubuntu.sources" MIRRORS="$T/mirrors.txt"
