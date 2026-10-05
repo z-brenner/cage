@@ -343,6 +343,13 @@ adapters_node() {
   fi
 }
 
+DPKG_UPDATES=/var/lib/dpkg/updates
+finish_dpkg() { # entry.sh's time limit can stop provisioning in the middle of dpkg; apt won't go on until that's finished
+  [ -n "$(ls -A "$DPKG_UPDATES" 2>/dev/null)" ] || return 0
+  step "finishing an install that was cut short"
+  dpkg --force-confdef --force-confold --configure -a >/dev/null
+}
+
 guest_env() {
   # Sourced by guest/entry.sh before starting cc-connect. Non-secret defaults only.
   mkdir -p /etc/cage
@@ -389,11 +396,7 @@ fi
 heartbeat &
 HEARTBEAT=$!
 trap 'kill "$HEARTBEAT" 2>/dev/null; rm -f "$STEP_FILE"' EXIT
-# entry.sh's time limit can stop provisioning in the middle of dpkg; apt won't go on until that's finished
-if [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ]; then
-  step "finishing an install that was cut short"
-  dpkg --force-confdef --force-confold --configure -a >/dev/null
-fi
+finish_dpkg
 
 case "$MODE" in
   --node) node_22; exit 0 ;;

@@ -95,7 +95,8 @@ ok "first boot provisioned and started cc-connect"
 
 case "$A" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$A" ;; esac
 docker exec -u agent -e HOME=/home/agent "$NAME" "$BIN" --version >/dev/null || fail "$BIN not runnable as agent"
-ok "$BIN runs as the unprivileged agent user"
+[ "$(docker exec "$NAME" id -u agent)" = 1001 ] || fail "the agent's user id isn't 1001: $(docker exec "$NAME" id agent)"
+ok "$BIN runs as the unprivileged agent user (uid 1001)"
 
 # Node.js 22 from NodeSource (not Ubuntu's older one), installed while provisioning (where it's retried), not later by
 # the app's chat on its own: every agent has the app
@@ -180,9 +181,13 @@ ok "cc-connect loaded the config and created the $A agent"
 
 # persistence: the home volume survives a restart and provisioning is skipped the second time
 docker exec -u agent "$NAME" sh -c 'echo keep > /home/agent/work/marker'
+# as on a home volume from an image that gave the agent another user id: its files are given back, once
+docker exec "$NAME" chown -R 4242:4242 /home/agent/.cc-connect /home/agent/work
 docker restart "$NAME" >/dev/null
 sleep 5
 wait_for "already provisioned" 120
 [ "$(docker exec "$NAME" cat /home/agent/work/marker)" = keep ] || fail "home volume lost data"
-ok "restart keeps the home volume (logins, work) and skips reprovisioning"
+grep -q 'giving them back to agent (once)' <<<"$(docker logs "$NAME" 2>&1)" \
+  && [ "$(docker exec "$NAME" stat -c %u /home/agent/work/marker)" = 1001 ] || fail "the agent's files weren't given back to it"
+ok "restart keeps the home volume (logins, work, given back to the agent if needed) and skips reprovisioning"
 echo "guest smoke test passed for $A"

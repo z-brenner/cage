@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Tests the rules guest/provision.sh and guest/entry.sh follow when the network is slow or something doesn't match,
-# with their functions loaded on their own (CAGE_PROVISION_LIB=1, CAGE_ENTRY_LIB=1) and stub apt-get, node, npm and
-# curl first on PATH: apt's time limits hold even where bash ignores set -e, Playwright never runs apt itself,
-# cc-connect must match its checksum, and `cage update` falls back to the cache. Needs GNU coreutils (Linux).
+# Tests the rules guest/provision.sh, guest/entry.sh and guest/browser.sh follow when the network is slow or something
+# doesn't match, with their functions loaded on their own (CAGE_PROVISION_LIB=1, CAGE_ENTRY_LIB=1, CAGE_BROWSER_LIB=1)
+# and stub apt-get, dpkg, node, npm and curl first on PATH: apt's time limits hold even where bash ignores set -e, the
+# limits grow with each try, Playwright never runs apt itself, cc-connect must match its checksum, and `cage update`
+# falls back to the cache. Needs GNU coreutils (Linux).
 # shellcheck disable=SC2034  # the cases below set provision.sh's own variables, for its functions
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,6 +52,7 @@ f="$T/www/${url##*/}"
 if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/certutil"   # it's there (browser.sh needs it)
+printf '#!/bin/sh\necho "dpkg $*" >> "$T/calls"\n[ "$1" != --print-architecture ] || echo amd64\n' > "$T/bin/dpkg"
 chmod +x "$T/bin/"*
 export T PATH="$T/bin:$PATH"
 
@@ -243,6 +245,18 @@ lib no_sources || fail "a system without Ubuntu's sources file stopped provision
 [ ! -e "$T/mirrors.txt" ] && grep -q "doesn't get its packages from archive.ubuntu.com, so it isn't used" "$T/out" || fail "no plain message: $(shown)"
 ok "CAGE_APT_MIRROR: a plain http(s) mirror goes first, Ubuntu's own servers second; anything else is ignored, as is a system without Ubuntu's sources"
 
+# --- dpkg cut short by the time limit, and Node.js for the chat adapters ---------------------------------------------
+finish() { DPKG_UPDATES="$T/updates"; finish_dpkg; }
+export -f finish
+mkdir -p "$T/updates"
+lib finish || fail "finish_dpkg: $(shown)"
+grep -q '^dpkg' "$T/calls" && fail "dpkg ran with nothing to finish: $(shown)"
+touch "$T/updates/0001"
+lib finish || fail "finish_dpkg: $(shown)"
+grep -q '^dpkg --force-confdef --force-confold --configure -a' "$T/calls" && grep -q 'finishing an install that was cut short' "$T/out" \
+  || fail "an install cut short wasn't finished: $(shown)"
+ok "an install that a time limit cut short is finished first (dpkg --configure -a), without questions"
+
 adapters() { # adapters <the config files>: with a Node.js that can't be installed
   node_22() { echo "NODE.JS FAILED"; return 1; }
   CONFIG="$T/config"
@@ -334,6 +348,11 @@ ok "provisioning: each try has a time limit, longer each time; cage update uses 
 waits=""; p=0
 for ran in 1 1 1 1 1 1 400 1; do p="$(entry restart_wait "$p" "$ran")"; waits="$waits $p"; done
 [ "$waits" = " 5 10 20 40 60 60 5 10" ] || fail "cc-connect's restart waits:$waits"
-ok "cc-connect restarts after 5s, twice as long after each quick exit up to a minute, and 5s again after a good run"
+stops() { pause=0 quick=0; for ran in "$@"; do cc_connect_stopped 1 "$ran"; done; }
+out="$(entry stops 1 1 1 1 1 1 400 1 1 1 1 1)"
+[ "$(grep -c 'keeps stopping soon after it starts (5 times in a row)' <<<"$out")" = 2 ] \
+  && [ "$(sed -n '5p' <<<"$out")" = 'cage-entry[claude]: cc-connect keeps stopping soon after it starts (5 times in a row); the lines above say why' ] \
+  && [ "$(grep -c 'cc-connect exited with 1; restarting in' <<<"$out")" = 12 ] || fail "cc-connect's quick exits: $out"
+ok "cc-connect restarts after 5s, twice as long after each quick exit up to a minute, and 5s again after a good run; 5 quick exits in a row are said plainly, once"
 
 echo "all $pass provisioning unit tests passed"

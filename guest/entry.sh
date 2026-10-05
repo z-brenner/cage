@@ -50,6 +50,12 @@ provision_try() { # provision_try <attempt> <seconds until the next one>
 restart_wait() { # restart_wait <previous wait> <seconds it ran>
   if [ "$2" -ge 300 ] || [ "$1" -lt 5 ]; then echo 5; elif [ "$1" -ge 30 ]; then echo 60; else echo $(( $1 * 2 )); fi
 }
+cc_connect_stopped() { # cc_connect_stopped <exit code> <seconds it ran>: says so, and sets $pause for the restart
+  pause="$(restart_wait "$pause" "$2")"
+  if [ "$2" -ge 300 ]; then quick=0; else quick=$((quick + 1)); fi
+  if [ "$quick" = 5 ]; then log "cc-connect keeps stopping soon after it starts (5 times in a row); the lines above say why"; fi
+  log "cc-connect exited with $1; restarting in ${pause}s"
+}
 
 if [ "${CAGE_ENTRY_LIB:-}" = 1 ]; then return 0; fi   # test/provision-unit.sh: just the functions above
 
@@ -126,10 +132,6 @@ while true; do
     PATH="/usr/local/bin:/usr/bin:/bin" TERM=xterm-256color \
     bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
       cd "$HOME/work"; exec cc-connect --config "$HOME/.cc-connect/config.toml"'
-  rc=$? ran=$((SECONDS - started))
-  pause="$(restart_wait "$pause" "$ran")"
-  if [ "$ran" -ge 300 ]; then quick=0; else quick=$((quick + 1)); fi
-  if [ "$quick" = 5 ]; then log "cc-connect keeps stopping soon after it starts (5 times in a row); the lines above say why"; fi
-  log "cc-connect exited with $rc; restarting in ${pause}s"
+  cc_connect_stopped "$?" $((SECONDS - started))
   sleep "$pause"
 done
