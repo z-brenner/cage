@@ -545,6 +545,24 @@ grep -q '^stop | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-clau
 rm -rf "$CAGE_HOME".before-restore-*
 ok "restore: settings and volumes back (owners, links), old copy kept, agents woken; wrong passphrase refused"
 
+# --- folders a VM can write: the host never acts through what it plants there. Each case runs in its own CAGE_HOME.
+fresh() { export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/cage" init 2>/dev/null; }
+
+# the chat folder's in/, out/ and files/: a link or a file in their place is removed, never chmodded through
+( fresh z
+  "$ROOT/cage" up claude 2>/dev/null
+  A="$CAGE_HOME/app/claude" S="$T/zhome/.ssh"
+  mkdir -p "$S" && chmod 700 "$S" && echo key > "$S/id" && chmod 600 "$S/id"
+  rm -rf "$A/in" "$A/out" "$A/files"
+  ln -s ../../../zhome/.ssh "$A/in" && ln -s ../../../zhome/.ssh/id "$A/files" && echo not-a-folder > "$A/out"
+  rc=0; "$ROOT/cage" up claude 2>"$T/z.err" || rc=$?
+  [ "$(stat -c %a "$S")" = 700 ] && [ "$(stat -c %a "$S/id")" = 600 ] && [ "$(cat "$S/id")" = key ] || fail "cage up chmodded through a planted link: $(stat -c '%a %n' "$S" "$S/id")"
+  [ $rc = 0 ] || fail "a planted link stopped cage up: $(cat "$T/z.err")"
+  for x in in out files; do
+    [ ! -L "$A/$x" ] && [ -d "$A/$x" ] && [ "$(stat -c %a "$A/$x")" = 777 ] || fail "$x/ isn't a fresh folder again: $(ls -la "$A")"
+  done )
+ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is removed, never followed"
+
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
 mkdir -p "$T/wslroot" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$T/wslroot/"

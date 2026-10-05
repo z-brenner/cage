@@ -444,7 +444,14 @@ app_token() { # app_token <agent>: the secret its in-VM adapters use with cc-con
 app_dirs() {
   local d="$APPDIR/$1" x
   mkdir -p "$APPDIR" && chmod 700 "$APPDIR"
-  for x in "" /in /out /files; do mkdir -p "$d$x" && chmod 777 "$d$x"; done
+  mkdir -p "$d" && chmod 777 "$d"   # the mount itself: the VM can write in it, but can't replace it
+  # The VM can put anything in place of in/, out/ and files/, a link to one of your folders included. So cage never
+  # changes what's there: anything that isn't a plain folder is removed (rm never follows a link), and a new folder
+  # gets its mode as it's made, with no chmod afterwards that a link swapped in meanwhile could redirect.
+  for x in in out files; do
+    if [ -L "$d/$x" ] || { [ -e "$d/$x" ] && [ ! -d "$d/$x" ]; }; then rm -f "$d/$x"; fi
+    [ -d "$d/$x" ] || ( umask 000 && mkdir "$d/$x" )
+  done
 }
 
 # Writes $CAGE_HOME/agents/<agent>/cc-connect.toml (0600). Values are validated, so no TOML escaping is needed.
