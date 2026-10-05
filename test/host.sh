@@ -136,6 +136,22 @@ if grep '^run | ' "$MSB_LOG" | grep -q -- 'TZ='; then fail "an odd TZ went into 
 TZ=America/New_York cage _state | python3 -c 'import json,sys; assert json.load(sys.stdin)["settings"]["tz"] == "America/New_York"' || fail "time zone not in the state"
 ok "the VM runs in your time zone (TZ, checked), and the app shows it"
 
+# an apt mirror for Ubuntu's packages (CAGE_APT_MIRROR in cage.env) goes to the VM, which checks it (guest/provision.sh)
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+if grep -q 'CAGE_APT_MIRROR' "$MSB_LOG"; then fail "a mirror went to the VM though none is set"; fi
+echo 'CAGE_APT_MIRROR="http://mirror.example:8080/ubuntu/"' >> "$CAGE_HOME/cage.env"
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+grep '^run | ' "$MSB_LOG" | grep -q -- '-e | CAGE_APT_MIRROR=http://mirror.example:8080/ubuntu/ |' || fail "no apt mirror for the VM: $(cat "$MSB_LOG")"
+sed -i '/^CAGE_APT_MIRROR=/d' "$CAGE_HOME/cage.env"
+echo 'CAGE_APT_MIRROR="http://mirror.example/ubuntu/ --net-rule x"' >> "$CAGE_HOME/cage.env"   # one argument, whatever it holds
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+grep '^run | ' "$MSB_LOG" | grep -q -- '-e | CAGE_APT_MIRROR=http://mirror.example/ubuntu/ --net-rule x |' || fail "the mirror was split: $(cat "$MSB_LOG")"
+sed -i '/^CAGE_APT_MIRROR=/d' "$CAGE_HOME/cage.env"
+ok "CAGE_APT_MIRROR in cage.env goes to the VM, as one setting"
+
 # ask mode
 sed -i 's/^CAGE_MODE=yolo/CAGE_MODE=ask/' "$CAGE_HOME/cage.env"
 cage up claude cursor 2>/dev/null

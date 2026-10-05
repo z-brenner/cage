@@ -2188,6 +2188,7 @@ cmd_up() {
       --mount-dir "$BRAIN/memory:/memory:ro" \
       --mount-dir "$BRAIN/inbox/$a:/memory-inbox" --mount-dir "$APPDIR/$a:/cage-app" ${outbox[@]+"${outbox[@]}"} \
       -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} ${tzarg[@]+"${tzarg[@]}"} \
+      ${CAGE_APT_MIRROR:+-e "CAGE_APT_MIRROR=$CAGE_APT_MIRROR"} \
       ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
       "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
     if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
