@@ -192,4 +192,14 @@ grep -Eq '^provision\[claude\]: still on base packages \(0 min\) \(' "$T/out" ||
 grep -q 'SLEEP LEFT BEHIND' "$T/out" && fail "the heartbeat's sleep outlived it: $(shown)"
 ok "while a step runs, a line every minute says which one; stopping the heartbeat stops its sleep too"
 
+# --- entry.sh: `cage update` falls back to the cache; cc-connect's restarts slow down, and recover ----------------------
+entry() { ( CAGE_ENTRY_LIB=1 . "$ROOT/guest/entry.sh" claude; "$@" ); }
+[ "$(CAGE_REFRESH=1 entry refresh_arg 1)$(CAGE_REFRESH=1 entry refresh_arg 2)" = --refresh--refresh ] || fail "refresh on the first tries"
+[ -z "$(CAGE_REFRESH=1 entry refresh_arg 3)" ] && [ -z "$(CAGE_REFRESH='' entry refresh_arg 1)" ] || fail "--refresh after 2 tries, or without cage update"
+ok "cage update: the newest versions on the first 2 tries, then what the agent had (from its cache)"
+waits=""; p=0
+for ran in 1 1 1 1 1 1 400 1; do p="$(entry restart_wait "$p" "$ran")"; waits="$waits $p"; done
+[ "$waits" = " 5 10 20 40 60 60 5 10" ] || fail "cc-connect's restart waits:$waits"
+ok "cc-connect restarts after 5s, twice as long after each quick exit up to a minute, and 5s again after a good run"
+
 echo "all $pass provisioning unit tests passed"

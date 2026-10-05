@@ -20,24 +20,48 @@ PROVISION_LIMIT="${CAGE_PROVISION_LIMIT:-1800}"   # seconds for one try at provi
 
 log() { echo "cage-entry[$KIND]: $*"; }
 
+# `cage update` sets CAGE_REFRESH: the newest of everything. When that keeps failing (offline, or a vendor's servers
+# are down), the agent wakes up with the versions it had, from its cache, instead of staying down.
+refresh_arg() { # refresh_arg <attempt>: --refresh for the first two tries of `cage update`, then nothing
+  if [ -n "${CAGE_REFRESH:-}" ] && [ "$1" -le 2 ]; then echo --refresh; fi
+}
+# cc-connect's restarts: after 5s, then twice as long after each quick exit, up to a minute; 5s again after a good run
+restart_wait() { # restart_wait <previous wait> <seconds it ran>
+  if [ "$2" -ge 300 ] || [ "$1" -lt 5 ]; then echo 5; elif [ "$1" -ge 30 ]; then echo 60; else echo $(( $1 * 2 )); fi
+}
+
+if [ "${CAGE_ENTRY_LIB:-}" = 1 ]; then return 0; fi   # test/provision-unit.sh: just the functions above
+
 if ! id "$U" >/dev/null 2>&1; then
-  useradd -M -d "$H" -s /bin/bash "$U"
+  # uid 1001, as ubuntu:24.04 has always given it (after its own `ubuntu` user), so the files on the home volume stay
+  # the agent's whatever image the VM boots
+  if getent passwd 1001 >/dev/null; then useradd -M -U -d "$H" -s /bin/bash "$U"
+  else useradd -M -u 1001 -U -d "$H" -s /bin/bash "$U"; fi
 fi
 mkdir -p "$H"
+if [ -e "$H/.cc-connect" ] && [ "$(stat -c %u "$H/.cc-connect")" != "$(id -u "$U")" ]; then
+  log "the agent's files belong to another user id; giving them back to $U (once)"
+  chown -R "$U:$U" "$H"
+fi
 chown "$U:$U" "$H"
 chmod 750 "$H"
 
+attempt=1
 delay=15
 while true; do
-  # Each try has a time limit: a step that hangs is started over, never waited on forever. `cage update` sets
-  # CAGE_REFRESH.
-  timeout -k 60 "$PROVISION_LIMIT" bash /cage/provision.sh "$KIND" ${CAGE_REFRESH:+--refresh} </dev/null && break
+  refresh="$(refresh_arg "$attempt")"
+  # Each try has a time limit: a step that hangs is started over, never waited on forever
+  timeout -k 60 "$PROVISION_LIMIT" bash /cage/provision.sh "$KIND" ${refresh:+"$refresh"} </dev/null && break
   case $? in
     124|137) log "provisioning took too long; trying again in ${delay}s" ;;
     *) log "provisioning failed; retrying in ${delay}s (network down? see output above)" ;;
   esac
+  if [ -n "$refresh" ] && [ -z "$(refresh_arg $((attempt + 1)))" ]; then
+    log "couldn't get the newest versions (offline?); starting with the ones you had"
+  fi
   sleep "$delay"
   delay=$(( delay < 240 ? delay * 2 : 240 ))
+  attempt=$((attempt + 1))
 done
 
 # Your time zone (cage passes it as TZ), so "every weekday at 8am" in a scheduled task means your 8am. Set for the
@@ -83,11 +107,18 @@ if [ -d /cage-outbox ]; then chown "$U:$U" /cage-outbox 2>/dev/null || true; fi
 if grep -q '^browser|local:browser|' /cage-config/connectors.list 2>/dev/null; then bash /cage/browser.sh "$KIND" & fi
 
 log "starting cc-connect as $U"
+pause=0
+quick=0
 while true; do
+  started=$SECONDS
   runuser -u "$U" -- env -i HOME="$H" USER="$U" LOGNAME="$U" SHELL=/bin/bash LANG=C.UTF-8 \
     PATH="/usr/local/bin:/usr/bin:/bin" TERM=xterm-256color \
     bash -c 'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
       cd "$HOME/work"; exec cc-connect --config "$HOME/.cc-connect/config.toml"'
-  log "cc-connect exited with $?; restarting in 5s"
-  sleep 5
+  rc=$? ran=$((SECONDS - started))
+  pause="$(restart_wait "$pause" "$ran")"
+  if [ "$ran" -ge 300 ]; then quick=0; else quick=$((quick + 1)); fi
+  if [ "$quick" = 5 ]; then log "cc-connect keeps stopping soon after it starts (5 times in a row); the lines above say why"; fi
+  log "cc-connect exited with $rc; restarting in ${pause}s"
+  sleep "$pause"
 done
