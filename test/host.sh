@@ -563,6 +563,32 @@ fresh() { export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/cage" init 2>/
   done )
 ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is removed, never followed"
 
+# memory review: a link in the inbox is removed unread; invisible characters are taken out (and you're told); a note
+# is read once, all of it shown, and exactly that is kept, even if the VM changes the file while you decide
+( fresh j
+  printf 'ghp_s3cret\n' | "$ROOT/cage" secret add GITHUB_TOKEN api.github.com claude 2>/dev/null
+  "$ROOT/cage" up codex 2>/dev/null
+  I="$CAGE_HOME/brain/inbox/codex"
+  ln -s ../../../secrets/GITHUB_TOKEN "$I/project-notes.md"
+  ln -s ../../../cage.env "$I/settings.md"
+  printf 'Zack likes\xe2\x80\x8b tea.\xe2\x80\xae end\xf3\xa0\x81\x81\n' > "$I/hidden.md"   # zero-width space, right-to-left override, a tag
+  head -c 20000 /dev/zero | tr '\0' a > "$I/huge.md"
+  { head -c 6000 /dev/zero | tr '\0' b; printf '\nTAIL-AFTER-6000-BYTES\n'; } > "$I/long.md"
+  printf 'y\ny\ny\ny\n' | "$ROOT/cage" memory > "$T/j.out" 2>&1 || fail "cage memory: $(cat "$T/j.out")"
+  N="$CAGE_HOME/brain/memory/notes"
+  if grep -rq 'ghp_s3cret\|CAGE_AGENTS' "$T/j.out" "$N"; then fail "a linked file was shown or kept: $(cat "$T/j.out")"; fi
+  [ ! -e "$I/project-notes.md" ] && [ ! -L "$I/project-notes.md" ] && [ -f "$CAGE_HOME/secrets/GITHUB_TOKEN" ] || fail "the link wasn't removed (or its target was)"
+  grep -qx 'Zack likes tea. end' "$N/hidden.md" || fail "invisible characters: $(od -c "$N/hidden.md" | head)"
+  if LC_ALL=C grep -q $'\xe2\x80\x8b\|\xe2\x80\xae\|\xf3\xa0' "$N/hidden.md" "$T/j.out"; then fail "invisible characters were shown or kept"; fi
+  grep -q 'took out 3 invisible characters' "$T/j.out" || fail "not told about the invisible characters: $(cat "$T/j.out")"
+  [ ! -e "$N/huge.md" ] && [ ! -e "$I/huge.md" ] && grep -q 'over 16 KB' "$T/j.out" || fail "a 20 KB note wasn't refused: $(ls "$N")"
+  grep -q TAIL-AFTER-6000-BYTES "$T/j.out" && grep -q TAIL-AFTER-6000-BYTES "$N/long.md" || fail "the whole note wasn't shown"
+  printf 'the note as shown\n' > "$I/swap.md"
+  { for _ in $(seq 100); do grep -q 'Keep it' "$T/j2.out" 2>/dev/null && break; sleep 0.1; done
+    printf 'swapped in later\n' > "$I/swap.md"; printf 'y\n'; } | "$ROOT/cage" memory > "$T/j2.out" 2>&1
+  grep -q 'the note as shown' "$N/swap.md" && ! grep -q 'swapped in later' "$N/swap.md" || fail "kept something other than what was shown: $(cat "$N/swap.md")" )
+ok "memory review: links in the inbox removed unread, invisible characters taken out, what you see is what's kept"
+
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
 mkdir -p "$T/wslroot" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$T/wslroot/"

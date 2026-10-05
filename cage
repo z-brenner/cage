@@ -644,30 +644,65 @@ memory_refresh() { # running agents see newly approved notes right away
   done
 }
 
+visible_text() { # visible_text <in> <out>: the text without control codes or invisible characters; prints how many
+  # it took out. Invisible and format characters (zero-width, right-to-left overrides, tags) can hide instructions
+  # from you that an agent would still read.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" "$2" 2>/dev/null <<'PY' && return 0
+import sys, unicodedata
+t = open(sys.argv[1], "rb").read().decode("utf-8", "replace").replace("\r", "")
+keep = "".join(c for c in t if c in "\n\t" or not (unicodedata.category(c) in ("Cc", "Cf", "Co", "Cn") or 0xE0000 <= ord(c) <= 0xE007F))
+open(sys.argv[2], "w", encoding="utf-8").write(keep)
+print(len(t) - len(keep))
+PY
+  fi
+  safe_text < "$1" > "$2"; echo 0
+}
+
+MEMORY_NOTE_MAX=16384
 memory_review() {
-  local f a name dst i n=0 kept=0 answer
+  local f a name dst i n=0 kept=0 answer tmp k
   brain_init
+  tmp="$(mktemp -d)"
   for f in "$BRAIN"/inbox/*/*.md; do
-    [ -f "$f" ] || continue
-    n=$((n + 1))
+    [ -e "$f" ] || [ -L "$f" ] || continue
     a="$(basename "$(dirname "$f")")"
+    # The inbox is the VM's to write. A link there could point at your keys or settings, and the file can change
+    # while you decide. So only plain files count, each is read once (never through a link), and what you're shown
+    # is exactly what's kept: cage never goes back to the file.
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      rm -rf "$f" || true
+      warn "removed $(basename "$f") from $a's memory inbox: it wasn't a plain note (cage never follows links there)"
+      continue
+    fi
+    if ! outbox_read "$f" $((MEMORY_NOTE_MAX + 1)) > "$tmp/note"; then
+      warn "couldn't read $(basename "$f") in $a's memory inbox; it's still there"; continue
+    fi
+    if [ "$(wc -c < "$tmp/note" | tr -d ' ')" -gt "$MEMORY_NOTE_MAX" ]; then
+      rm -f "$f"; warn "$a's note $(basename "$f" .md) is over 16 KB, too long to review here, so it wasn't kept"
+      continue
+    fi
+    n=$((n + 1))
+    k="$(visible_text "$tmp/note" "$tmp/clean")"
     if [ -n "$PROTO" ]; then say "$a wants to remember:"
     else printf '\n%s%s  %s%s wants to remember:%s\n\n' "$IND" "$(face "$a" ready)" "$C_B" "$a" "$C_0" >&2; fi
-    block "$(head -c 4000 "$f" | safe_text)"
+    block "$(cat "$tmp/clean")"
     [ -n "$PROTO" ] || printf '\n' >&2
+    if [ "${k:-0}" -gt 0 ]; then warn "cage took out $k invisible character$([ "$k" = 1 ] || echo s): they can hide instructions from you"; fi
     prompt "Keep it? [y]es, [n]o, [s]kip: " answer
     case "$answer" in
       [yY]*)
         name="$(printf '%s' "$(basename "$f" .md)" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-60)"
         dst="$BRAIN/memory/notes/$name.md" i=2
         while [ -e "$dst" ]; do dst="$BRAIN/memory/notes/$name-$i.md"; i=$((i + 1)); done
-        { safe_text < "$f"; printf '\n\n_Remembered from %s on %s._\n' "$a" "$(date +%Y-%m-%d)"; } > "$dst"
+        { cat "$tmp/clean"; printf '\n\n_Remembered from %s on %s._\n' "$a" "$(date +%Y-%m-%d)"; } > "$dst"
         rm -f "$f"; kept=$((kept + 1))
         ok "kept as notes/$(basename "$dst")" ;;
       [nN]*) rm -f "$f"; ok "forgotten" ;;
       *) say "left in the inbox for later" ;;
     esac
   done
+  rm -rf "$tmp"
   if [ $n = 0 ]; then ok "nothing new to review"; hint "your memory: $BRAIN/memory (cage memory open)"; return 0; fi
   if [ $kept -gt 0 ]; then memory_refresh; fi
 }
