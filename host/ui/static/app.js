@@ -1409,7 +1409,7 @@ function agentSettings (a) {
       toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Asking first'), 'Ask before acting')))),
     section('Chat apps', 'Talk to it from your phone too. Only you can message it, unless you let others in.', h('ul', { class: 'list chats' }, CHATS.map(([k, n]) => chatRow(k, n)))),
     section('Preferences', '', h('div', { class: 'card' },
-      setting('Privacy mask', `Emails, phone and card numbers, and your own words reach ${meta.vendor} as placeholders like [EMAIL_1], and come back as themselves.`,
+      setting('Privacy mask', `In what you type, your About me and your notes’ names and titles, emails, phone and card numbers, bank details, keys and your own words reach ${meta.vendor} as placeholders like [EMAIL_1], and come back as themselves. Files and pictures you send, notes and web pages it opens, and app results go as they are; voice notes go to Groq as they are, if you use Groq for them. Anyone who can chat with it can ask it about masked values, and so can a web page or app result it reads. The real values are kept in its VM, so something that tells it to look there can find them.`,
         toggle(a.mask, (on) => runJob(['mask', on ? 'on' : 'off', a.name], 'Privacy mask for ' + a.label), 'Privacy mask for ' + a.label)),
       setting('When it hits its usage limit', 'Another agent answers your message in its chat instead.', others.length ? fallbackSelect(a, others) : h('span', { class: 'muted small' }, 'Add another agent first')))),
     section('Troubleshooting', 'You won’t usually need these.', h('div', { class: 'tools' },
@@ -1569,7 +1569,7 @@ function pageSettings () {
   const backups = S.backups.files.map((b) => h('li', {}, h('span', { class: 'chat-mark' }, icon('archive')), h('span', { class: 'grow' }, h('b', {}, b.name), h('span', { class: 'sub' }, `${size(b.size)} · ${ago(b.at)}`)),
     btn('Restore', () => runJob(['restore', b.path], 'Restore ' + b.name), 'sm ghost')))
   return h('div', { class: 'page' }, pageHead('Settings', ''),
-    section('Privacy mask', 'Emails, phone and card numbers, bank details, keys and your own words reach the AI company as placeholders like [EMAIL_1], and come back as themselves. The agent can’t use a hidden value itself.', h('div', { class: 'card' },
+    section('Privacy mask', 'In what you type, your About me and your notes’ names and titles, emails, phone and card numbers, bank details, keys and your own words reach the AI company as placeholders like [EMAIL_1], and come back as themselves. Files and pictures you send, notes and web pages the agent opens, and app results reach it as they are; voice notes go to Groq as they are, if you use Groq for them. Anyone who can chat with the agent can ask it about masked values, and so can a web page or app result it reads. The real values are kept in the agent’s VM, so something that tells it to look there can find them, and the agent can’t use a hidden value itself.', h('div', { class: 'card' },
       setting('Mask for', '', masks),
       setting('Also hide', 'Names of clients, projects or people.', h('div', { class: 'stack tight' },
         S.mask_terms.length ? h('div', { class: 'chips' }, S.mask_terms.map((t) => h('span', { class: 'chip' }, t, h('button', { type: 'button', class: 'chip-x', 'aria-label': 'Stop hiding ' + t, onclick: () => runJob(['mask', 'rm', t], 'Privacy mask') }, icon('x'))))) : null,

@@ -39,8 +39,13 @@ jobs:
         run: |
           if grep -nP '[^\x00-\x7F]' install.ps1; then echo "non-ASCII in install.ps1"; exit 1; fi
           pwsh -NoProfile -Command '$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$t, [ref]$e); if ($e) { $e | ForEach-Object { $_.ToString() }; exit 1 }'
-      - name: privacy mask
-        run: test/mask.sh
+      # test/mask.sh ends with the detection gates (test/mask_corpus.py); test/mask-vm.sh runs the mask's VM side
+      # (memory.sh, cage mask forget, cage ask) in a container
+      - name: privacy mask (also on Python 3.9, which `cage mask try` may use on a Mac, and in a stand-in VM)
+        run: |
+          test/mask.sh
+          docker run --rm -v "$PWD:/w:ro" -w /w python:3.9-slim bash test/mask.sh
+          test/mask-vm.sh
       - name: "unit tests: node's (the WhatsApp adapter, the app's chat relay) and Python's (speech-to-text in the VM, the web app's server)"
         run: test/all.sh unit
       - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
@@ -79,6 +84,14 @@ jobs:
           $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
           Write-Output $out
           if ($out -notmatch 'check only: would set up WSL 2|virtualization is turned off|needs Windows 11|GB free on|turned off part of WSL') { throw 'unexpected installer output' }
+      - name: the uninstall mode (check only)
+        shell: powershell
+        run: |
+          $env:CAGE_CHECK_ONLY = '1'
+          $env:CAGE_UNINSTALL = '1'
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch 'check only: would ask, offer a backup, then remove all of that') { throw 'unexpected uninstall output' }
       - name: PowerShell 7, the way `irm | iex` runs it (must not close the session)
         shell: pwsh
         run: |
@@ -140,11 +153,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: install microsandbox (pinned; avoids the installer's anonymous GitHub API lookup)
-        env:
-          MSB_VERSION: v0.7.5
+      - name: install microsandbox (the version cage pins; avoids the installer's anonymous GitHub API lookup)
         run: |
-          test/install-msb-pinned.sh
+          MSB_VERSION="$(grep -oP '^CAGE_MSB_VERSION=\K\S+' cage)" test/install-msb-pinned.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/microvm-e2e.sh ${{ matrix.agent }}
       - name: what the VM was doing
