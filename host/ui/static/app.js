@@ -156,8 +156,13 @@ async function api (path, opts = {}) {
 let BOOTED = ''   // the cage version this page came with; after an update, the page reloads to get the new one
 let FAILS = 0     // refreshes in a row that got no answer: after two, the page says so
 let DOWN = false
-// someone is typing in this (a switch or a list that has focus isn't typing: it can be drawn again from the state)
-function typing (el) { return !!el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|file|range|color)$/.test(el.type))) }
+// someone is typing in this, or picking from this list. A switch that has focus isn't, and nor is a list whose change
+// cage is making (aria-busy): both can be drawn again from the state.
+function typing (el) {
+  if (!el) return false
+  if (el.tagName === 'SELECT') return el.getAttribute('aria-busy') !== 'true'   // its open list would close in your hands
+  return el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|file|range|color)$/.test(el.type))
+}
 let UNSAVED = null   // the open page's "is there something you wrote and didn't save?", if it has one
 function unsaved () { return !!UNSAVED && UNSAVED() }
 async function refresh () {
@@ -586,7 +591,7 @@ function scope (name) { // "for which agents": all of them, unless you open it a
       summary.textContent = on.length === boxes.length ? 'All agents' : on.length ? on.join(', ') : 'Nobody'
     }
   }), avatar(a.name, 16), a.label))
-  return h('details', { class: 'scope' }, summary, h('div', { class: 'scope-menu' }, boxes))
+  return h('details', { class: 'scope', 'data-open': name }, summary, h('div', { class: 'scope-menu' }, boxes))
 }
 function picked (form, name) {
   const all = [...form.querySelectorAll(`input[name=${name}]`)]
@@ -720,7 +725,7 @@ function roundView (r, i) {
 }
 function answers () {
   const past = askHistory().filter((t) => !ASK || t.id !== ASK.id)
-  const history = past.length ? h('details', { class: 'disclosure history' }, h('summary', {}, icon('rotate-ccw'), `Earlier questions (${past.length})`),
+  const history = past.length ? h('details', { class: 'disclosure history', 'data-open': 'ask-history' }, h('summary', {}, icon('rotate-ccw'), `Earlier questions (${past.length})`),
     h('ul', { class: 'list' }, past.map((t) => h('li', {}, h('span', { class: 'grow' }, h('b', {}, t.rounds[0].q), h('span', { class: 'sub' }, `${t.rounds.length > 1 ? plural(t.rounds.length - 1, 'follow-up') + ' · ' : ''}${t.agents.map(nameOf).join(', ')} · ${ago(t.id / 1000)}`)),
       btn('Open', () => { ASK = { ...t, compare: null }; drawAnswers() }, 'sm ghost')))),
     h('button', { type: 'button', class: 'linkish small muted', onclick: () => { try { localStorage.removeItem('cage-asks') } catch (e) {} drawAnswers() } }, 'Forget these')) : null
@@ -793,7 +798,7 @@ function pageWelcome () {
 }
 function restoreBox () { // moving to a new computer: put a backup back before anything else
   // Only from cage's backups folder: restoring runs the backup's settings, so the app won't take a file from anywhere
-  return h('details', { class: 'disclosure' }, h('summary', {}, icon('archive'), 'Moving from another computer? Restore a backup'),
+  return h('details', { class: 'disclosure', 'data-open': 'restore' }, h('summary', {}, icon('archive'), 'Moving from another computer? Restore a backup'),
     h('p', { class: 'small muted' }, 'Your settings, keys, sign-ins, and each agent’s login and files.'),
     STATE.backups.files.length ? rows(STATE.backups.files.map((b) => h('li', {}, h('span', { class: 'grow' }, b.name, ' ', h('span', { class: 'muted small' }, ago(b.at))),
       btn('Restore', () => runJob(['restore', b.path], 'Restoring ' + b.name), 'sm')))) : null,
@@ -924,7 +929,7 @@ function setupAbout () {
 }
 function setupDone () {
   const first = agentsOn().find((a) => a.state === 'ready') || agentsOn()[0]
-  const auto = h('input', { type: 'checkbox', checked: true })
+  const auto = h('input', { type: 'checkbox', name: 'start-at-login', value: 'on', checked: true })
   return [
     h('div', { class: 'done-hero' }, h('img', { src: 'logo.svg', alt: '', width: 72, height: 72 }), h('h1', {}, 'You’re all set'),
       h('p', { class: 'lede' }, first ? `Chat with ${first.label} right here. Its page also has its files and settings.` : 'Add an agent any time from the sidebar.')),
@@ -1463,7 +1468,7 @@ function pageApps () {
   return h('div', { class: 'page' }, pageHead('Apps', 'Your email, calendar, GitHub and more, as tools your agents can use. Keys stay on this computer.'),
     section('Connected', '', h('div', { class: 'card flush' }, rows(list, 'No apps yet. Connect one below.'))),
     catalog.length ? section('Add an app', '', h('div', { class: 'tiles' }, catalog)) : null,
-    h('details', { class: 'disclosure' }, h('summary', {}, icon('plus'), 'Another app'), h('p', { class: 'small muted' }, 'Anything with a remote MCP server. cage asks for its key, or signs you in with your browser.'), custom))
+    h('details', { class: 'disclosure', 'data-open': 'another-app' }, h('summary', {}, icon('plus'), 'Another app'), h('p', { class: 'small muted' }, 'Anything with a remote MCP server. cage asks for its key, or signs you in with your browser.'), custom))
 }
 
 function pageSignins () {
@@ -1747,6 +1752,24 @@ function drawNav () {
   document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
 let ARRIVED = false   // true while a page is drawn on arriving at it (not on a redraw): the time to reload what it shows
+// What you're in the middle of on a page, which a redraw (the state changed, a job ended) keeps: the text in its boxes
+// (data-keep), the agents you ticked or unticked (named checkboxes: a "for which agents" menu, the Ask box), and the
+// menus and sections you opened (data-open). Switches have no name: they show what's true, not what was clicked.
+function formState (root) {
+  const s = { text: {}, ticks: {}, open: {} }
+  root.querySelectorAll('[data-keep]').forEach((el) => { s.text[el.dataset.keep] = el.value })
+  root.querySelectorAll('input[type=checkbox][name]:not(:disabled)').forEach((el) => { s.ticks[el.name + '/' + el.value] = el.checked })
+  root.querySelectorAll('details[data-open]').forEach((el) => { s.open[el.dataset.open] = el.open })
+  return s
+}
+function keepForm (root, s) {
+  root.querySelectorAll('[data-keep]').forEach((el) => { if (s.text[el.dataset.keep]) el.value = s.text[el.dataset.keep] })
+  root.querySelectorAll('input[type=checkbox][name]:not(:disabled)').forEach((el) => { // (one that was greyed out starts afresh)
+    const was = s.ticks[el.name + '/' + el.value]
+    if (was !== undefined && was !== el.checked) { el.checked = was; el.dispatchEvent(new Event('change')) }   // its menu's summary follows
+  })
+  root.querySelectorAll('details[data-open]').forEach((el) => { if (el.dataset.open in s.open) el.open = s.open[el.dataset.open] })
+}
 function render (force) {
   if (!STATE) return
   document.body.classList.remove('is-locked')
@@ -1757,8 +1780,7 @@ function render (force) {
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields
   if (!force && main.contains(document.activeElement) && typing(document.activeElement) && main.dataset.page === page) return
-  const kept = {}
-  if (main.dataset.page === page) main.querySelectorAll('[data-keep]').forEach((el) => { kept[el.dataset.keep] = el.value })
+  const kept = main.dataset.page === page ? formState(main) : null
   const focused = main.contains(document.activeElement) && document.activeElement.getAttribute('aria-label')   // a switch, say
   document.body.classList.toggle('in-setup', page === 'setup')
   const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
@@ -1769,7 +1791,7 @@ function render (force) {
   ARRIVED = !same
   main.replaceChildren(fn())
   ARRIVED = false
-  main.querySelectorAll('[data-keep]').forEach((el) => { if (kept[el.dataset.keep]) el.value = kept[el.dataset.keep] })
+  if (kept) keepForm(main, kept)
   if (same && focused) { const el = main.querySelector(`[aria-label="${CSS.escape(focused)}"]`); if (el) el.focus({ preventScroll: true }) }
   if (!same) window.scrollTo(0, 0)
   SEEN = key

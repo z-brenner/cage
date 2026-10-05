@@ -237,6 +237,41 @@ await dialog.getByRole('button', { name: 'Close' }).click()
 await page.locator('.list li', { hasText: 'UI_KEY' }).waitFor({ timeout: 10000 })
 ok('a hidden question: the key goes in through the job, is saved, listed, and never shown')
 
+// A redraw keeps what you're in the middle of: an agent unticked in a "for which agents" menu (or a sign-in would go to
+// every agent), the menu open, the text; and a list you have open isn't drawn again from under you
+const redrawn = async (sel) => { // is the page drawn again when the state changes? (from a mark on one of its elements)
+  await page.evaluate((sel) => { document.querySelector(sel).dataset.old = '1' }, sel)
+  const awake = fs.existsSync(process.env.STUB_AWAKE)
+  if (awake) fs.rmSync(process.env.STUB_AWAKE); else fs.writeFileSync(process.env.STUB_AWAKE, '')   // Codex wakes up, or goes to sleep
+  const changed = (want) => page.evaluate(async (want) => { await refresh(); return (STATE.agents.find((a) => a.name === 'codex').state === 'ready') === want }, want)
+  for (let i = 0; i < 60 && !(await changed(!awake)); i++) await page.waitForTimeout(250)
+  if (!(await changed(!awake))) fail('the state did not change')
+  return page.evaluate((sel) => !document.querySelector(sel).dataset.old, sel)
+}
+const pwForm = page.locator('form', { hasText: 'Add a sign-in' })
+await page.getByPlaceholder('example.com').fill('bank.example')
+await pwForm.locator('details.scope summary').click()
+await pwForm.getByRole('checkbox', { name: 'Codex' }).uncheck()
+await pwForm.locator('details.scope summary', { hasText: 'Claude Code' }).waitFor({ timeout: 5000 })
+if (!(await redrawn('[data-keep="pw-site"]'))) fail('the page was not drawn again')
+if ((await pwForm.locator('details.scope summary').innerText()) !== 'Claude Code' || await pwForm.getByRole('checkbox', { name: 'Codex' }).isChecked() ||
+  !(await pwForm.locator('details.scope').evaluate((d) => d.open)) || (await page.getByPlaceholder('example.com').inputValue()) !== 'bank.example') {
+  fail('a redraw reset the "for which agents" menu: ' + await pwForm.locator('details.scope').innerText())
+}
+await pwForm.getByRole('checkbox', { name: 'Codex' }).check()
+await page.getByPlaceholder('example.com').fill('')
+await page.getByRole('heading', { name: 'Sign-ins & keys' }).click()   // the menu closes
+await page.getByRole('link', { name: 'Settings' }).click()
+const standIn = page.getByLabel('Stand-in for Claude Code')
+await standIn.focus()
+if (await redrawn('select[aria-label="Stand-in for Claude Code"]')) fail('a list you have open was drawn again')
+await standIn.evaluate((el) => el.setAttribute('aria-busy', 'true'))   // as when you've picked someone and cage is on it
+if (!(await redrawn('select[aria-label="Stand-in for Claude Code"]'))) fail('a list cage changed was not drawn again from the state')
+fs.rmSync(process.env.STUB_AWAKE)
+await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
+await page.getByPlaceholder('GITHUB_TOKEN').waitFor({ timeout: 10000 })
+ok('a redraw keeps the agents you picked, the menu open and your text, and leaves a list you have open alone')
+
 // Esc hides a job instead of stopping it: a pill says it's waiting for you and brings it back, also after a reload.
 // One job at a time: a switch flipped meanwhile brings that job back instead, and doesn't move.
 const pill = page.locator('#job-pill')
