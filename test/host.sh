@@ -1020,6 +1020,54 @@ ok "the background helper: one per CAGE_HOME whatever the install path, picks up
   for h in k1 k2 k4; do kill "$(cat "$T/$h/refresh.pid")" 2>/dev/null || true; done )
 ok "the background helper: one CAGE_HOME never stops another's; one from before pid files goes"
 
+# a helper hands over to the cage an update put in its place; a cage from before pid files (cage update --to an older
+# release, cage rollback) takes over with its own code for good. Back on this cage, the next start replaces it, and
+# a helper that older cage started itself too
+( fresh o
+  P="$T/o app"; mkdir -p "$P" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$P/"
+  re="$(printf '%s' "$P/cage _refresh" | sed 's/[][()+.*^$?{}|\\]/\\&/g')"
+  helpers() { { pgrep -f -- "$re" || true; } | wc -l | tr -d ' '; }
+  one() { for _ in $(seq 25); do [ "$(helpers)" = 1 ] && return 0; sleep 0.2; done; return 1; }   # (a fork of it counts too, a moment)
+  alive() { kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" 2>/dev/null | grep -q Z; }
+  bail() { pkill -f -- "$re" 2>/dev/null || true; fail "$@"; }
+  looping() { { ps -eo ppid=,comm= 2>/dev/null || ps -o ppid=,comm=; } | awk -v p="$1" '$1 == p && $2 == "sleep" { f = 1 } END { exit !f }'; }
+  printf 'CAGE_AGENTS="claude"\nCAGE_NETWORK="strict"\n' >> "$CAGE_HOME/cage.env"
+  cp "$P/cage" "$T/o.new"
+  # (like v0.3's: no pid file, never hands over)
+  printf '#!/usr/bin/env bash\ncase "$1" in _refresh) trap "exit 0" TERM INT; while :; do sleep 1 & wait "$!"; done ;; esac\n' > "$T/o.old"
+  "$P/cage" voice off </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do [ -s "$CAGE_HOME/refresh.pid" ] && break; sleep 0.2; done
+  pid="$(cat "$CAGE_HOME/refresh.pid")"
+  for _ in $(seq 50); do looping "$pid" && break; sleep 0.2; done   # (it has read cage, and taken its checksum)
+  cat "$T/o.old" > "$P/cage"
+  for _ in $(seq 40); do [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid?" ] && break; sleep 0.2; done
+  sleep 0.5
+  [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid?" ] && alive "$pid" || bail "the helper didn't hand over to the older cage: $(cat "$CAGE_HOME/refresh.pid")"
+  cat "$T/o.new" > "$P/cage"
+  sleep 4   # (the older cage's helper never notices)
+  "$P/cage" voice off </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$pid" || break; sleep 0.2; done
+  if alive "$pid"; then bail "the helper still runs the older cage's code after an update back"; fi
+  pid2="$(cat "$CAGE_HOME/refresh.pid")"
+  [ "$pid2" != "$pid" ] && alive "$pid2" && one || bail "no fresh helper after an update back: $pid2, $(helpers) running"
+  # the older cage's cage down stopped that one, and its cage up started its own, which knows nothing of pid files
+  kill "$pid2"; for _ in $(seq 25); do alive "$pid2" || break; sleep 0.2; done
+  echo "$pid?" > "$CAGE_HOME/refresh.pid"
+  cat "$T/o.old" > "$P/cage"
+  setsid nohup "$P/cage" _refresh </dev/null >/dev/null 2>&1 &
+  old=$!
+  sleep 0.5; alive "$old" || bail "the older cage's helper didn't start"
+  cat "$T/o.new" > "$P/cage"
+  "$P/cage" voice off </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$old" || break; sleep 0.2; done
+  if alive "$old"; then bail "the helper the older cage started was left running"; fi
+  pid3="$(cat "$CAGE_HOME/refresh.pid")"
+  [[ "$pid3" =~ ^[0-9]+$ ]] && alive "$pid3" && one || bail "no fresh helper: $pid3, $(helpers) running"
+  "$P/cage" down </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do alive "$pid3" || break; sleep 0.2; done
+  if alive "$pid3"; then bail "cage down left the helper running"; fi )
+ok "the background helper: one that handed over to an older cage, or that cage's own, makes way for a fresh one back on this cage"
+
 # nobody to answer (a script, a closed pipe): cage stops at the first question instead of asking forever; and five
 # wrong answers in a row end the asking too
 ( fresh g
@@ -1171,6 +1219,7 @@ PY
   out="$("$ROOT/cage" help 2>&1)"
   for c in 'status \[--json\]' 'restart \[agents\]' 'logs <agent> \[-f\]' 'remove <agent>' 'version'; do grep -q "  $c" <<<"$out" || fail "help lacks $c"; done )
 ok "everyday: restart, logs (last 200 lines or -f), status --json, chat rm telegram, remove; plain words without msb or a VM"
+
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.

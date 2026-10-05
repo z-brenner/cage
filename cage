@@ -1283,22 +1283,30 @@ oauth_refresh_all() { # oauth_refresh_all <seconds>: renews the sign-ins that ex
 oauth_any() { compgen -G "$OAUTH/*.json" >/dev/null 2>&1; }
 # cage's helpers: the background helper (`cage _refresh`) and, on WSL, the keepalive (`cage _keepalive`). One of
 # each per CAGE_HOME, found by its pid in $CAGE_HOME/<refresh|keepalive>.pid and checked to still be that helper (a
-# pid can be reused), so any install path works, spaces and brackets included.
-helper_alive() { # helper_alive <refresh|keepalive>
-  local pid args
-  pid="$(cat "$CAGE_HOME/$1.pid" 2>/dev/null || true)"
-  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
-  if [ -r "/proc/$pid/cmdline" ]; then args="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-  else args="$(ps -o args= -p "$pid" 2>/dev/null || true)"; fi
+# pid can be reused), so any install path works, spaces and brackets included. A helper writes its pid there itself
+# when it starts; one that hands over to a new cage (refresher_loop) leaves "<pid>?" until that cage takes over.
+helper_is() { # helper_is <refresh|keepalive> <pid>: that process is still one of this install's helpers of that kind
+  local args
+  [[ "$2" =~ ^[0-9]+$ ]] && kill -0 "$2" 2>/dev/null || return 1
+  if [ -r "/proc/$2/cmdline" ]; then args="$(tr '\000' ' ' < "/proc/$2/cmdline" 2>/dev/null || true)"
+  else args="$(ps -o args= -p "$2" 2>/dev/null || true)"; fi
   [[ "$args" == *"$CAGE_ROOT/cage _$1"* ]]
+}
+helper_alive() { # helper_alive <refresh|keepalive>: this CAGE_HOME's helper runs, with code that keeps the pid file
+  helper_is "$1" "$(cat "$CAGE_HOME/$1.pid" 2>/dev/null || true)"
 }
 helper_old_stop() { # helper_old_stop <refresh|keepalive>: one from a cage before pid files, whose command line ends
   # there (today's say which CAGE_HOME they're for, so those of your other CAGE_HOMEs never match)
   pkill -f -- "$(printf '%s' "$CAGE_ROOT/cage _$1" | sed 's/[][\.*^$?+(){}|]/\\&/g')\$" 2>/dev/null || true
 }
 helper_stop() { # helper_stop <refresh|keepalive>
+  local pid
   if [ ! -e "$CAGE_HOME/$1.pid" ]; then helper_old_stop "$1"; return 0; fi
-  if helper_alive "$1"; then kill "$(cat "$CAGE_HOME/$1.pid")" 2>/dev/null || true; fi
+  pid="$(cat "$CAGE_HOME/$1.pid" 2>/dev/null || true)"
+  # one that handed over to a cage which never took over: that cage was from before pid files, and so may be the
+  # helper it started itself since
+  if [[ "$pid" == *"?" ]]; then pid="${pid%\?}"; helper_old_stop "$1"; fi
+  if helper_is "$1" "$pid"; then kill "$pid" 2>/dev/null || true; fi
   rm -f "$CAGE_HOME/$1.pid"
 }
 
@@ -1309,8 +1317,9 @@ refresher_start() { # the background helper: renews sign-ins, collects security 
   mkdir -p "$CAGE_HOME"
   lock_take "$CAGE_HOME/.refresh.lock"   # several cage commands at once still start one
   if ! helper_alive refresh; then
-    # a helper from a cage before pid files would act on every request too: it goes, once
-    [ -e "$CAGE_HOME/refresh.pid" ] || helper_old_stop refresh
+    # a helper running the code of a cage before pid files would act on every request too, with that cage's code
+    # (one started by it, or one that handed over to it and never gave it back): it goes
+    helper_stop refresh
     if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh "$CAGE_HOME" >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
     else nohup "$CAGE_ROOT/cage" _refresh "$CAGE_HOME" >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
     echo $! > "$CAGE_HOME/refresh.pid"
@@ -1323,17 +1332,22 @@ refresher_stop() { helper_stop refresh; }
 # events; every 5 minutes: app sign-ins. Changed settings, or a new cage after an update, start it afresh, so it
 # never works from old ones; and if another helper took over this CAGE_HOME, it goes.
 refresher_loop() {
-  local i=0 sums now
+  local i=0 env code now
   load_env
   find_msb || true
   trap 'exit 0' TERM INT
   echo $$ > "$CAGE_HOME/refresh.pid"
-  sums="$(cksum 2>/dev/null < "$CAGE_ENV" || true; cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
+  env="$(cksum 2>/dev/null < "$CAGE_ENV" || true)" code="$(cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
   while :; do
     [ "$(cat "$CAGE_HOME/refresh.pid" 2>/dev/null || true)" = $$ ] || exit 0
     # (a cage that's still being replaced by an update, and doesn't read as whole yet, is waited for)
-    now="$(cksum 2>/dev/null < "$CAGE_ENV" || true; cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
-    if [ "$now" != "$sums" ] && bash -n "$CAGE_ROOT/cage" 2>/dev/null; then exec "$CAGE_ROOT/cage" _refresh "$CAGE_HOME"; fi
+    now="$(cksum 2>/dev/null < "$CAGE_ROOT/cage" || true)"
+    if { [ "$now" != "$code" ] || [ "$(cksum 2>/dev/null < "$CAGE_ENV" || true)" != "$env" ]; } && bash -n "$CAGE_ROOT/cage" 2>/dev/null; then
+      # A new cage writes its own pid here as it takes over. Until then helper_alive doesn't count on this helper,
+      # and for good if that cage is from before pid files (cage update --to an older release, cage rollback).
+      [ "$now" = "$code" ] || printf '%s?\n' $$ > "$CAGE_HOME/refresh.pid"
+      exec "$CAGE_ROOT/cage" _refresh "$CAGE_HOME"
+    fi
     outbox_process || true
     [ $((i % 20)) != 0 ] || events_harvest || true
     [ $((i % 100)) != 0 ] || oauth_refresh_all 900 || true
