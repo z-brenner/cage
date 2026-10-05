@@ -60,8 +60,23 @@
         if ((Get-Distros) -contains $Distro) {
             $answer = Read-Host '  Make a backup first? [Y/n]'
             if ($answer -notmatch '^[nN]') {
-                & wsl.exe -d $Distro -- '~/.local/bin/cage' backup
-                if ($LASTEXITCODE -ne 0) { Stop-Setup 'the backup did not work, so nothing was removed' 'run this again, or answer n to go without a backup' }
+                # Saved to a file named here, on Windows, and checked before the distro (and everything in it) goes:
+                # left to cage, a backup could land inside the distro (CAGE_BACKUP_DIR, or no Windows interop).
+                New-Item -ItemType Directory -Force -Path $backups | Out-Null
+                $name = 'cage-' + (Get-Date -Format 'yyyy-MM-dd-HHmmss') + '.cagebackup'
+                $file = Join-Path $backups $name
+                $dir64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($backups))
+                $save = @'
+set -e
+d="$(wslpath -u "$(echo @DIR@ | base64 -d)")"
+"$HOME/.local/bin/cage" backup "$d/@NAME@"
+'@
+                $save64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($save.Replace('@DIR@', $dir64).Replace('@NAME@', $name).Replace("`r", '')))
+                & wsl.exe -d $Distro -- bash -lc "bash <(echo $save64 | base64 -d)"
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $file)) {
+                    Stop-Setup 'the backup did not work, so nothing was removed' 'run this again, or answer n to go without a backup'
+                }
+                Ok "backup saved: '$file'"
             }
             & wsl.exe -d $Distro -- '~/.local/bin/cage' uninstall --yes
             & wsl.exe --unregister $Distro
@@ -206,7 +221,7 @@ exit $rc
 '@
         $get64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($get.Replace('@RAW@', $Raw).Replace("`r", '')))
         & wsl.exe -d $Distro -u $user --cd '~' -- bash -lc "bash <(echo $get64 | base64 -d)"
-        if ($LASTEXITCODE -ne 0) { Stop-Setup "cage couldn't be installed inside WSL" 'check your internet connection, then run this again' }
+        if ($LASTEXITCODE -ne 0) { Stop-Setup "setting up cage inside WSL didn't finish (see the lines above)" 'run this again; it picks up where it stopped' }
         Write-Host ''
         try {
             Copy-Item -Force "\\wsl.localhost\$Distro\home\$user\cage\assets\cage.ico" (Join-Path $appDir 'cage.ico') -ErrorAction Stop

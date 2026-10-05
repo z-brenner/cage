@@ -2398,14 +2398,26 @@ cmd_rollback() {
 # the cage command and cage's folder. Your agents' logins and files and cage's settings stay, unless you ask for
 # everything (and type it, or say --yes). Backups always stay. So does microsandbox: it's a program of its own.
 cmd_uninstall() {
-  local yes="" all="" a v f answer bdir removable="" bin="$HOME/.local/bin/cage"
+  local yes="" all="" a v f answer bdir root home ch bd removable="" keep_home="" failed="" left=() checked=1
+  local bin="$HOME/.local/bin/cage"
   for a in "$@"; do
     case "$a" in --yes|-y) yes=1 ;; --everything) all=1 ;; *) die "usage: cage uninstall [--yes] [--everything]" ;; esac
   done
-  bdir="$(backup_dir)"
-  case "$bdir/" in "$CAGE_ROOT"/*) die "your backups are in $bdir, inside cage's own folder; move them elsewhere first (nothing was removed)" ;; esac
+  # Where cage backup puts them: cage.env can say (CAGE_BACKUP_DIR). The folders compared as what they really are, so
+  # a trailing slash, a .. or a link doesn't get a backup (or your home folder) deleted.
+  bdir="$( if [ -f "$CAGE_ENV" ]; then load_env >/dev/null; fi; backup_dir )" ||
+    die "couldn't read $CAGE_ENV, so cage can't tell where your backups are; nothing was removed"
+  root="$(canon "$CAGE_ROOT")" home="$(canon "$HOME")" ch="$(canon "$CAGE_HOME")" bd="$(canon "$bdir")"
+  if inside "$bd" "$root"; then die "your backups are in $bdir, inside cage's own folder; move them elsewhere first (nothing was removed)"; fi
   if [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; then removable=1; fi   # installed by install.sh
-  [ "$CAGE_ROOT" != "$HOME" ] || removable=""
+  if inside "$home" "$root"; then removable=""; fi   # never your home folder, or one it's in
+  # cage's settings folder goes only with --everything, and only if it is just that
+  if inside "$home" "$ch"; then keep_home="won't delete $CAGE_HOME: your home folder is in it"
+  elif inside "$bd" "$ch"; then keep_home="your backups are in $bdir, inside $CAGE_HOME; move them elsewhere first"
+  elif [ -e "$CAGE_HOME" ] && [ ! -f "$CAGE_HOME/cage.env" ] && [ "${ch##*/}" != .cage ]; then
+    keep_home="won't delete $CAGE_HOME: it doesn't look like cage's settings folder (there's no cage.env in it)"
+  fi
+  if [ -n "$all" ] && [ -n "$keep_home" ]; then die "$keep_home (nothing was removed)"; fi
   if [ -z "$yes" ]; then
     say "This takes cage off this computer: your agents' VMs, start at login, the cage command and $CAGE_ROOT."
     if [ -n "$all" ]; then say "It also deletes your agents' logins and files, and cage's settings ($CAGE_HOME)."
@@ -2420,12 +2432,11 @@ cmd_uninstall() {
       [ "$answer" = delete ] || die "nothing was removed"
     else
       prompt "To delete your agents' logins and files and cage's settings too, type delete (Enter keeps them): " answer
-      [ "$answer" != delete ] || all=1
+      if [ "$answer" = delete ]; then
+        [ -z "$keep_home" ] || die "$keep_home (nothing was removed)"
+        all=1
+      fi
     fi
-  fi
-  if [ -n "$all" ]; then
-    case "$bdir/" in "$CAGE_HOME"/*) die "your backups are in $bdir, inside $CAGE_HOME; move them elsewhere first (nothing was removed)" ;; esac
-    [ -n "$CAGE_HOME" ] && [ "$CAGE_HOME" != "$HOME" ] && [ "$CAGE_HOME" != / ] || die "won't delete $CAGE_HOME (nothing was removed)"
   fi
 
   # What runs: the agents (stopped properly, so their files are saved), the background helpers, the web app
@@ -2441,8 +2452,12 @@ cmd_uninstall() {
         if "$MSB" rm --force "$(vm "$a")" >/dev/null 2>&1; then ok "removed $a's VM"; else warn "couldn't remove $a's VM ($(vm "$a"))"; fi
       fi
       [ -n "$all" ] || continue
-      for v in home cache; do "$MSB" volume rm "$(vm "$a")-$v" >/dev/null 2>&1 || true; done
+      for v in "$(vm "$a")-home" "$(vm "$a")-cache"; do
+        "$MSB" volume inspect "$v" >/dev/null 2>&1 || continue   # this agent never had one
+        "$MSB" volume rm "$v" >/dev/null 2>&1 || left+=("$v")
+      done
     done
+  elif [ -n "$all" ]; then checked=""
   fi
 
   # The cage command, the lines the installer added to your shell's settings, the app menu entry, and cage itself
@@ -2450,19 +2465,51 @@ cmd_uninstall() {
   for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.zprofile" "$HOME/.config/fish/conf.d/cage.fish"; do unmark "$f"; done
   f="$HOME/.local/share/applications/cage.desktop"
   if grep -qF "$CAGE_ROOT/" "$f" 2>/dev/null; then rm -f "$f"; fi
-  if [ -n "$all" ]; then rm -rf "$CAGE_HOME"; ok "deleted your agents' logins and files, and cage's settings"; fi
+  if [ -n "$all" ]; then
+    rm -rf "$CAGE_HOME"
+    # only what really went: a volume msb couldn't delete still holds that agent's login and files
+    if [ -n "$checked" ] && [ ${#left[@]} = 0 ]; then ok "deleted your agents' logins and files, and cage's settings"
+    else ok "deleted cage's settings ($CAGE_HOME)"; fi
+  fi
   if [ -n "$removable" ]; then rm -rf "$CAGE_ROOT"; ok "removed cage ($CAGE_ROOT)"
   else warn "$CAGE_ROOT is a development checkout, so it stays; delete it yourself when you like"; fi
 
   ok "cage is off this computer"
   if [ -z "$all" ]; then
-    hint "kept: cage's settings in $CAGE_HOME, and your agents' logins and files (microsandbox volumes cage-<agent>-home)"
-    hint "to delete those too: rm -rf $CAGE_HOME, and msb volume rm cage-<agent>-home cage-<agent>-cache for each agent"
+    hint "kept: cage's settings in $CAGE_HOME, and your agents' logins and files (in microsandbox, as volumes cage-<agent>-home)"
+    hint "to delete those too: rm -rf $(printf '%q' "$CAGE_HOME"), and for each agent: msb volume rm cage-<agent>-home cage-<agent>-cache"
   fi
   if ls -d "$CAGE_HOME".before-restore-* >/dev/null 2>&1; then hint "older settings from restores are kept too: $CAGE_HOME.before-restore-*"; fi
   if [ -d "$bdir" ]; then say "your backups are still in $bdir"; fi
-  say "microsandbox stays installed (it's a program of its own). To remove it too: rm -rf ${MSB_HOME:-~/.microsandbox} ~/.local/bin/msb ~/.local/bin/microsandbox"
+  f="$(printf '%q %q %q' "${MSB_HOME:-$HOME/.microsandbox}" "$HOME/.local/bin/msb" "$HOME/.local/bin/microsandbox")"
+  if [ -n "$all" ] && [ -n "$checked" ] && [ ${#left[@]} = 0 ]; then
+    say "microsandbox stays installed (it's a program of its own). To remove it too: rm -rf $f"
+  else
+    say "microsandbox stays installed (it's a program of its own). It also holds your agents' logins and files, so removing it (rm -rf $f) deletes those too."
+  fi
+  if [ -z "$checked" ]; then
+    warn "microsandbox wasn't found, so your agents' logins and files weren't checked; if they're still there: msb volume rm cage-<agent>-home cage-<agent>-cache"
+  elif [ ${#left[@]} -gt 0 ]; then
+    bad "couldn't delete these, which hold your agents' logins and files: ${left[*]}"
+    hint "run: msb volume rm ${left[*]}"
+    failed=1
+  fi
+  [ -z "$failed" ] || exit 1
 }
+
+canon() { # canon <path>: the folder it really is (links, . and .. and trailing slashes resolved), also when it doesn't exist yet
+  local p="$1" rest=""
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ "$p" != / ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  while [ ! -d "$p" ]; do
+    rest="/${p##*/}$rest" p="${p%/*}"
+    [ -n "$p" ] || p=/
+  done
+  p="$(cd "$p" && pwd -P)" || return 1
+  p="${p%/}$rest"
+  printf '%s' "${p:-/}"
+}
+inside() { case "$1/" in "${2%/}"/*) return 0 ;; esac; return 1; }   # inside <path> <folder>: it, or something in it
 
 unmark() { # unmark <file>: takes out the lines the installer added (each with the empty line it put before it)
   local f="$1" tmp

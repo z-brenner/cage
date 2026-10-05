@@ -387,6 +387,29 @@ mkdir -p "$HOME/cage-backups" && echo backup > "$HOME/cage-backups/cage-2026-01-
 echo 'alias ll="ls -l"' >> "$HOME/.bashrc"
 if printf 'y\nn\nkeep\n' | CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --everything 2>"$T/err"; then fail "--everything without typing delete"; fi
 [ -x "$HOME/cage/cage" ] && [ -d "$CAGE_HOME" ] || fail "uninstall removed something without the typed confirmation"
+# backups where cage.env says (CAGE_BACKUP_DIR): inside ~/cage, or inside cage's settings with --everything
+: > "$MSB_LOG"
+mkdir -p "$HOME/cage/backups" && echo backup > "$HOME/cage/backups/mine.cagebackup"
+echo "CAGE_BACKUP_DIR=\"$HOME/cage/backups\"" >> "$CAGE_HOME/cage.env"
+if CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err"; then fail "uninstall deleted the backups in ~/cage"; fi
+grep -q "your backups are in $HOME/cage/backups, inside cage's own folder" "$T/err" && [ -f "$HOME/cage/backups/mine.cagebackup" ] ||
+  fail "backups in ~/cage (cage.env): $(cat "$T/err")"
+rm -rf "$HOME/cage/backups"
+sed -i '/^CAGE_BACKUP_DIR=/d' "$CAGE_HOME/cage.env"
+mkdir -p "$CAGE_HOME/backups" && echo backup > "$CAGE_HOME/backups/mine.cagebackup"
+echo "CAGE_BACKUP_DIR=\"$CAGE_HOME/backups/\"" >> "$CAGE_HOME/cage.env"
+if CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err"; then fail "uninstall --everything deleted the backups"; fi
+grep -q "inside $CAGE_HOME; move them elsewhere first (nothing was removed)" "$T/err" && [ -f "$CAGE_HOME/backups/mine.cagebackup" ] ||
+  fail "backups in cage's settings (cage.env): $(cat "$T/err")"
+rm -rf "$CAGE_HOME/backups"
+sed -i '/^CAGE_BACKUP_DIR=/d' "$CAGE_HOME/cage.env"
+# cage's settings folder set to your home folder (a trailing slash once got past the check)
+if CAGE_HOME="$HOME/" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err"; then fail "uninstall --everything with CAGE_HOME=~/"; fi
+grep -q "won't delete $HOME/: your home folder is in it (nothing was removed)" "$T/err" && [ -x "$HOME/cage/cage" ] && [ -f "$HOME/.bashrc" ] ||
+  fail "CAGE_HOME=~/: $(cat "$T/err")"
+[ ! -s "$MSB_LOG" ] || fail "a refused uninstall touched the VMs: $(cat "$MSB_LOG")"
+ok "cage uninstall never deletes backups (where cage.env puts them too) or your home folder (however it's spelled)"
+
 : > "$MSB_LOG"
 CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fail "uninstall: $(cat "$T/err")"
 [ ! -e "$HOME/cage" ] && [ ! -e "$HOME/.local/bin/cage" ] && [ ! -e "$HOME/.local/share/applications/cage.desktop" ] || fail "cage is still here"
@@ -394,7 +417,36 @@ CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fai
 grep -q '^rm --force cage-claude$' "$MSB_LOG" && ! grep -q 'volume rm' "$MSB_LOG" || fail "VMs and volumes: $(cat "$MSB_LOG")"
 grep -q 'added by the cage installer' "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc" 2>/dev/null && fail "PATH lines left"
 grep -qx 'alias ll="ls -l"' "$HOME/.bashrc" || fail "uninstall took the user's own line from .bashrc"
+grep -q "rm -rf $CAGE_HOME, and for each agent: msb volume rm" "$T/err" || fail "how to delete the rest: $(cat "$T/err")"
+grep -q 'It also holds your agents.* logins and files, so removing it .* deletes those too' "$T/err" || fail "microsandbox holds what was kept: $(cat "$T/err")"
+
+# volumes msb can't delete (still in use) aren't reported as deleted; a cage command that isn't this cage's stays
+cat > "$T/stub/msb-busy" <<'EOF'
+#!/bin/sh
+[ "$1" = --version ] && exit 0
+echo "$*" >> "$MSB_LOG"
+case "$*" in "volume rm "*) echo "error: volume is in use" >&2; exit 1 ;; esac
+exit 0
+EOF
+chmod +x "$T/stub/msb-busy"
 bash "$ROOT/install.sh" 2>"$T/err" || fail "reinstall: $(cat "$T/err")"
+ln -sf "$T/src/cage" "$HOME/.local/bin/cage"   # another cage's command
+if CAGE_MSB="$T/stub/msb-busy" "$HOME/cage/cage" uninstall --yes --everything 2>"$T/err"; then fail "uninstall said all went well with volumes left"; fi
+grep -q "couldn't delete these, which hold your agents' logins and files: cage-claude-home cage-claude-cache" "$T/err" &&
+  grep -q 'run: msb volume rm cage-claude-home' "$T/err" && ! grep -q "deleted your agents' logins and files" "$T/err" ||
+  fail "volumes msb couldn't delete: $(cat "$T/err")"
+[ "$(readlink "$HOME/.local/bin/cage")" = "$T/src/cage" ] || fail "uninstall removed a cage command that isn't this cage's"
+rm -f "$HOME/.local/bin/cage"
+mkdir -p "$T/nomsb" && cp "$T/stub/systemctl" "$T/stub/launchctl" "$T/nomsb/"
+bash "$ROOT/install.sh" 2>"$T/err" || fail "reinstall: $(cat "$T/err")"
+mkdir -p "$CAGE_HOME" && printf 'CAGE_AGENTS="claude codex"\n' > "$CAGE_HOME/cage.env"
+PATH="$T/nomsb:/usr/bin:/bin" "$HOME/cage/cage" uninstall --yes --everything 2>"$T/err" || fail "uninstall without msb: $(cat "$T/err")"
+grep -q "microsandbox wasn't found, so your agents' logins and files weren't checked" "$T/err" && ! grep -q "deleted your agents' logins" "$T/err" ||
+  fail "uninstall --everything without msb: $(cat "$T/err")"
+ok "uninstall --everything says which agents' files are left when msb can't delete them (or isn't there), and exits 1"
+
+bash "$ROOT/install.sh" 2>"$T/err" || fail "reinstall: $(cat "$T/err")"
+mkdir -p "$CAGE_HOME" && printf 'CAGE_AGENTS="claude codex"\n' > "$CAGE_HOME/cage.env"
 rm -f "$HOME/.bashrc"
 : > "$MSB_LOG"
 CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes --everything 2>"$T/err" || fail "uninstall --everything: $(cat "$T/err")"
