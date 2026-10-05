@@ -743,6 +743,30 @@ ok "voice notes through Groq: the key reaches VMs only while that's on, is repla
   [ "$(stat -c %a "$MSB_HOME")$(stat -c %a "$MSB_HOME/volumes")$(stat -c %a "$MSB_HOME/db")" = 700700700 ] || fail "microsandbox's folder is readable by others" )
 ok "up: an agent that can't start is named, with why; the others start, and the helper too; ~/.microsandbox is private"
 
+# the background helper: one per CAGE_HOME, wherever cage is installed (spaces and brackets too); it picks up changed
+# settings by itself, and cage down stops it
+( fresh c
+  P="$T/My Apps (2025)"; mkdir -p "$P" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$P/"
+  re="$(printf '%s' "$P/cage _refresh" | sed 's/[][()+.*^$?{}|\\]/\\&/g')"
+  printf 'CAGE_AGENTS="claude codex"\nCAGE_NETWORK="strict"\n' >> "$CAGE_HOME/cage.env"
+  printf 'cage-claude\ncage-codex\n' > "$T/c.vms"
+  export MSB_EXISTING="$T/c.vms" MSB_RUNNING="$T/c.vms" MSB_SENT="$T/c.sent"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do "$P/cage" voice off </dev/null >/dev/null 2>&1 & done; wait
+  sleep 1
+  n="$(pgrep -fc -- "$re" || true)"
+  [ "$n" = 1 ] || { pkill -f -- "$re"; fail "10 cage commands at once left $n background helpers"; }
+  pid="$(cat "$CAGE_HOME/refresh.pid")"
+  "$P/cage" ask-all on </dev/null >/dev/null 2>&1
+  [ "$(pgrep -fc -- "$re" || true)" = 1 ] && [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid" ] || fail "a second helper started"
+  d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"; mkdir -p "$d"
+  printf ask > "$d/kind"; printf 'telegram:1:1' > "$d/session"; printf 'what is 2+2?' > "$d/text"
+  for _ in $(seq 40); do [ ! -d "$d" ] && grep -q 'answer from cage-codex to: what is 2+2?' "$T/c.sent" 2>/dev/null && break; sleep 0.2; done
+  grep -q 'answer from cage-codex to: what is 2+2?' "$T/c.sent" 2>/dev/null || { pkill -f -- "$re"; fail "the helper didn't pick up /all, turned on after it started"; }
+  "$P/cage" down </dev/null >/dev/null 2>&1
+  for _ in $(seq 25); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  if kill -0 "$pid" 2>/dev/null; then pkill -f -- "$re"; fail "cage down left the helper running"; fi )
+ok "the background helper: one per CAGE_HOME whatever the install path, picks up new settings itself, stops with cage down"
+
 # a VM that stops right after it's started: cage says so in seconds (not 15 minutes of "waking up"), with its last words
 if script --version 2>&1 | grep -q util-linux; then
   ( fresh x
@@ -773,7 +797,7 @@ gone() { for _ in 1 2 3 4 5; do alive || return 0; sleep 1; done; return 1; }
 export WSL_DISTRO_NAME=Ubuntu-24.04
 : > "$T/ps.log"
 "$W" up claude 2>"$T/err" || fail "up on WSL: $(cat "$T/err")"
-grep -qF "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','Ubuntu-24.04','-u','$(id -un)','--exec','$W','_keepalive'" "$T/ps.log" \
+grep -qF "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','Ubuntu-24.04','-u','$(id -un)','--exec','$W','_keepalive','$CAGE_HOME'" "$T/ps.log" \
   || fail "keepalive launch: $(cat "$T/ps.log")"
 alive || fail "keepalive is not running"
 grep -q 'hidden session keeps Ubuntu-24.04 running' "$T/err" || fail "up did not explain the keepalive: $(cat "$T/err")"

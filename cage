@@ -384,17 +384,20 @@ conf_get() { sed -n "/^$2=/{s/^$2=//p;q;}" "$1" 2>/dev/null || true; }   # conf_
 # backslash or a line break is refused (callers check values too, those from a chat service's API above all).
 # Several cage commands can change settings at once (the web app runs them side by side), so writers take turns
 # (a lock folder, which works on macOS too), and each writes a temp file next to it and moves it into place.
-env_edit() { # env_edit <set NAME VALUE | unset NAME...>
-  local lock="$CAGE_ENV.lock" i=0 holder
-  until mkdir "$lock" 2>/dev/null; do
-    # a cage that died while holding it, or anything holding it for over 10 s, loses it
-    holder="$(cat "$lock/pid" 2>/dev/null || true)"
-    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || [ $i -ge 100 ]; then rm -rf "$lock"; i=0; continue; fi
+lock_take() { # lock_take <dir>: waits its turn. A lock whose cage died, or that's been held for over 10 s, is taken over.
+  local i=0 holder
+  until mkdir "$1" 2>/dev/null; do
+    holder="$(cat "$1/pid" 2>/dev/null || true)"
+    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || [ $i -ge 100 ]; then rm -rf "$1"; i=0; continue; fi
     sleep 0.1; i=$((i + 1))
   done
+  echo $$ > "$1/pid"
+}
+env_edit() { # env_edit <set NAME VALUE | unset NAME...>
+  local lock="$CAGE_ENV.lock"
+  lock_take "$lock"
   ( trap 'rm -rf "$lock"' EXIT
     umask 077
-    echo $$ > "$lock/pid"
     local mode="$1" tmp n pat=()
     shift
     if [ "$mode" = set ]; then pat=(-e "^$1="); else for n in "$@"; do pat+=(-e "^$n="); done; fi
@@ -1235,16 +1238,62 @@ oauth_refresh_all() { # oauth_refresh_all <seconds>: renews the sign-ins that ex
   done
 }
 oauth_any() { compgen -G "$OAUTH/*.json" >/dev/null 2>&1; }
+# cage's helpers: the background helper (`cage _refresh`) and, on WSL, the keepalive (`cage _keepalive`). One of
+# each per CAGE_HOME, found by its pid in $CAGE_HOME/<refresh|keepalive>.pid and checked to still be that helper (a
+# pid can be reused), so any install path works, spaces and brackets included.
+helper_alive() { # helper_alive <refresh|keepalive>
+  local pid args
+  pid="$(cat "$CAGE_HOME/$1.pid" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  if [ -r "/proc/$pid/cmdline" ]; then args="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  else args="$(ps -o args= -p "$pid" 2>/dev/null || true)"; fi
+  [[ "$args" == *"$CAGE_ROOT/cage _$1"* ]]
+}
+helper_stop() { # helper_stop <refresh|keepalive>
+  if [ ! -e "$CAGE_HOME/$1.pid" ]; then   # one from a cage before pid files
+    pkill -f -- "$CAGE_ROOT/cage _$1" 2>/dev/null || true; return 0
+  fi
+  if helper_alive "$1"; then kill "$(cat "$CAGE_HOME/$1.pid")" 2>/dev/null || true; fi
+  rm -f "$CAGE_HOME/$1.pid"
+}
+
 refresher_pattern() { echo "$CAGE_ROOT/cage _refresh"; }
 refresher_start() { # the background helper: renews sign-ins, collects security events (strict network logs a lot)
   local a relay=""
   for a in ${CAGE_AGENTS:-}; do [ -z "$(agent_features "$a")" ] || relay=1; done
   oauth_any || [ "${CAGE_NETWORK:-open}" = strict ] || [ -n "$relay" ] || return 0
-  pgrep -f -- "$(refresher_pattern)" >/dev/null 2>&1 && return 0
-  if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
-  else nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
+  mkdir -p "$CAGE_HOME"
+  lock_take "$CAGE_HOME/.refresh.lock"   # several cage commands at once still start one
+  if ! helper_alive refresh; then
+    # a helper from a cage before pid files would act on every request too: it goes, once
+    [ -e "$CAGE_HOME/refresh.pid" ] || pkill -f -- "$(refresher_pattern)" 2>/dev/null || true
+    if command -v setsid >/dev/null 2>&1; then setsid nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null &
+    else nohup "$CAGE_ROOT/cage" _refresh >>"$CAGE_HOME/refresh.log" 2>&1 < /dev/null & fi
+    echo $! > "$CAGE_HOME/refresh.pid"
+  fi
+  rm -rf "$CAGE_HOME/.refresh.lock"
 }
-refresher_stop() { pkill -f -- "$(refresher_pattern)" 2>/dev/null || true; }
+refresher_stop() { helper_stop refresh; }
+
+# `cage _refresh`, the background helper itself. Every 3 s: /all and stand-in requests; every minute: security
+# events; every 5 minutes: app sign-ins. Changed settings, or a new cage after an update, start it afresh, so it
+# never works from old ones; and if another helper took over this CAGE_HOME, it goes.
+refresher_loop() {
+  local i=0 sums
+  load_env
+  find_msb || true
+  trap 'exit 0' TERM INT
+  echo $$ > "$CAGE_HOME/refresh.pid"
+  sums="$(cksum < "$CAGE_ENV" 2>/dev/null; cksum < "$CAGE_ROOT/cage" 2>/dev/null)"
+  while :; do
+    [ "$(cat "$CAGE_HOME/refresh.pid" 2>/dev/null || true)" = $$ ] || exit 0
+    [ "$(cksum < "$CAGE_ENV" 2>/dev/null; cksum < "$CAGE_ROOT/cage" 2>/dev/null)" = "$sums" ] || exec "$CAGE_ROOT/cage" _refresh
+    outbox_process || true
+    [ $((i % 20)) != 0 ] || events_harvest || true
+    [ $((i % 100)) != 0 ] || oauth_refresh_all 900 || true
+    i=$((i + 1)); sleep 3 & wait "$!"
+  done
+}
 
 connect_apply() { # connect_apply <agents|all>: offers to restart the ones that are awake, so they pick up the change
   local a awake=()
@@ -1812,11 +1861,21 @@ wsl_check_names() {
 }
 
 keepalive_pattern() { echo "$CAGE_ROOT/cage _keepalive"; }   # the keepalive's command line
-keepalive_running() { pgrep -f -- "$(keepalive_pattern)" >/dev/null 2>&1; }
+keepalive_running() { helper_alive keepalive; }
+
+keepalive_run() { # cage _keepalive [CAGE_HOME]: the hidden session's side, a sleep until `cage down`
+  [ -z "${1:-}" ] || CAGE_HOME="$1"
+  mkdir -p "$CAGE_HOME"
+  echo $$ > "$CAGE_HOME/keepalive.pid"
+  trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT
+  while :; do sleep 86400 & wait "$!"; done
+}
 
 wsl_keepalive_start() {
   keepalive_running && return 0
-  ( wsl_check_names ) || { warn "no WSL keepalive: WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
+  { ( wsl_check_names ) && [[ "$CAGE_HOME" =~ ^[A-Za-z0-9._/-]+$ ]]; } || {
+    warn "no WSL keepalive: WSL will stop the VMs ~15 s after you close the last WSL window"; return 0; }
+  [ -e "$CAGE_HOME/keepalive.pid" ] || pkill -f -- "$(keepalive_pattern)" 2>/dev/null || true   # one from before pid files
   local ps i
   if ! ps="$(win_cmd powershell.exe)"; then
     warn "Windows interop is off, so WSL will stop these VMs ~15 s after you close the last WSL window"
@@ -1824,7 +1883,7 @@ wsl_keepalive_start() {
   fi
   # Start-Process gives wsl.exe its own hidden console, so it outlives this terminal.
   "$ps" -NoProfile -NonInteractive -Command \
-    "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','$WSL_DISTRO_NAME','-u','$(id -un)','--exec','$CAGE_ROOT/cage','_keepalive'" \
+    "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','$WSL_DISTRO_NAME','-u','$(id -un)','--exec','$CAGE_ROOT/cage','_keepalive','$CAGE_HOME'" \
     >/dev/null 2>&1 || true
   for i in 1 2 3 4 5 6 7 8 9 10; do keepalive_running && break; sleep 1; done
   if keepalive_running; then
@@ -1834,7 +1893,7 @@ wsl_keepalive_start() {
   fi
 }
 
-wsl_keepalive_stop() { pkill -f -- "$(keepalive_pattern)" 2>/dev/null || true; }
+wsl_keepalive_stop() { helper_stop keepalive; }
 
 wsl_autostart() { # wsl_autostart on|off
   local reg key='HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -3440,14 +3499,11 @@ main() {
     _state) state_json ;;
     restore) cmd_restore "$@" ;;
     # internal, used on WSL: the hidden session that keeps the distro alive, and the Windows-login entry point
-    _keepalive) trap 'kill "${!:-}" 2>/dev/null; exit 0' TERM INT; while :; do sleep 86400 & wait "$!"; done ;;
+    _keepalive) keepalive_run "$@" ;;
     _autostart) mkdir -p "$CAGE_HOME"; exec >>"$CAGE_HOME/autostart.log" 2>&1; date; cmd_up ;;
     _open) UI=1 open_url "${1:-}" ;;
     _outbox) load_env; find_msb || true; outbox_process; wait ;;   # once (the background helper does this every 3 s)
-    _refresh) load_env; find_msb || true; trap 'exit 0' TERM INT
-      # every 3 s: /all and stand-in requests; every minute: security events; every 5 minutes: app sign-ins
-      i=0; while :; do outbox_process || true; [ $((i % 20)) != 0 ] || events_harvest || true
-        [ $((i % 100)) != 0 ] || oauth_refresh_all 900; i=$((i + 1)); sleep 3 & wait "$!"; done ;;
+    _refresh) refresher_loop ;;
     version|--version|-V) echo "cage $(cage_version)" ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;
