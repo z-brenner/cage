@@ -9,7 +9,10 @@ cleanup() { [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
-ok() { pass=$((pass + 1)); echo "ok - $*"; }
+# bash 3.2 (macOS's) carries on after a block in ( … ) fails: such a block leaves a mark (block_watch), and the next
+# ok stops the run there
+ok() { [ ! -e "$T/failed" ] || exit 1; pass=$((pass + 1)); echo "ok - $*"; }
+block_watch() { trap '[ $? = 0 ] || : > "$T/failed"' EXIT; }   # first thing in a ( … ) block
 
 # --- mock Telegram Bot API: tokens "<n>:GOOD<x>" are valid; one pending message from user 4242
 cat > "$T/mock.py" <<'PY'
@@ -211,7 +214,7 @@ printf '#!/bin/sh\ncase "$1" in -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$
 printf '#!/bin/sh\necho "msb $*" >> "%s/onb.log"\ncase "$1" in --version) echo "msb 0.7.5" ;; inspect) exit 1 ;; esac\nexit 0\n' "$T" > "$T/obin/msb"
 for tool in launchctl systemctl; do printf '#!/bin/sh\necho "%s $*" >> "%s/onb.log"\n' "$tool" "$T" > "$T/obin/$tool"; done
 chmod +x "$T/obin"/*
-( export CAGE_HOME="$T/onb-tg" HOME="$T/onb-tg-home" PATH="$T/obin:$PATH"
+( block_watch; export CAGE_HOME="$T/onb-tg" HOME="$T/onb-tg-home" PATH="$T/obin:$PATH"
   mkdir -p "$HOME"; : > "$T/onb.log"
   printf '%s\n' 2 y n n n '100:GOODclaude' y Zack '' '' n | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (Telegram): $(tail -5 "$T/onb.err")"
   grep -q 'A Telegram bot for each agent' "$T/onb.err" && grep -q 'say hi on Telegram' "$T/onb.err" || fail "onboarding (Telegram): $(cat "$T/onb.err")"
@@ -219,7 +222,7 @@ chmod +x "$T/obin"/*
   [ ! -e "$HOME/Library/LaunchAgents/dev.cage.up.plist" ] && [ ! -e "$HOME/.config/systemd/user/cage-up.service" ] && [ ! -e "$CAGE_HOME/autostart" ] \
     || fail "start-at-login was turned on although you said no"
   if grep -q 'launchctl bootstrap\|systemctl --user enable' "$T/onb.log"; then fail "start-at-login ran before you were asked: $(cat "$T/onb.log")"; fi )
-( export CAGE_HOME="$T/onb-app" HOME="$T/onb-app-home" PATH="$T/obin:$PATH"
+( block_watch; export CAGE_HOME="$T/onb-app" HOME="$T/onb-app-home" PATH="$T/obin:$PATH"
   mkdir -p "$HOME"; : > "$T/onb.log"; : > "$T/requests.log"
   printf '%s\n' 1 n y n n '' '' '' y | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (app): $(tail -5 "$T/onb.err")"
   grep -q 'say hi in the app' "$T/onb.err" && grep -q 'Codex is one of your agents' "$T/onb.err" || fail "onboarding (app): $(cat "$T/onb.err")"
@@ -319,7 +322,7 @@ ok "whatsapp: spare or own number, owner-only, bridge and adapter settings for t
 
 # --- hostile replies from a chat service (or something posing as one): ids and names that would be shell code in
 # cage.env are refused before anything is saved, so nothing ever runs
-( export CAGE_HOME="$T/hostile"
+( block_watch; export CAGE_HOME="$T/hostile"
   cage init 2>/dev/null
   if printf '%s\n' 'MTAwMDAwMDAwMDAwMDAwMDAw.GOODHOSTILE.cccccccccccccccccccccccccccc' | cage chat add discord claude 2>"$T/h.err"; then
     fail "saved a Discord app whose owner id is shell code"

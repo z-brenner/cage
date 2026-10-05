@@ -8,7 +8,10 @@ trap 'pkill -f -- "$T/wslroot/cage _keepalive" 2>/dev/null || true; pkill -f -- 
 unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
-ok() { pass=$((pass + 1)); echo "ok - $*"; }
+# bash 3.2 (macOS's) carries on after a block in ( … ) fails: such a block leaves a mark (block_watch), and the next
+# ok stops the run there
+ok() { [ ! -e "$T/failed" ] || exit 1; pass=$((pass + 1)); echo "ok - $*"; }
+block_watch() { trap '[ $? = 0 ] || : > "$T/failed"' EXIT; }   # first thing in a ( … ) block
 
 # stub msb: logs one call per line (args separated by ' | '); `inspect` succeeds only for names in $T/existing,
 # `ps` lists the names in $T/running (default: the existing ones)
@@ -469,7 +472,7 @@ grep -q '^mode = "bypassPermissions"$' "$c" && ! grep -q '^allowed_tools' "$c" |
 ok "asking first: Claude asks before using your apps only, the others before every action; off again"
 
 # cage add: agents to talk to in the app, no chat app needed; earlier agents are kept only if they were set up
-( export CAGE_HOME="$T/added"
+( block_watch; export CAGE_HOME="$T/added"
   "$ROOT/cage" add codex cursor </dev/null >/dev/null 2>&1 || fail "cage add"
   grep -q '^CAGE_AGENTS="codex cursor"$' "$CAGE_HOME/cage.env" || fail "added agents: $(grep CAGE_AGENTS "$CAGE_HOME/cage.env")"
   [ -d "$CAGE_HOME/app/codex/in" ] && [ -f "$CAGE_HOME/agents/cursor/cc-connect.toml" ] || fail "added agents not woken"
@@ -569,7 +572,7 @@ rm -rf "$CAGE_HOME".before-restore-*
 ok "restore: settings and volumes back (owners, links), old copy kept, agents woken; wrong passphrase refused"
 
 # --- folders a VM can write: the host never acts through what it plants there. Each case runs in its own CAGE_HOME.
-fresh() { export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/cage" init 2>/dev/null; }
+fresh() { block_watch; export CAGE_HOME="$T/$1"; mkdir -p "$CAGE_HOME"; "$ROOT/cage" init 2>/dev/null; }
 
 # the chat folder's in/, out/ and files/: a link or a file in their place is removed, never chmodded through
 ( fresh z
@@ -765,21 +768,22 @@ ok "up: an agent that can't start is named, with why; the others start, and the 
 ( fresh c
   P="$T/My Apps (2025)"; mkdir -p "$P" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$P/"
   re="$(printf '%s' "$P/cage _refresh" | sed 's/[][()+.*^$?{}|\\]/\\&/g')"
+  helpers() { { pgrep -f -- "$re" || true; } | wc -l | tr -d ' '; }   # (busybox's pgrep has no -c)
   printf 'CAGE_AGENTS="claude codex"\nCAGE_NETWORK="strict"\n' >> "$CAGE_HOME/cage.env"
   printf 'cage-claude\ncage-codex\n' > "$T/c.vms"
   export MSB_EXISTING="$T/c.vms" MSB_RUNNING="$T/c.vms" MSB_SENT="$T/c.sent"
   for _ in 1 2 3 4 5 6 7 8 9 10; do "$P/cage" voice off </dev/null >/dev/null 2>&1 & done; wait
   sleep 1
-  n="$(pgrep -fc -- "$re" || true)"
+  n="$(helpers)"
   [ "$n" = 1 ] || { pkill -f -- "$re"; fail "10 cage commands at once left $n background helpers"; }
   pid="$(cat "$CAGE_HOME/refresh.pid")"
   "$P/cage" ask-all on </dev/null >/dev/null 2>&1
-  [ "$(pgrep -fc -- "$re" || true)" = 1 ] && [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid" ] || fail "a second helper started"
+  [ "$(helpers)" = 1 ] && [ "$(cat "$CAGE_HOME/refresh.pid")" = "$pid" ] || fail "a second helper started"
   # an update replacing cage: half-written, the helper waits; whole again (and new), it carries on as the new one
   cp "$P/cage" "$T/c.cage"; { head -c 2000 "$T/c.cage"; printf '\nif\n'; } > "$P/cage"
   sleep 4; kill -0 "$pid" 2>/dev/null || fail "the helper died while cage was being replaced"
   { cat "$T/c.cage"; echo '# a newer cage'; } > "$P/cage"
-  sleep 4; kill -0 "$pid" 2>/dev/null && [ "$(pgrep -fc -- "$re" || true)" = 1 ] || { pkill -f -- "$re"; fail "the helper didn't carry on after an update"; }
+  sleep 4; kill -0 "$pid" 2>/dev/null && [ "$(helpers)" = 1 ] || { pkill -f -- "$re"; fail "the helper didn't carry on after an update"; }
   d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"; mkdir -p "$d"
   printf ask > "$d/kind"; printf 'telegram:1:1' > "$d/session"; printf 'what is 2+2?' > "$d/text"
   for _ in $(seq 40); do [ ! -d "$d" ] && grep -q 'answer from cage-codex to: what is 2+2?' "$T/c.sent" 2>/dev/null && break; sleep 0.2; done
