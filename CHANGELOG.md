@@ -51,9 +51,10 @@ Nothing yet.
 - WhatsApp lost messages sent while the agent's chat service restarted, and kept asking WhatsApp for new linking codes while nobody was linking.
 - A voice note sent while the agent was starting failed instead of waiting for the speech model.
 - Questions over 8 KB failed in the app, files with non-Latin names couldn't be downloaded, Esc stopped running jobs, and switches showed your click even when cage didn't do it.
-- An agent's computer could trick cage: with links in its chat folder or memory inbox, with text that controls your terminal, by faking one of cage's questions in the app, or (on Windows) with a sign-in link that ran PowerShell commands.
+- An agent's computer could trick cage: with links in its chat folder or memory inbox, with terminal control codes in a note or in what cage showed while waking it up, by faking one of cage's questions in the app, or (on Windows) with a sign-in link that ran PowerShell commands.
 - Two cage commands at once could lose a setting, and a full disk could cut your settings short.
 - One agent that couldn't start kept the others asleep.
+- `cage approve codex on` said Codex would ask you in the chat. It can't; it now says Codex works read-only.
 - A backup that wouldn't open again could still be reported as saved. Restore now checks the passphrase and free space first.
 
 **After updating:**
@@ -63,7 +64,7 @@ Nothing yet.
 **Known issues:**
 - This one update, from v0.3.0, still runs v0.3.0's updater, which had the problems fixed here. Update while you're online. Updates after this one are safe.
 - Right after this update there's no earlier release kept to roll back to. To go back to v0.3.0: `cage update --to v0.3.0`.
-- Codex can't ask in chat. With `cage approve codex on` (or `CAGE_MODE=ask`) it works read-only instead.
+- Codex can't ask in chat. With `cage approve codex on` (or `CAGE_MODE=ask`) it works read-only instead, and never asks first. Apps you connected for it may still let it act, so if you want it to check with you, don't connect apps to Codex.
 - The privacy mask covers what you type, your answers, your About me and your notes' names. Files and pictures you send, web pages and your apps' results reach the AI company as they are, and anyone who can chat with the agent can ask it about a masked value.
 - Each chat app's token lives inside its agent's computer. An agent tricked by a prompt injection could read it.
 - macOS isn't supported yet.

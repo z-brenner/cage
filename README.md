@@ -79,7 +79,7 @@ cage status [--json]  how each one is doing (--json: for scripts)
 cage login <agent>    sign an agent in to your subscription
 cage add <agents>     more agents, to chat with in the app (no bot needed)
 cage remove <agent>   no longer one of your agents (--keep-login keeps its login and files)
-cage approve <a> on   it asks you before it acts in your apps (email, calendar, GitHub…)
+cage approve <a> on   it asks you before it acts in your apps (Codex can't: it works read-only)
 cage logs <agent>     what an agent's VM printed lately (--tail 500: more of it; -f: follow along)
 cage memory           review what your agents want to remember
 cage connect          let your agents use Gmail, Calendar, GitHub, Linear…
@@ -320,8 +320,8 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
 
 ## Security model
 
-- **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. `cage approve <agent> on` makes it ask first: Claude only before it uses your apps, Cursor and Antigravity before every action. `CAGE_MODE=ask` makes them ask before every action.
-- **Codex can't ask in chat.** With `cage approve codex on` (or `CAGE_MODE=ask`) it works read-only instead: it can read and answer, but it can't change files, and it never asks you first.
+- **One microVM per agent.** Agents run in "yolo" mode (no approval prompts) because the VM is the sandbox. A prompt-injected Codex can't touch your computer, your SSH keys or Claude's login. `cage approve <agent> on` makes it ask first: Claude only before it uses your apps, Cursor and Antigravity before every action. `CAGE_MODE=ask` makes them ask before every action. For Claude it's a check for mistakes, not a wall: tricked by what it reads, it could still reach your apps from its own shell, which goes ahead without asking.
+- **Codex can't ask in chat.** With `cage approve codex on` (or `CAGE_MODE=ask`) it works read-only instead: it can read and answer, but it can't change files, and it never asks you first. Apps you connected for it may still let it act, so if you want Codex to check with you, don't connect apps to it (`cage connect add <app> claude` connects one to Claude only).
 - **Network:** by default, microsandbox's policy applies: the public internet is allowed, and your computer, LAN, loopback and cloud-metadata endpoints are blocked. **`cage network strict`** switches each agent to deny-by-default. It may then reach only:
   - its own service and its chat apps;
   - where it installs from;
@@ -336,7 +336,7 @@ The PowerShell line above does all of this for you: it gives cage its own Ubuntu
   Your home screen flags new ones, and `cage security` lists them, with the `cage allow` line for each blocked host.
 - **Only you can talk to the bots:** the Telegram ids in `CAGE_TELEGRAM_ALLOW`, and in Slack or Discord your own account unless you allowed others. Only your own accounts are admins for cc-connect's privileged commands (`/shell`, `/dir`, `/restart`…).
 - **Mounts:** the only host paths a VM sees are `guest/` (the provisioning scripts), its own generated config (which names its keys and apps, never the keys themselves) and your approved memory, all read-only, plus its own memory inbox, its chat folder and (with `/all` or a stand-in on) its outbox. Those three have size limits (2 GB for the chat folder, 16 MB for the others), so a runaway or tricked agent can't fill your disk.
-- **What a VM writes can't trick cage.** cage never follows a link a VM puts in its chat folder, memory inbox or outbox, shows text from a VM without terminal control codes, and opens only plain `https://` web addresses (on Windows, without passing them through PowerShell as code).
+- **What a VM writes can't trick cage.** cage never follows a link a VM puts in its chat folder, memory inbox or outbox. What an agent hands to cage (answers to `cage ask`, notes to remember, what it printed while waking up, hosts it was blocked from) is shown without terminal control codes; `cage logs` and `cage shell` show the VM's own output as it is. cage opens only plain web addresses (`http://` or `https://`), and on Windows without passing them through PowerShell as code.
 - **The chat folder is the VM's to write, so the app trusts nothing in it.** It never follows a link out of it, reads only plain files, and shows only pictures; anything else an agent sends downloads instead of opening in the app. cc-connect's bridge and management API listen only inside the VM, behind a token made for that agent.
 - **`/all` and stand-ins cross VMs, so they're opt-in.**
   - The VMs can't reach each other. cage relays on your computer instead: an agent's cc-connect hook leaves a request in a folder only that VM can write, and cage asks the others through `msb exec`.
