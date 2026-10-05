@@ -660,8 +660,9 @@ ok "memory review: links in the inbox removed unread, invisible characters taken
   export PATH="$T/obin:$PATH"
   for u in "https://auth.evil.example/authorize’; Add-Content -Path $T/pwned -Value x; ‘?a=1" 'C:\Windows\System32\calc.exe' \
            'file:///etc/passwd' "https://x.example/a'b" 'https://x.example/a"b' 'https://x.example/a`b' 'https://x.example/a b'; do
-    if WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open "$u" 2>>"$T/o.err"; then fail "opened on Windows: $u"; fi
-    if DISPLAY=:0 "$ROOT/cage" _open "$u" 2>>"$T/o.err"; then fail "opened with xdg-open: $u"; fi
+    # refused, and never opened (opened.log, below), but no error: the setup that asked goes on
+    WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open "$u" 2>>"$T/o.err" || fail "a refused link stopped cage: $u"
+    DISPLAY=:0 "$ROOT/cage" _open "$u" 2>>"$T/o.err" || fail "a refused link stopped cage: $u"
   done
   grep -q "isn't a plain web address" "$T/o.err" || fail "no warning for a refused link: $(cat "$T/o.err")"
   WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open 'https://example.com/a?b=1&c=(2)' 2>/dev/null

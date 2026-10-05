@@ -1449,7 +1449,8 @@ url_ok() {
 
 open_url() { # best effort: open a link in the user's browser
   [ "$UI" = 1 ] || return 0
-  url_ok "$1" || { warn "cage didn't open a link that isn't a plain web address (https://…)"; return 1; }
+  # (refused, it's still best effort: the setup that asked goes on, and the link is shown next to this)
+  url_ok "$1" || { warn "cage didn't open a link that isn't a plain web address (https://…)"; return 0; }
   if is_wsl && win_cmd powershell.exe >/dev/null; then
     # The address reaches PowerShell as data (an environment variable), never inside the code it runs.
     CAGE_URL="$1" WSLENV="CAGE_URL${WSLENV:+:$WSLENV}" "$(win_cmd powershell.exe)" -NoProfile -Command 'Start-Process $env:CAGE_URL' >/dev/null 2>&1 &
