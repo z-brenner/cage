@@ -214,7 +214,7 @@ ok "autostart on/off installs and removes a systemd user unit"
 # is asked once, at the end; a no leaves nothing behind
 mkdir -p "$T/obin"
 printf '#!/bin/sh\ncase "$1" in -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$T/obin/uname"
-printf '#!/bin/sh\necho "msb $*" >> "%s/onb.log"\ncase "$1" in --version) echo "msb 0.7.5" ;; inspect) exit 1 ;; esac\nexit 0\n' "$T" > "$T/obin/msb"
+printf '#!/bin/sh\necho "msb $*" >> "%s/onb.log"\ncase "$1" in --version) cat "%s/onb.msb" 2>/dev/null || echo "msb 0.7.5" ;; inspect) exit 1 ;; esac\nexit 0\n' "$T" "$T" > "$T/obin/msb"
 for tool in launchctl systemctl; do printf '#!/bin/sh\necho "%s $*" >> "%s/onb.log"\n' "$tool" "$T" > "$T/obin/$tool"; done
 chmod +x "$T/obin"/*
 ( block_watch; export CAGE_HOME="$T/onb-tg" HOME="$T/onb-tg-home" PATH="$T/obin:$PATH"
@@ -235,6 +235,32 @@ chmod +x "$T/obin"/*
   grep -qx 'CAGE_AGENTS="codex"' "$CAGE_HOME/cage.env" && [ -d "$CAGE_HOME/app/codex" ] && grep -q 'run .*--name cage-codex' "$T/onb.log" || fail "codex isn't in the app: $(cat "$CAGE_HOME/cage.env")"
   [ -e "$HOME/Library/LaunchAgents/dev.cage.up.plist" ] && [ -e "$CAGE_HOME/autostart" ] || fail "start-at-login wasn't turned on although you said yes" )
 ok "guided setup: the app or Telegram, as you choose; start-at-login only when you say yes, asked once at the end"
+
+# a microsandbox too old for cage: the guided setup installs the one cage is tested with first, as cage fix does
+cat > "$T/onb-installer.sh" <<'EOF'
+#!/bin/sh
+# stands in for https://install.microsandbox.dev (scripts/install-msb.sh pins its version)
+get_latest_version() {
+    VERSION=v9.9.9
+}
+main() {
+    get_latest_version
+    mkdir -p "$MSB_HOME/bin"
+    printf '#!/bin/sh\necho "msb %s"\n' "${VERSION#v}" > "$MSB_HOME/bin/msb"
+    chmod +x "$MSB_HOME/bin/msb"
+    rm -f "$ONB_MSB"   # the msb on PATH is the new one now
+}
+main "$@"
+EOF
+( block_watch; export CAGE_HOME="$T/onb-old" HOME="$T/onb-old-home" PATH="$T/obin:$PATH" CAGE_MSB_INSTALLER="$T/onb-installer.sh" ONB_MSB="$T/onb.msb"
+  export MSB_HOME="$HOME/.microsandbox"
+  mkdir -p "$HOME"; : > "$T/onb.log"; echo "msb 0.7.4" > "$T/onb.msb"
+  pin="$(sed -n 's/^CAGE_MSB_VERSION=v//p' "$ROOT/cage")"
+  printf '%s\n' 1 y n y n n '' '' '' n | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding with an old msb: $(tail -5 "$T/onb.err")"
+  grep -q "microsandbox 0.7.4 is too old for cage. Install microsandbox $pin now" "$T/onb.err" && grep -q "✓ microsandbox $pin" "$T/onb.err" ||
+    fail "the guided setup didn't replace an old msb: $(cat "$T/onb.err")"
+  [ ! -e "$T/onb.msb" ] && grep -q 'run .*--name cage-codex' "$T/onb.log" || fail "codex wasn't woken with the new msb: $(cat "$T/onb.log")" )
+ok "guided setup: a microsandbox too old for cage is replaced by the one cage is tested with, first"
 
 # --- Windows (WSL 2): autostart is the per-user Run key (no admin); doctor explains WSL-specific KVM problems
 : > "$T/os.log"

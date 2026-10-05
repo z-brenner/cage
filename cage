@@ -2860,7 +2860,7 @@ cmd_rollback() {
 # the cage command and cage's folder. Your agents' logins and files and cage's settings stay, unless you ask for
 # everything (and type it, or say --yes). Backups always stay. So does microsandbox: it's a program of its own.
 cmd_uninstall() {
-  local yes="" all="" a v f answer bdir root home ch bd removable="" keep_home="" unfinished="" left=() checked=1
+  local yes="" all="" a v f answer bdir root home ch bd removable="" keep_home="" unfinished="" left=() checked=1 rc
   local bin="$HOME/.local/bin/cage"
   for a in "$@"; do
     case "$a" in --yes|-y) yes=1 ;; --everything) all=1 ;; *) die "usage: cage uninstall [--yes] [--everything]" ;; esac
@@ -2887,7 +2887,8 @@ cmd_uninstall() {
     say "Your backups in $bdir stay either way."
     yes_no "Take cage off this computer?" n || { say "nothing was removed"; return 0; }
     if [ -f "$CAGE_ENV" ] && yes_no "Make a backup first (your settings, and each agent's login and files)?" y; then
-      ( cmd_backup ) || die "no backup was made, so nothing was removed"
+      set +e; ( set -e; cmd_backup ); rc=$?; set -e   # its own checks stay on (they're off on the left of ||)
+      [ $rc = 0 ] || die "no backup was made, so nothing was removed"
     fi
     if [ -n "$all" ]; then
       prompt "To delete your agents' logins and files and cage's settings for good, type delete: " answer
@@ -4102,7 +4103,9 @@ cmd_onboard() {
   if [ "$where" = app ]; then n=4; else n=6; fi   # Telegram adds two steps: the bots, and who may use them
 
   step "1 of $n" "This computer"
-  if ! find_msb; then install_msb; fi
+  if ! find_msb; then install_msb
+  elif ! msb_version_ok; then install_msb "microsandbox $MSB_HAVE is too old for cage."   # as cage fix does
+  fi
   if [ "$(uname -s)" = Linux ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
     if ! fix_kvm; then
       check_host >&2 || true

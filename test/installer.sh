@@ -387,6 +387,11 @@ mkdir -p "$HOME/cage-backups" && echo backup > "$HOME/cage-backups/cage-2026-01-
 echo 'alias ll="ls -l"' >> "$HOME/.bashrc"
 if printf 'y\nn\nkeep\n' | CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --everything 2>"$T/err"; then fail "--everything without typing delete"; fi
 [ -x "$HOME/cage/cage" ] && [ -d "$CAGE_HOME" ] || fail "uninstall removed something without the typed confirmation"
+# the backup it offers first doesn't work out: nothing is removed
+: > "$MSB_LOG"
+if printf 'y\ny\n' | CAGE_BACKUP_PASSPHRASE=short CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall 2>"$T/err"; then fail "uninstall went on without the backup"; fi
+grep -q 'no backup was made, so nothing was removed' "$T/err" && [ -x "$HOME/cage/cage" ] && [ -f "$CAGE_HOME/cage.env" ] && [ ! -s "$MSB_LOG" ] ||
+  fail "a backup that didn't work out: $(cat "$T/err")"
 # backups where cage.env says (CAGE_BACKUP_DIR): inside ~/cage, or inside cage's settings with --everything
 : > "$MSB_LOG"
 mkdir -p "$HOME/cage/backups" && echo backup > "$HOME/cage/backups/mine.cagebackup"
