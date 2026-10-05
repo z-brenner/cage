@@ -592,7 +592,7 @@ ok "privacy mask: per agent, the CLI runs behind guest/mask.py with your terms; 
 # computer can read those with ps)
 cage mask add "Acme Corp" </dev/null 2>/dev/null
 out="$(cage mask on claude </dev/null 2>&1)"
-grep -q "not covered: files and pictures you send, notes and web pages the agent opens" <<<"$out" && grep -q "voice notes go to Groq as they are" <<<"$out" \
+grep -q "not covered: files and pictures you send, notes and web pages the agent opens" <<<"$out" && grep -qF "voice notes go to Groq as they are (with cage voice on groq)" <<<"$out" \
   && grep -q "anyone who can chat with the agent can ask it about masked values, and so can a web page or app result it reads" <<<"$out" \
   && grep -q "the real values are kept in the agent's VM" <<<"$out" \
   || fail "cage mask on doesn't say what it doesn't cover: $out"
