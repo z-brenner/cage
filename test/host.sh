@@ -118,6 +118,9 @@ for a in claude codex cursor antigravity; do
   [ "$(stat -c %a "$f")" = 600 ] || fail "$a config not 0600"
   grep -q "^allow_from = \"111,222\"$" "$f" || fail "$a allowlist"
   grep -q "^admin_from = \"you,111,222\"$" "$f" || fail "$a admin_from"
+  # a chat carries on however long you were away (cc-connect's docs say 30 minutes when it's not set)
+  [ "$(awk '/^\[\[projects\]\]$/ { n++; on = 1; next } /^\[/ { on = 0 } on && $0 == "reset_on_idle_mins = 0" { k++ } END { print n + 0, k + 0 }' "$f")" = "1 1" ] \
+    || fail "$a: reset_on_idle_mins = 0 isn't in its [[projects]]: $(cat "$f")"
 done
 grep -q '^type = "claudecode"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude type"
 grep -q '^mode = "bypassPermissions"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude mode"
@@ -125,7 +128,7 @@ grep -q '^mode = "force"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "c
 grep -q '^cmd = "cursor-agent"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor cmd"
 grep -q '^cmd = "agy"$' "$CAGE_HOME/agents/antigravity/cc-connect.toml" || fail "agy cmd"
 grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" && fail "claude should use the default cmd"
-ok "renders one cc-connect config per agent with the right type, mode and cmd"
+ok "renders one cc-connect config per agent with the right type, mode and cmd, and chats that never reset on their own"
 
 line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
 for want in "-d" "--mount-named | cage-claude-home:/home/agent" "--mount-dir | $ROOT/guest:/cage:ro" "--mount-dir | $CAGE_HOME/agents/claude:/cage-config:ro" \
@@ -511,8 +514,15 @@ cage approve claude on </dev/null >/dev/null 2>&1
 cage approve codex on </dev/null >/dev/null 2>&1
 cage up claude codex </dev/null >/dev/null 2>&1
 c="$CAGE_HOME/agents/claude/cc-connect.toml"
-grep -q '^mode = "default"$' "$c" && grep -q '^allowed_tools = \[.*"Bash".*"mcp__browser"\]$' "$c" || fail "claude asks only for apps: $(grep -E '^(mode|allowed_tools)' "$c")"
+grep -q '^mode = "default"$' "$c" && grep -q '^allowed_tools = \[".*"\]$' "$c" || fail "claude asks only for apps: $(grep -E '^(mode|allowed_tools)' "$c")"
 grep -q 'mcp__zapier\|mcp__github' "$c" && fail "an app is pre-approved"
+# Claude Code's own tools, by today's names and by older ones, go ahead without asking; of the MCP tools, only its browser
+tools=" $(sed -n 's/^allowed_tools = \[\(.*\)\]$/\1/p' "$c" | tr -d '"' | tr ',' ' ') "
+for t in Bash Edit Write Read Glob Grep WebFetch WebSearch TodoWrite Skill Agent mcp__browser Monitor EnterWorktree ExitWorktree \
+         TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch Task BashOutput KillShell MultiEdit LS SlashCommand; do
+  [[ "$tools" == *" $t "* ]] || fail "with approve on, claude would ask before $t, which stays inside its VM: $tools"
+done
+for t in $tools; do case "$t" in mcp__browser) ;; mcp__*) fail "an app's tool is pre-approved: $t" ;; esac; done
 grep -q '^mode = "default"$' "$CAGE_HOME/agents/codex/cc-connect.toml" && ! grep -q '^allowed_tools' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex asks for everything"
 cage _state 2>/dev/null | python3 -c 'import json,sys; d={a["name"]: a for a in json.load(sys.stdin)["agents"]}; assert d["claude"]["approve"] and not d["cursor"]["approve"], d' || fail "approve in the state"
 cage approve claude off </dev/null >/dev/null 2>&1; cage approve codex off </dev/null >/dev/null 2>&1
@@ -1423,8 +1433,10 @@ CAGE_DISCORD_TOKEN_claude="MTAwMDAwMDAwMDAwMDAwMDAw.GOODxx.ccccccccccccccccccccc
 CAGE_DISCORD_OWNER_claude="4242"
 CAGE_DISCORD_ALLOW_claude="4242"
 EOF
+  cage approve claude on </dev/null >/dev/null 2>&1   # its allowed_tools too
   cage up claude 2>"$T/cc-up.err" || fail "up with Slack and Discord: $(cat "$T/cc-up.err")"
-  grep -q '^type = "discord"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude has no Discord block to validate"
+  grep -q '^type = "discord"$' "$CAGE_HOME/agents/claude/cc-connect.toml" && grep -q '^allowed_tools = ' "$CAGE_HOME/agents/claude/cc-connect.toml" \
+    || fail "claude has no Discord block or allowed_tools to validate"
   for a in claude codex cursor antigravity; do
     out="$(HOME="$T/cc-$a" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$CAGE_HOME/agents/$a/cc-connect.toml" 2>&1 || true)"
     # Loading must succeed. Creating the agent may still fail here (no /home/agent/work on this host).
