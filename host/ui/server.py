@@ -34,9 +34,10 @@ cc-connect). The VM writes there, so nothing in it is trusted: no links are foll
 and only pictures are shown in the page (everything else downloads).
   GET  /api/chat/<a>/history?tail=N     the end of the chat (log.jsonl, after the end of log.1.jsonl when the VM has
                                         just started a new one): {"o": offset in log.jsonl, "entries", "more"}
-  GET  /api/chat/stream?from=a:N,b:M    server-sent events for all your agents' chats at once (a browser allows only a
-                                        few connections per site): {"a", "o", "start"} where each begins, then {"a",
-                                        "o", "e"} per new line, {"a", "reset"}
+  GET  /api/chat/stream?from=a:N:I,b:M  server-sent events for all your agents' chats at once (a browser allows only a
+                                        few connections per site): {"a", "o", "start", "ino"} where each begins, then
+                                        {"a", "o", "e"} per new line, {"a", "reset", "ino"} when the VM starts a new
+                                        log. I (optional): the log N is in, as "ino" said, to go on from the log before
   GET  /api/activity?agents=a,b&since=T what each agent is doing, from the end of its chat (for Home): {"agents": {a:
                                         {"pending": {"text","at"}|null, "working", "last": {"t","text","at"}|null,
                                         "today": {"asked","answers","files"} (from T, ms, on)}}}
@@ -1116,15 +1117,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         chats, pos, ino, seen = {}, {}, {}, {}
         try:
             for item in query.get("from", [""])[0].split(","):
-                a, _, o = item.partition(":")
+                a, _, rest = item.partition(":")
+                o, _, was = rest.partition(":")
                 if a in AGENTS and a not in chats:
                     chats[a] = Chat(a)
                     size, ino[a] = chats[a].size()
                     pos[a] = int(o) if o.isdigit() and int(o) <= size else size
+                    if o.isdigit() and was.isdigit() and int(was) != ino[a]:
+                        # Read up to there in a log the VM has replaced since (the page was closed, say): the rest
+                        # of that one, if it's still the one before (log.1.jsonl), then this one from its start, as
+                        # when it's replaced while the page looks (below). Its offsets mean nothing in this one.
+                        ino[a], pos[a] = int(was), int(o)
             self.events_head()
             self.wfile.write(b": hello\n\n")
             for a in chats:   # where each one starts (the end, unless the page asked for more): what it has seen so far
-                self.wfile.write(b"data: " + json.dumps({"a": a, "o": pos[a], "start": True}).encode() + b"\n\n")
+                self.wfile.write(b"data: " + json.dumps({"a": a, "o": pos[a], "start": True, "ino": str(ino[a])}).encode() + b"\n\n")
             self.wfile.flush()
             quiet = 0.0
             while True:
@@ -1138,7 +1145,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         if now != ino[a]:
                             old, _ = c.read_log(pos[a], name="log.1.jsonl", ino=ino[a])
                             out = [{"a": a, "o": o, "e": e} for o, e in old]
-                        out.append({"a": a, "reset": True, "o": 0})
+                        out.append({"a": a, "reset": True, "o": 0, "ino": str(now)})   # (as a string: it may not fit a JS number)
                         ino[a], pos[a] = now, 0
                     was = pos[a]
                     entries, pos[a] = c.read_log(pos[a])

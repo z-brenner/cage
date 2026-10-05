@@ -913,6 +913,27 @@ await page.waitForTimeout(1000)
 if (await badge.count()) fail('a message you read is unread again after a reload')
 ok('unread marks last through a reload, and a reload notifies nothing twice')
 
+// the VM starts a new log while the page is closed: what came in it is news (unread, and notified), and so is what
+// comes next, though the page kept how far it had read in the old one
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+await page.evaluate(() => { window.liveConnect = () => {}; LIVE.es.close() })   // as if it were closed (what it read is kept)
+fs.renameSync(claudeLog, path.join(dir, 'log.1.jsonl'))
+fs.writeFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'In a new log' }) + '\n')
+await page.reload()
+await page.waitForFunction(() => window.__notes.some((n) => n.body === 'In a new log'), null, { timeout: 15000 })
+  .catch(() => fail('a reply in a log the VM started while the page was closed is not notified'))
+await badge.getByText('1').waitFor({ timeout: 10000 })
+// (and in a browser that kept no name for the log, from before the page was told one: the next reply is news)
+await page.evaluate(() => { window.keepRead = () => {}; localStorage.setItem('cage-read', JSON.stringify({ seen: { claude: 9000000 }, told: { claude: 9000000 } })) })
+await page.reload()
+await page.waitForFunction(() => document.body.dataset.live === 'on', null, { timeout: 15000 })
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'After the new log' }) + '\n')
+await page.waitForFunction(() => window.__notes.some((n) => n.body === 'After the new log'), null, { timeout: 15000 })
+  .catch(() => fail('after a new log, an offset kept from the old one keeps replies from being notified'))
+await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
+await page.locator('.chat .msg-agent', { hasText: 'After the new log' }).waitFor({ timeout: 10000 })
+ok('after the VM starts a new log while the page is closed, what came and what comes is news')
+
 // updating while the app is open: the server restarts with the new code, and the page reloads with the new page
 const p3 = await ctx.newPage()
 watch(p3)

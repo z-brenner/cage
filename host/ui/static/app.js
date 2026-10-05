@@ -2130,8 +2130,9 @@ document.addEventListener('keydown', (e) => {
 // works installed too).
 const NOTES = { unread: {} }
 // How far you've read each agent's chat (seen) and been told about it (told), as offsets in its log, kept in this
-// browser: what came while the page was closed is still unread when it opens again, and is notified only once
-const READ = (() => { try { const r = JSON.parse(localStorage.getItem('cage-read')); if (r && r.seen && r.told) return r } catch (e) {} return { seen: {}, told: {} } })()
+// browser: what came while the page was closed is still unread when it opens again, and is notified only once. ino:
+// which log those offsets are in (the server's name for it), as the VM starts a new one now and then.
+const READ = (() => { try { const r = JSON.parse(localStorage.getItem('cage-read')); if (r && r.seen && r.told) return { ...r, ino: r.ino || {} } } catch (e) {} return { seen: {}, told: {}, ino: {} } })()
 function keepRead () { try { localStorage.setItem('cage-read', JSON.stringify(READ)) } catch (e) {} }
 function onAgent (agent) { return page === 'agent/' + agent || page.startsWith('agent/' + agent + '/') }   // its chat, files, schedule or settings
 function looking (agent) { return onAgent(agent) && document.visibilityState === 'visible' }
@@ -2147,7 +2148,7 @@ let INSTALL = null   // the browser's "install this app" prompt, when it offers 
 function notifyOn () { try { return localStorage.getItem('cage-notify') === 'on' && 'Notification' in window && Notification.permission === 'granted' } catch (e) { return false } }
 // Every agent's chat on one stream (a browser allows only a few connections to a site): the open chat's new lines,
 // and the others' for unread marks and notifications. offsets: how far each log has been seen.
-const LIVE = { es: null, key: '', offsets: {} }
+const LIVE = { es: null, key: '', offsets: {}, ino: {} }
 function liveConnect (force) {
   if (!STATE) return
   const names = agentsOn().map((a) => a.name)
@@ -2157,21 +2158,31 @@ function liveConnect (force) {
   LIVE.es = null
   LIVE.key = key
   if (!names.length) return
-  const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? READ.seen[a] ?? -1)).join(',')
+  const at = (a, o, ino) => a + ':' + o + (ino ? ':' + ino : '')   // an offset, and which log it's in when that's known
+  const from = names.map((a) => LIVE.offsets[a] !== undefined ? at(a, LIVE.offsets[a], LIVE.ino[a]) : at(a, READ.seen[a] ?? -1, READ.ino[a])).join(',')
   const es = new EventSource(`/api/chat/stream?from=${encodeURIComponent(from)}&token=${encodeURIComponent(TOKEN)}`)
   LIVE.es = es
   es.onopen = () => { document.body.dataset.live = 'on' }
   es.onmessage = (m) => {
     const d = JSON.parse(m.data)
     if (d.start) { // where it starts: the end, the first time this browser looks (what came before isn't news)
-      LIVE.offsets[d.a] = Math.max(LIVE.offsets[d.a] ?? -1, d.o)
-      if (READ.seen[d.a] === undefined) { READ.seen[d.a] = READ.told[d.a] = d.o; keepRead() }
+      const was = LIVE.offsets[d.a] ?? READ.seen[d.a]
+      LIVE.offsets[d.a] = d.o
+      // Before what this page read: a new log, one the page didn't know the name of (kept from before it was told).
+      // Read on from here, or nothing would be news until the new log is as long as the old one was.
+      if (was === undefined || d.o < was) {
+        READ.seen[d.a] = READ.told[d.a] = d.o
+        if (was !== undefined && CHAT && CHAT.agent === d.a) chatLoad(CHAT, true)
+      }
+      if (d.ino) READ.ino[d.a] = LIVE.ino[d.a] = d.ino
+      keepRead()
       if (looking(d.a)) saw(d.a)
       return
     }
     if (d.reset) { // the VM started a new log (the old one is kept): the open chat is read again, nothing is lost
       LIVE.offsets[d.a] = 0
       READ.seen[d.a] = READ.told[d.a] = 0   // offsets in the new one
+      if (d.ino) READ.ino[d.a] = LIVE.ino[d.a] = d.ino
       keepRead()
       if (CHAT && CHAT.agent === d.a) chatLoad(CHAT, true)
       return
