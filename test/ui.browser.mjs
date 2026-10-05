@@ -31,7 +31,7 @@ page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
 page.on('dialog', (d) => { if (d.type() !== 'beforeunload') errors.push(`the browser's own ${d.type()}: ${d.message()}`); d.dismiss().catch(() => {}) })
 const sheet = page.locator('dialog#confirm')
 const answer = async (text, button) => { // the page's own question: what it says, and an answer
-  await sheet.waitFor({ timeout: 10000 })
+  await sheet.waitFor({ timeout: 10000 }).catch(() => fail('the page asks nothing, where it should ask: ' + text))
   const said = await sheet.locator('#confirm-text').innerText()
   if (!text.test(said)) fail('the question: ' + said)
   await sheet.getByRole('button', { name: button, exact: true }).click()
@@ -949,6 +949,7 @@ const codexState = async (ready) => { // (cage's state, as the page has it, says
 fs.appendFileSync(codexLog, JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: permButtons, text: permText('Bash', 'rm -rf build') }) + '\n')
 const codexRow = page.locator('.list.agents li.agent', { hasText: 'Codex' })
 await codexRow.locator('.agent-act', { hasText: 'It stopped while waiting for your OK' }).waitFor({ timeout: 15000 })
+  .catch(async () => fail('an asleep agent\'s row does not say it stopped while waiting for your OK: ' + await codexRow.innerText()))
 const codexWaits = page.locator('.attn-list li.approval-row', { hasText: 'Codex wants your OK' })
 if (await codexWaits.count()) fail('Home offers an approval its agent, asleep, has forgotten')
 fs.writeFileSync(process.env.STUB_AWAKE, '')   // it wakes up: cc-connect starts afresh, and the relay registers with it
