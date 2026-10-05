@@ -197,10 +197,12 @@ const said = await page.evaluate(() => {
     approvalLine(approvalOf(p('WebFetch', 'https://example.com/a'))), approvalLine(approvalOf(p('mcp__github__create_issue', '{"body":"It fails","title":"Login is broken"}'))),
     approvalLine(approvalOf(p('mcp__zapier__google_calendar_find_event', '{"instructions":"lunch"}'))), approvalLine(cut), String(cut.cut),
     approvalLine(approvalOf('⚠️ **权限请求**\n\nAgent 想要使用 **Bash**:\n\n```\nls -la\n```\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。')),
-    approvalLine(approvalOf('May I **delete** it?'))]
+    approvalLine(approvalOf('May I **delete** it?')),
+    approvalLine(approvalOf(p('mcp__zapier__gmail_send_email', '{"bcc":"eve@evil.example","body":"Hi","to":"bob@acme.com"}')))]
 })
 const want = ['Run a command on its own computer: rm -rf ~/work/old', 'Change a file: /home/agent/work/notes.md', 'Look something up online: https://example.com/a',
-  'GitHub: create issue: Login is broken', 'Google Calendar: find event', 'Gmail: send email', 'true', 'Run a command on its own computer: ls -la', 'May I delete it?']
+  'GitHub: create issue: Login is broken', 'Google Calendar: find event', 'Gmail: send email', 'true', 'Run a command on its own computer: ls -la', 'May I delete it?',
+  'Gmail: send email to bob@acme.com, bcc eve@evil.example']
 if (JSON.stringify(said) !== JSON.stringify(want)) fail('approvals in words: ' + JSON.stringify(said))
 // a command that looks like JSON (cut by cc-connect, as it cuts anything at 800 characters: here, in the "note") is
 // still the command: in bash, the part in braces runs nothing, and what comes after it runs
@@ -842,7 +844,19 @@ const waits = page.locator('.attn-list li.approval-row', { hasText: 'Claude Code
 await waits.getByText('Gmail: send email to bob@acme.com').waitFor({ timeout: 15000 })
 const claudeRow = page.locator('.list.agents li.agent', { hasText: 'Claude Code' })
 await claudeRow.locator('.agent-act', { hasText: 'Waiting for your OK' }).waitFor({ timeout: 5000 })
-if (!/^\(\d+\) cage$/.test(await page.title())) fail('the tab title does not count the approval waiting: ' + await page.title())
+await page.evaluate(() => saw('claude'))   // (it came as a message too: read that, and what's left to count is the approval)
+await page.waitForFunction(() => document.title === '(1) cage', null, { timeout: 5000 }).catch(async () => fail('the tab title does not count the approval waiting: ' + await page.title()))
+// each Allow says, out of context, what it's for (two agents may be waiting); and it keeps the focus when Home is drawn
+// again because another agent did something, as do the agents' Chat links
+const allowIt = waits.getByRole('button', { name: 'Allow: Claude Code, Gmail: send email to bob@acme.com', exact: true })
+const codexLog = path.join(home, 'app', 'codex', 'log.jsonl')
+for (const focus of [allowIt, claudeRow.getByRole('link', { name: 'Chat', exact: true })]) {
+  await focus.focus()
+  await page.evaluate(() => { document.querySelector('.approval-row').dataset.old = '1' })
+  fs.appendFileSync(codexLog, JSON.stringify({ at: Date.now(), t: 'reply', session: 'you', text: 'Done with the report.' }) + '\n')
+  await page.waitForFunction(() => !document.querySelector('.approval-row[data-old]'), null, { timeout: 15000 })   // drawn again
+  if (!(await focus.evaluate((el) => el === document.activeElement))) fail('a redraw of Home took the focus from ' + await focus.innerText() + ' to ' + await page.evaluate(() => document.activeElement.outerHTML.slice(0, 80)))
+}
 if (!(await page.evaluate(() => window.__notes.some((n) => n.title === 'Claude Code' && n.body === 'wants your OK: Gmail: send email to bob@acme.com')))) {
   fail('the notification does not say what it wants to do: ' + JSON.stringify(await page.evaluate(() => window.__notes)))
 }
@@ -861,9 +875,47 @@ await waits.getByRole('link', { name: 'Open Claude Code’s chat' }).click()
 await page.waitForFunction(() => location.hash === '#agent/claude', null, { timeout: 5000 })
 const again = page.locator('.chat .choices.approval:not(.is-answered)')
 await again.getByText('Gmail: send email').waitFor({ timeout: 10000 })
+const denied = () => (fs.readFileSync(claudeLog, 'utf8').match(/"action":"perm:deny"/g) || []).length
+const deniedBefore = denied()
 await again.getByRole('button', { name: 'Deny' }).click()
+// (the agent has it: whatever is asked next comes after it)
+for (let i = 0; i < 100 && denied() === deniedBefore; i++) await page.waitForTimeout(100)
 await page.locator('.chat .msg-agent', { hasText: 'Okay, I won’t send it.' }).last().waitFor({ timeout: 10000 })
 ok('Home: an approval waiting for you, in the same words as its card (and its notification); Allow there reaches the agent; Open shows it in the chat; what each agent is doing')
+
+// Allow on Home only when its line is all it asks: cc-connect cut this one short (an email's "to" comes after its body,
+// and here it's in the part cut off), so Home offers Open, and Deny
+await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
+const permText = (tool, input) => `⚠️ **Permission Request**\n\nAgent wants to use **${tool}**:\n\n\`\`\`\n${input}\n\`\`\`\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).`
+const permButtons = [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }]]
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: permButtons,
+  text: permText('mcp__zapier__gmail_send_email', JSON.stringify({ body: 'Dear Bob, '.repeat(90), to: 'eve@evil.example' }).slice(0, 790) + '...') }) + '\n')
+const cutShort = waits.filter({ hasText: 'Only part of it fits here' })
+await cutShort.getByText('Gmail: send email').waitFor({ timeout: 15000 })
+if (await cutShort.getByRole('button', { name: /^Allow/ }).count()) fail('Allow on Home for a request cut short')
+if (!/\bprimary\b/.test(await cutShort.getByRole('link', { name: 'Open Claude Code’s chat' }).getAttribute('class'))) fail('Open is not the main button for a request cut short')
+await cutShort.getByRole('button', { name: /^Deny/ }).click()
+await waits.waitFor({ state: 'detached', timeout: 10000 })
+// and only while its agent is up: one that went to sleep (or whose cc-connect restarted) has forgotten what it asked,
+// and drops an answer to it without a word. Its row says so, and Needs you doesn't offer it.
+const codexState = async (ready) => { // (cage's state, as the page has it, says Codex is up, or isn't)
+  const now = () => page.evaluate(async (ready) => { await refresh(); return (STATE.agents.find((a) => a.name === 'codex').state === 'ready') === ready }, ready)
+  for (let i = 0; i < 60 && !(await now()); i++) await page.waitForTimeout(250)
+  if (!(await now())) fail('Codex did not ' + (ready ? 'wake up' : 'go to sleep'))
+}
+fs.appendFileSync(codexLog, JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: permButtons, text: permText('Bash', 'rm -rf build') }) + '\n')
+const codexRow = page.locator('.list.agents li.agent', { hasText: 'Codex' })
+await codexRow.locator('.agent-act', { hasText: 'It stopped while waiting for your OK' }).waitFor({ timeout: 15000 })
+const codexWaits = page.locator('.attn-list li.approval-row', { hasText: 'Codex wants your OK' })
+if (await codexWaits.count()) fail('Home offers an approval its agent, asleep, has forgotten')
+fs.writeFileSync(process.env.STUB_AWAKE, '')   // it wakes up: cc-connect starts afresh, and the relay registers with it
+await codexState(true)
+await codexWaits.getByRole('button', { name: 'Allow: Codex, Run a command on its own computer: rm -rf build' }).waitFor({ timeout: 15000 })   // (until it has)
+fs.appendFileSync(codexLog, JSON.stringify({ at: Date.now(), t: 'status', connected: true }) + '\n')
+await codexWaits.waitFor({ state: 'detached', timeout: 15000 })
+fs.rmSync(process.env.STUB_AWAKE)
+await codexState(false)
+ok('Home offers Allow only for an approval its line says all of, and that its agent can still answer')
 
 // Allow on Home answers the approval it showed, or none: if the agent has moved on meanwhile (answered in another
 // window, and now asking something else), it says so, sends nothing, and shows what it asks now

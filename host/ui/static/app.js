@@ -244,6 +244,9 @@ function waitingOf (name) { // the approval an agent waits for, unless you answe
   const p = (ACTIVITY[name] || {}).pending
   return p && ANSWERED[name] !== p.at ? p : null
 }
+// ...and can still be answered: cc-connect forgets an approval when it stops (asleep, say), and drops an answer to one
+// it forgot without a word, so an Allow would seem to work and do nothing
+function askingOf (a) { return a.state === 'ready' ? waitingOf(a.name) : null }
 // The line at the top when cage itself is in the way: not answering at all (dots greyed, sending off), or slow
 function notice (kind) {
   const el = document.getElementById('notice')
@@ -678,7 +681,7 @@ function attention () {
   const S = STATE
   const out = []
   const item = (tone, ic, text, action) => h('li', { class: 'attn ' + tone }, h('span', { class: 'attn-icon' }, icon(ic)), h('span', { class: 'grow' }, text), action)
-  for (const a of agentsOn()) { const p = waitingOf(a.name); if (p) out.push(approvalRow(a, p)) }
+  for (const a of agentsOn()) { const p = askingOf(a); if (p) out.push(approvalRow(a, p)) }
   for (const a of agentsOn()) {
     const s = statusOf(a)
     if (s === 'login') out.push(item('warn', 'log-in', `${a.label} needs you to sign in to ${a.plan}`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')))
@@ -692,23 +695,30 @@ function attention () {
 }
 
 // An agent waiting for your OK, though you're not in its chat: the same words as its card there, Allow and Deny right
-// here, or Open to see it in the conversation first. The answer goes with the approval it's for, so it answers that
-// one or none (server.py refuses it once the agent has moved on).
+// here, or Open to see it in the conversation first. Allow only when that line is all it asks (approvalWhole); else
+// Open shows the rest. The answer goes with the approval it's for, so it answers that one or none (server.py refuses
+// it once the agent has moved on).
 function approvalRow (a, p) {
+  const ap = approvalOf(p.text)
+  const line = approvalLine(ap)
+  const open = (main) => h('a', { class: 'btn sm ' + (main ? 'primary' : 'ghost'), href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label + '’s chat' }, 'Open')
+  const row = (sub, ...acts) => h('li', { class: 'attn warn approval-row' }, h('span', { class: 'attn-icon' }, icon('hand')),
+    h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, sub)), h('span', { class: 'attn-acts' }, acts))
   const decide = (action) => async (e) => {
-    const row = e.currentTarget.closest('li')
-    row.querySelectorAll('button').forEach((b) => { b.disabled = true })
+    const li = e.currentTarget.closest('li')
+    li.querySelectorAll('button').forEach((b) => { b.disabled = true })
     try {
       await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action], pending: { text: p.text, at: p.at } } })
       ANSWERED[a.name] = p.at
       render()
-    } catch (err) { toast(err.message); row.querySelectorAll('button').forEach((b) => { b.disabled = false }) }
+    } catch (err) { toast(err.message); li.querySelectorAll('button').forEach((b) => { b.disabled = false }) }
     activitySoon()
   }
-  return h('li', { class: 'attn warn approval-row' }, h('span', { class: 'attn-icon' }, icon('hand')),
-    h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, approvalLine(approvalOf(p.text)), p.at ? ' · ' + when(p.at) : '')),
-    h('span', { class: 'attn-acts' }, btn('Allow', decide('perm:allow'), 'sm primary'), btn('Deny', decide('perm:deny'), 'sm'),
-      h('a', { class: 'btn sm ghost', href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label + '’s chat' }, 'Open')))
+  // (what a screen reader says for each, out of context: two agents may be waiting)
+  const answer = (action, cls) => h('button', { type: 'button', class: 'btn ' + cls, 'aria-label': `${PERM_LABEL[action]}: ${a.label}, ${line}`, onclick: decide(action) }, PERM_LABEL[action])
+  const sub = [line, p.at ? ' · ' + when(p.at) : '']
+  if (!approvalWhole(ap)) return row([...sub, '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
+  return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
 }
 function when (at) { // 8:21 AM today; Mon 8:21 AM this week; Oct 3 before that
   const d = new Date(at)
@@ -858,7 +868,8 @@ function agentRow (a) {
   else action = h('a', { class: 'btn sm', href: '#agent/' + a.name }, icon('message-circle'), 'Chat')
   const act = a.enabled && ACTIVITY[a.name]
   const last = act && act.last
-  const doing = !act ? null : waitingOf(a.name) ? h('span', { class: 'agent-act warn' }, dot('warn'), 'Waiting for your OK')
+  const doing = !act ? null : askingOf(a) ? h('span', { class: 'agent-act warn' }, dot('warn'), 'Waiting for your OK')
+    : waitingOf(a.name) ? h('span', { class: 'agent-act' }, 'It stopped while waiting for your OK, so it won’t go ahead')
     : act.working ? h('span', { class: 'agent-act busy' }, dot('busy'), 'Working…')
       : last ? h('span', { class: 'agent-act' }, 'Last: ', last.t === 'file' ? 'sent ' + last.text : plainLine(last.text, 80), last.at ? ' · ' + when(last.at) : '') : null
   return h('li', { class: 'agent' + (a.enabled ? '' : ' off'), style: { '--c': AGENT[a.name].color } },
@@ -1432,12 +1443,21 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
   return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut }
 }
-function approvalLine (ap) { // in one line, for Home and notifications: "Gmail: send email to bob@acme.com"
+function approvalLine (ap, all) { // in one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut
   if (!ap.what) return ap.raw.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)
+  const line = (ap.what + approvalMore(ap)).replace(/\s+/g, ' ')
+  return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
+}
+function approvalMore (ap) { // what the line says after what it does: who it goes to (all of them), or what it runs, opens…
   const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
-  const more = f.to ? ' to ' + f.to : f.command ? ': ' + f.command : f.url ? ': ' + f.url : f.query ? ': ' + f.query : f.subject ? ': ' + f.subject : f.title ? ': ' + f.title : ''
-  const line = (ap.what + more).replace(/\s+/g, ' ')
-  return line.length > 160 ? line.slice(0, 159) + '…' : line
+  const to = [f.to, f.cc && 'cc ' + f.cc, f.bcc && 'bcc ' + f.bcc].filter(Boolean).join(', ')
+  return to ? ' to ' + to : f.command ? ': ' + f.command : f.url ? ': ' + f.url : f.query ? ': ' + f.query : f.subject ? ': ' + f.subject : f.title ? ': ' + f.title : ''
+}
+// Is that line all it asks, as far as saying yes goes? Not when it isn't cc-connect's question, when cc-connect cut what
+// it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end of a
+// command is what matters), or when it puts a command's lines on one (each one runs).
+function approvalWhole (ap) {
+  return !!ap.what && !ap.cut && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
 }
 function approvalView (ap) { // what the card shows above its buttons
   if (!ap.what) return [h('pre', { class: 'approval-text' }, ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim())]
@@ -2258,7 +2278,7 @@ function drawNav () {
   if (INSTALL && !installed()) ver.append(h('button', { type: 'button', class: 'update', onclick: installApp }, icon('app-window'), 'Install as an app'))
   const todo = agentsOn().filter((a) => ['login', 'stuck'].includes(statusOf(a))).length + S.connectors.filter((c) => c.broken).length + (S.events.unseen ? 1 : 0)
   const unread = Object.values(NOTES.unread).reduce((x, y) => x + y, 0)
-  const waiting = agentsOn().filter((a) => waitingOf(a.name)).length
+  const waiting = agentsOn().filter(askingOf).length
   document.title = todo + unread + waiting ? `(${todo + unread + waiting}) cage` : 'cage'
   document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
@@ -2286,14 +2306,18 @@ function render (force) {
   document.body.classList.remove('is-locked')
   document.body.classList.toggle('unconfigured', !STATE.configured)
   drawNav()
-  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE) + (page === 'home' ? JSON.stringify([ACTIVITY, ANSWERED]) : '')
+  // (Home shows what each agent is doing: not "today", which changes with every message and would only take the focus)
+  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE) + (page === 'home' ? JSON.stringify([Object.entries(ACTIVITY).map(([a, x]) => [a, x.pending, x.working, x.last]), ANSWERED]) : '')
   const main = document.getElementById('main')
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields
   if (!force && main.contains(document.activeElement) && typing(document.activeElement) && main.dataset.page === page) return
   const kept = main.dataset.page === page ? formState(main) : null
   const was = main.contains(document.activeElement) ? document.activeElement : null
-  const focused = was && was.getAttribute('aria-label')   // a switch, say
+  // what has the focus, to give it back: by its label (a switch, Allow for one agent), or a link by where it goes and
+  // what it says (an agent's Chat)
+  const keyOf = (el) => el.getAttribute('aria-label') || (el.tagName === 'A' ? el.getAttribute('href') + '\n' + el.textContent : '')
+  const focused = was && keyOf(was)
   const onHead = !!was && was.tagName === 'H1'   // the page's heading, where arriving put it
   document.body.classList.toggle('in-setup', page === 'setup')
   const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
@@ -2305,7 +2329,7 @@ function render (force) {
   main.replaceChildren(fn())
   ARRIVED = false
   if (kept) keepForm(main, kept)
-  if (same && focused) { const el = main.querySelector(`[aria-label="${CSS.escape(focused)}"]`); if (el) el.focus({ preventScroll: true }) }
+  if (same && focused) { const el = [...main.querySelectorAll('[aria-label], a[href]')].find((x) => keyOf(x) === focused); if (el) el.focus({ preventScroll: true }) }
   if (!same) window.scrollTo(0, 0)
   // On arriving at a page (not on a redraw), focus goes to its heading: a screen reader says where you are, and Tab
   // goes on from there. Not from under a side panel or a question that's open. A redraw keeps it there (it draws a new
