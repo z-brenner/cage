@@ -349,15 +349,21 @@ class Activity(unittest.TestCase):
 
     def test_answered(self):
         """As cc-connect reads it: a perm: button, a message with "yes", "no" or "allow all" in it (or their Chinese),
-        or a command that ends the turn; anything else, and the approval still waits."""
+        a command that ends the turn or starts its session afresh, or cc-connect restarted (it forgets what it waited
+        for, and the relay registers with it again); anything else, and the approval still waits."""
         for after in ({"t": "action", "action": "perm:deny"}, {"t": "you", "text": "no, wait"}, {"t": "you", "text": "OK, send it."},
                       {"t": "you", "text": "@bot allow all"}, {"t": "you", "text": "好的"}, {"t": "you", "text": "/stop"},
-                      {"t": "you", "text": "/new client call"}, {"t": "action", "action": "act:/stop"}):
+                      {"t": "you", "text": "/new client call"}, {"t": "action", "action": "act:/stop"},
+                      {"t": "status", "connected": True}, {"t": "you", "text": "/model opus"}, {"t": "you", "text": "/cd ~/other"},
+                      {"t": "you", "text": "/provider switch work"}, {"t": "action", "action": "cmd:/reasoning high"}):
             self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
             self.assertIsNone(server.activity(self.chat, 0)["pending"], after)
         for after in ({"t": "you", "text": "What's in the email?"}, {"t": "you", "text": "know what? not now", "files": [{"name": "a.pdf"}]},
                       {"t": "you", "text": "/help"}, {"t": "you", "text": "/reset"}, {"t": "action", "action": "nav:/help"},
-                      {"t": "you", "text": ["no"]}, {"t": "you"}, {"t": "reply", "text": "⚠️ Waiting for permission response."}):
+                      {"t": "you", "text": ["no"]}, {"t": "you"}, {"t": "reply", "text": "⚠️ Waiting for permission response."},
+                      {"t": "status", "connected": False}, {"t": "status", "connected": "yes"}, {"t": "you", "text": "/model"},
+                      {"t": "you", "text": "/provider list"},
+                      {"t": "you", "text": "/stop", "files": [{"name": "a.png", "mime": "image/png"}]}):   # (with a picture: no command)
             self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
             self.assertEqual(server.activity(self.chat, 0)["pending"], {"text": "May I?", "at": 7}, after)
 
@@ -379,6 +385,12 @@ class Activity(unittest.TestCase):
         a = server.activity(self.chat, 0)
         self.assertEqual((a["pending"], a["typing"], a["last"]), (None, None, {"t": "card", "text": "", "at": 0}))
         self.assertEqual(a["today"], {"asked": 0, "answers": 1, "files": 0})
+        # times a browser can't read (json writes Infinity and NaN, which aren't JSON) or that make no sense: none
+        self.write({"t": "buttons", "text": "May I?", "buttons": Activity.PERM, "at": float("inf")}, {"t": "typing", "on": True, "at": float("nan")},
+                   {"t": "reply", "text": "hi", "at": float("-inf")}, b'{"t": "file", "name": "a.md", "at": 1e400}', {"t": "card", "at": 10 ** 400})
+        a = server.activity(self.chat, 0)
+        self.assertEqual((a["pending"]["at"], a["typing"], a["last"]["at"]), (0, None, 0))
+        json.dumps(a, allow_nan=False)   # (no Infinity or NaN left in what goes to the page)
 
     def test_only_the_end(self):
         """Only the end of a long log is read, from the start of a whole line."""
