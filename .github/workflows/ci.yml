@@ -42,7 +42,7 @@ jobs:
       - name: privacy mask
         run: test/mask.sh
       - name: "adapter rules (node): WhatsApp, and the app's chat relay"
-        run: node --test test/whatsapp.test.mjs test/app.test.mjs
+        run: node --test test/whatsapp.test.mjs test/app.test.mjs test/relay.test.mjs
       - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
         run: |
           curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/cc-connect.tgz" \

@@ -2,7 +2,7 @@
 //   node --test test/app.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionKey, sessionOf, safeName, buttonsOf, entryOf, inWork, apiAllowed } from '../guest/app.mjs'
+import { sessionKey, sessionOf, safeName, sharedName, buttonsOf, entryOf, inWork, apiAllowed, CAPABILITIES, handles } from '../guest/app.mjs'
 
 test('sessions: the chat, or a named side conversation; nothing else gets in', () => {
   assert.equal(sessionKey('you'), 'app:you:you')
@@ -56,4 +56,24 @@ test("cc-connect's management API: only scheduled tasks and status", () => {
   assert.ok(!apiAllowed('GET', '/api/v1/config'))
   assert.ok(!apiAllowed('PUT', '/api/v1/cron'))
   assert.ok(!apiAllowed('GET', '/api/v1/cron/../config'))
+})
+
+test('every kind of message the relay handles is declared to cc-connect', () => {
+  // cc-connect v1.5.0 (platform/bridge/bridge.go) sends these only to an adapter that registered the capability
+  const needs = { buttons: 'buttons', card: 'card', update_message: 'update_message', preview_start: 'preview',
+    delete_message: 'delete_message', typing_start: 'typing', typing_stop: 'typing', audio: 'audio', video: 'video',
+    image: 'image', file: 'file' }
+  for (const [type, cap] of Object.entries(needs)) {
+    if (handles(type)) assert.ok(CAPABILITIES.includes(cap), `the relay handles ${type} but doesn't declare ${cap}`)
+  }
+  for (const type of ['reply', 'video', 'preview_start', 'image']) assert.ok(handles(type), type)
+  assert.ok(!handles('something_new'))
+})
+
+test('shared file names: the app strips exactly the <ms>-<rand>- prefix and gets the whole name back', () => {
+  const rel = sharedName('q3-results.txt')
+  assert.match(rel, /^files\/\d{13}-[0-9a-f]{4}-q3-results\.txt$/)
+  assert.equal(rel.slice(6).replace(/^\d+-[0-9a-z]{1,8}-/, ''), 'q3-results.txt')       // host/ui/server.py today
+  assert.equal(rel.slice(6).replace(/^\d{10,}-[0-9a-z]{2,8}-/, ''), 'q3-results.txt')   // and its stricter form
+  assert.match(sharedName('../../etc/passwd'), /-passwd$/)
 })
