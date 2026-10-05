@@ -16,6 +16,10 @@ function encode (op, payload) { // server frames go unmasked
   return Buffer.concat([head, payload])
 }
 
+// Node flags for the adapters under test: they use Node 22's own WebSocket (the VM has Node 22), which Node 20
+// keeps behind a flag, so the tests also run where the test machine's Node is older.
+export const nodeFlags = typeof globalThis.WebSocket === 'function' ? [] : ['--experimental-websocket']
+
 export const until = async (fn, ms = 5000, what = 'a condition') => {
   const end = Date.now() + ms
   for (;;) {

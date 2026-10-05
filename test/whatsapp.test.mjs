@@ -9,7 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { accept, textOf, audioOf, digits, toWhatsApp, sinceOf, Backlog } from '../guest/whatsapp.mjs'
-import { fakeBridge, until } from './fixtures/fake-bridge.mjs'
+import { fakeBridge, nodeFlags, until } from './fixtures/fake-bridge.mjs'
 
 const me = { pn: '15550001111@s.whatsapp.net', lid: '987654321@lid' }
 const base = { mode: 'spare', allow: ['15552223333'], me, sent: new Set(), since: 1000, mark: '[•|•] Claude:' }
@@ -105,6 +105,7 @@ async function adapter (t, { ack = true, state, pair } = {}) {
   if (pair) fs.writeFileSync(path.join(dir, 'pair'), pair)
   const bridge = await fakeBridge({ ack })
   const child = fork(path.join(app, 'adapter.mjs'), [], {
+    execArgv: nodeFlags,
     env: { PATH: process.env.PATH, WA_DIR: dir, WA_MODE: 'spare', WA_ALLOW: '15552223333', WA_NAME: 'Claude',
       WA_BRIDGE_URL: bridge.url, WA_BRIDGE_TOKEN: 'tok123' },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc']

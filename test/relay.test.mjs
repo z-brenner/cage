@@ -9,7 +9,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fakeBridge, until } from './fixtures/fake-bridge.mjs'
+import { fakeBridge, nodeFlags, until } from './fixtures/fake-bridge.mjs'
 
 const APP = fileURLToPath(new URL('../guest/app.mjs', import.meta.url))
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -30,7 +30,7 @@ async function relay (t, { ack = true, mgmt, before = () => {} } = {}) {
   for (const d of [work, ...['in', 'out', 'files'].map((s) => path.join(dir, s))]) fs.mkdirSync(d, { recursive: true })
   before(dir, work)
   const bridge = await fakeBridge({ ack })
-  const child = spawn(process.execPath, [APP], {
+  const child = spawn(process.execPath, [...nodeFlags, APP], {
     env: { PATH: process.env.PATH, APP_DIR: dir, APP_WORK: work, APP_TOKEN: 'abc123', APP_BRIDGE_URL: bridge.url, APP_MGMT_URL: mgmt },
     stdio: ['ignore', 'pipe', 'pipe']
   })
