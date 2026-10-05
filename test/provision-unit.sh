@@ -157,13 +157,14 @@ ok "cage-browser says the browser is still being set up until it's ready, then s
 
 # --- cc-connect: checked against its SHA-256 (pinned, or the release's own list for other versions) ----------------
 case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
+export arch
 mkdir -p "$T/pkg"
 printf '#!/bin/sh\necho cc-connect stub\n' > "$T/pkg/cc-connect-v9.9.9-linux-$arch"
 chmod +x "$T/pkg/cc-connect-v9.9.9-linux-$arch"
 tar -czf "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" -C "$T/pkg" "cc-connect-v9.9.9-linux-$arch"
 cp "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" "$T/www/cc-connect-v1.5.0-linux-$arch.tar.gz"   # not v1.5.0's real file
-cc() { # cc <version>
-  CC_CONNECT_VERSION="$1" CACHED=1 CC_CONNECT_BIN="$T/cc-connect"
+cc() { # cc <version> [1: as `cage update`]
+  CC_CONNECT_VERSION="$1" CACHED=1 REFRESH="${2:-0}" CC_CONNECT_BIN="$T/cc-connect"
   mkdir -p "$CACHE"
   install_cc_connect
 }
@@ -183,6 +184,40 @@ echo "0000000000000000000000000000000000000000000000000000000000000000  cc-conne
 cp "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" "$T/www/cc-connect-v9.9.8-linux-$arch.tar.gz"
 if lib cc v9.9.8; then fail "a cc-connect that doesn't match its release's checksums.txt was installed: $(shown)"; fi
 ok "cc-connect: a download that doesn't match its checksum is refused; the cached copy is checked before each use"
+
+# A version cage hasn't pinned: the cache's copy of its checksum only catches damage, so `cage update` asks again
+mkdir -p "$T/evil"
+printf '#!/bin/sh\necho EVIL\n' > "$T/evil/cc-connect-v9.9.9-linux-$arch"
+chmod +x "$T/evil/cc-connect-v9.9.9-linux-$arch"
+tar -czf "$T/cache/cc-connect-v9.9.9-linux-$arch.tar.gz" -C "$T/evil" "cc-connect-v9.9.9-linux-$arch"
+sha256sum "$T/cache/cc-connect-v9.9.9-linux-$arch.tar.gz" | cut -d' ' -f1 > "$T/cache/cc-connect-v9.9.9-linux-$arch.tar.gz.sha256"
+echo "$(sha256sum "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" | cut -d' ' -f1)  cc-connect-v9.9.9-linux-$arch.tar.gz" > "$T/www/checksums.txt"
+lib cc v9.9.9 1 || fail "cage update with a changed cache: $(shown)"
+[ "$("$T/cc-connect")" = "cc-connect stub" ] && grep -q '^curl .*/v9.9.9/checksums.txt' "$T/calls" \
+  || fail "cage update trusted the cache's own checksum of an unpinned version: $(shown)"
+ok "cc-connect: for a version cage hasn't pinned, cage update checks against the release again, not the cache's copy"
+
+# What older cage kept in the cache: the binary itself. Used when it's the published one (no network needed to wake
+# up), refused when it isn't. Here v7.7.7 is "pinned" to the stub's tarball and binary.
+pinned() { # pinned <stub: the published binary, or what else the cached one says>
+  cc_connect_sha256() {
+    if [ "${3:-}" = binary ]; then sha256sum "$T/pkg/cc-connect-v9.9.9-linux-$2"; else sha256sum "$T/www/cc-connect-v9.9.9-linux-$2.tar.gz"; fi | cut -d' ' -f1
+  }
+  if [ "$1" = stub ]; then cp "$T/pkg/cc-connect-v9.9.9-linux-$arch" "$T/cache/cc-connect-v7.7.7-linux-$arch"
+  else printf '#!/bin/sh\necho %s\n' "$1" > "$T/cache/cc-connect-v7.7.7-linux-$arch"; fi
+  cc v7.7.7
+}
+export -f pinned
+cp "$T/www/cc-connect-v9.9.9-linux-$arch.tar.gz" "$T/www/cc-connect-v7.7.7-linux-$arch.tar.gz"
+lib pinned stub || fail "the binary an older cage cached: $(shown)"
+[ "$("$T/cc-connect")" = "cc-connect stub" ] && ! grep -q '^curl' "$T/calls" || fail "the published binary in the cache wasn't used as it is: $(shown)"
+rm -f "$T/cc-connect"
+lib pinned EVIL || fail "a changed binary in the cache: $(shown)"
+[ "$("$T/cc-connect")" = "cc-connect stub" ] && grep -q "^curl .*/v7.7.7/cc-connect-v7.7.7-linux-$arch.tar.gz" "$T/calls" \
+  || fail "a changed binary in the cache was used: $(shown)"
+[ ! -e "$T/cache/cc-connect-v7.7.7-linux-$arch" ] && [ -e "$T/cache/cc-connect-v7.7.7-linux-$arch.tar.gz" ] \
+  || fail "the checked tarball should replace the old binary: $(ls "$T/cache")"
+ok "cc-connect: the binary an older cage cached is used offline when it's the published one, and replaced when it isn't"
 
 # --- CAGE_APT_MIRROR: Ubuntu's archive from that mirror first; security updates as before -----------------------------
 mirror() {
