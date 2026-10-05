@@ -589,6 +589,31 @@ ok "chat folders: a link or file the VM puts in place of in/, out/ or files/ is 
   grep -q 'the note as shown' "$N/swap.md" && ! grep -q 'swapped in later' "$N/swap.md" || fail "kept something other than what was shown: $(cat "$N/swap.md")" )
 ok "memory review: links in the inbox removed unread, invisible characters taken out, what you see is what's kept"
 
+# links cage opens (a sign-in link comes from an app's own server): only plain web addresses, and on Windows the
+# address reaches PowerShell as data, never inside its code
+( fresh o
+  mkdir -p "$T/obin"
+  printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$*" "$CAGE_URL" >> "%s/opened.log"\n' "$T" > "$T/obin/powershell.exe"
+  printf '#!/bin/sh\nprintf "xdg-open %%s\\n" "$1" >> "%s/opened.log"\n' "$T" > "$T/obin/xdg-open"
+  chmod +x "$T/obin/powershell.exe" "$T/obin/xdg-open"
+  export PATH="$T/obin:$PATH"
+  for u in "https://auth.evil.example/authorize’; Add-Content -Path $T/pwned -Value x; ‘?a=1" 'C:\Windows\System32\calc.exe' \
+           'file:///etc/passwd' "https://x.example/a'b" 'https://x.example/a"b' 'https://x.example/a`b' 'https://x.example/a b'; do
+    if WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open "$u" 2>>"$T/o.err"; then fail "opened on Windows: $u"; fi
+    if DISPLAY=:0 "$ROOT/cage" _open "$u" 2>>"$T/o.err"; then fail "opened with xdg-open: $u"; fi
+  done
+  grep -q "isn't a plain web address" "$T/o.err" || fail "no warning for a refused link: $(cat "$T/o.err")"
+  WSL_DISTRO_NAME=Ubuntu "$ROOT/cage" _open 'https://example.com/a?b=1&c=(2)' 2>/dev/null
+  DISPLAY=:0 "$ROOT/cage" _open 'https://example.com/x' 2>/dev/null
+  for _ in $(seq 50); do [ "$(wc -l < "$T/opened.log" 2>/dev/null || echo 0)" -ge 2 ] && break; sleep 0.1; done
+  grep -qxF -- '-NoProfile -Command Start-Process $env:CAGE_URL|https://example.com/a?b=1&c=(2)' "$T/opened.log" \
+    && grep -qxF 'xdg-open https://example.com/x' "$T/opened.log" && [ "$(wc -l < "$T/opened.log")" = 2 ] \
+    || fail "links opened: $(cat "$T/opened.log")"
+  [ ! -e "$T/pwned" ] || fail "something in a link ran"
+  out="$(env -u DISPLAY -u WAYLAND_DISPLAY "$ROOT/cage" _open 'https://example.com/y' 2>&1)"
+  grep -qF 'Open this link: https://example.com/y' <<<"$out" || fail "nothing to open it with, and the link wasn't shown: $out" )
+ok "opening links: plain web addresses only; on Windows passed to PowerShell as data; shown when nothing can open them"
+
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
 mkdir -p "$T/wslroot" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$T/wslroot/"

@@ -712,6 +712,8 @@ memory_open() {
   brain_init
   if is_wsl && command -v wslpath >/dev/null 2>&1 && e="$(win_cmd explorer.exe)"; then
     "$e" "$(wslpath -w "$d")" >/dev/null 2>&1 || true   # explorer.exe exits 1 even when it worked
+  elif [ "$(uname -s)" = Darwin ]; then
+    open "$d" >/dev/null 2>&1 || true
   elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$d" >/dev/null 2>&1 &
   fi
@@ -1287,11 +1289,24 @@ api() {
   } | curl -sS -m 30 -K -
 }
 
+# A link cage opens can come from someone else (an app's sign-in server names its own sign-in page), so only a
+# plain web address is opened: http(s), visible ASCII, no quotes or backslashes, nothing a shell or PowerShell
+# could read as code, and nothing that opens a program instead of a page.
+url_ok() {
+  local LC_ALL=C
+  [[ "$1" =~ ^https?://[!-~]+$ ]] || return 1
+  case "$1" in *[\'\"\`\\]*) return 1 ;; esac
+}
+
 open_url() { # best effort: open a link in the user's browser
   [ "$UI" = 1 ] || return 0
+  url_ok "$1" || { warn "cage didn't open a link that isn't a plain web address (https://…)"; return 1; }
   if is_wsl && win_cmd powershell.exe >/dev/null; then
-    "$(win_cmd powershell.exe)" -NoProfile -Command "Start-Process '${1//\'/\'\'}'" >/dev/null 2>&1 &
-  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1 &
+    # The address reaches PowerShell as data (an environment variable), never inside the code it runs.
+    CAGE_URL="$1" WSLENV="CAGE_URL${WSLENV:+:$WSLENV}" "$(win_cmd powershell.exe)" -NoProfile -Command 'Start-Process $env:CAGE_URL' >/dev/null 2>&1 &
+  elif [ "$(uname -s)" = Darwin ]; then open "$1" >/dev/null 2>&1 &
+  elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1 &
+  else say "Open this link: $1"
   fi
   return 0
 }
