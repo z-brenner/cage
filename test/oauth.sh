@@ -39,9 +39,9 @@ class H(http.server.BaseHTTPRequestHandler):
                     "deny": f"{base}/authorize-deny"}[name]
             return self.j(200, {"issuer": f"{base}/{name}", "authorization_endpoint": auth, "token_endpoint": f"{base}/token",
                                 "registration_endpoint": f"{base}/register"})
-        if u.path == "/authorize-deny":   # the server says no, with HTML in its words
+        if u.path == "/authorize-deny":   # the server says no, with HTML and terminal codes (OSC 52: your clipboard) in its words
             self.send_response(302); self.send_header("Location", q["redirect_uri"] + "?" + urllib.parse.urlencode(
-                {"error": "access_denied", "error_description": "<img src=x onerror=alert(1)>no", "state": q["state"]}))
+                {"error": "access_denied", "error_description": "<img src=x onerror=alert(1)>no\x1b]52;c;cHduZWQ=\x07\x1b[2J", "state": q["state"]}))
             self.send_header("Content-Length", "0"); self.end_headers(); return
         if u.path == "/.well-known/oauth-authorization-server":
             return self.j(200, {"issuer": base, "authorization_endpoint": f"{base}/authorize", "token_endpoint": f"{base}/token",
@@ -134,9 +134,10 @@ done
 rm -f "$T/page.html"
 if CAGE_OPEN="$T/browser" python3 "$ROOT/host/mcp_oauth.py" login "$T/evil.json" "https://127.0.0.1:$port/deny/mcp" "$T/evil.token" \
      </dev/null 2>"$T/evil.err"; then fail "a refused sign-in counted as signed in"; fi
-grep -q 'sign-in refused' "$T/evil.err" || fail "refusal: $(cat "$T/evil.err")"
+grep -q 'sign-in refused: <img src=x onerror=alert(1)>no]52;c;cHduZWQ=\[2J$' "$T/evil.err" || fail "refusal: $(cat -v "$T/evil.err")"
+if LC_ALL=C grep -q $'\e' "$T/evil.err"; then fail "the server's terminal codes reached the terminal: $(cat -v "$T/evil.err")"; fi
 grep -qF '&lt;img src=x onerror=alert(1)&gt;no' "$T/page.html" && ! grep -q '<img' "$T/page.html" || fail "the error page ran the server's HTML: $(cat "$T/page.html")"
-ok "hostile sign-in servers: only plain https addresses are opened or contacted; their words are shown as text"
+ok "hostile sign-in servers: only plain https addresses are opened or contacted; their words are shown as text, without codes"
 
 # --- through cage: `cage connect add NAME URL` notices the sign-in, keeps the token as a secret, renews it on `up`
 # and swaps the renewed token into running VMs (msb modify), without a restart

@@ -12,7 +12,7 @@ short-lived access token is handed on, as a microsandbox secret, so the VMs see 
                                                             (default 900): exit 0 refreshed, 3 still fresh
 Standard library only. CAGE_OPEN is the command that opens a URL in the user's browser.
 """
-import base64, hashlib, html, http.server, json, os, secrets, select, shlex, subprocess, sys, threading, time
+import base64, hashlib, html, http.server, json, os, secrets, select, shlex, subprocess, sys, threading, time, unicodedata
 import urllib.error, urllib.parse, urllib.request
 
 UA = "cage (+https://github.com/z-brenner/cage)"
@@ -20,6 +20,12 @@ UA = "cage (+https://github.com/z-brenner/cage)"
 
 def say(msg):
     print(msg, file=sys.stderr, flush=True)
+
+
+def plain(text, n=300):
+    """The sign-in server's own words, for the terminal: text only, without control or format characters (an escape
+    sequence there could set your clipboard or redraw the screen)."""
+    return "".join(c for c in str(text or "") if unicodedata.category(c) not in ("Cc", "Cf"))[:n]
 
 
 def url_ok(url):
@@ -243,7 +249,7 @@ def login(state_path, mcp_url, token_out):
     if result.get("state") != state_tag:
         raise SystemExit("the sign-in came back with the wrong state; try again")
     if "code" not in result:
-        raise SystemExit(f"sign-in refused: {result.get('error_description') or result.get('error')}")
+        raise SystemExit(f"sign-in refused: {plain(result.get('error_description') or result.get('error'))}")
     tok = token_request(asm, {"grant_type": "authorization_code", "code": result["code"], "redirect_uri": redirect,
                               "code_verifier": verifier, "resource": resource}, client)
     state = {"mcp_url": mcp_url, "resource": resource, "token_endpoint": asm["token_endpoint"],
