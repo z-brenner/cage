@@ -268,10 +268,12 @@ tg_call() { # tg_call <token> <method> <curl config line>...: for form fields an
 }
 
 bot_username() { # prints the bot's username for a working token; fails otherwise
-  local r
+  local r u
   r="$(tg_api "$1" getMe 2>/dev/null)" || return 1
   [[ "$r" == *'"ok":true'* ]] || return 1   # no `| grep -q`: under pipefail its early exit can SIGPIPE the writer
-  printf '%s' "$r" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p'
+  u="$(printf '%s' "$r" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')"
+  [[ "$u" =~ ^[A-Za-z0-9_]{5,32}$ ]] || return 1   # Telegram's own rule; it's saved and shown, so nothing else
+  printf '%s' "$u"
 }
 
 # Gives a new bot its face (the agent's avatar) and a hello. Best effort: a failure here never stops setup.
@@ -378,15 +380,34 @@ make_managed_bot() { # make_managed_bot <agent>: one tap creates the agent's bot
 
 conf_get() { sed -n "/^$2=/{s/^$2=//p;q;}" "$1" 2>/dev/null || true; }   # conf_get <file> <key>: its first value
 
-# Upserts KEY="VALUE" in the env file. Callers validate VALUE, so it never needs escaping.
-set_env() {
-  local tmp="$CAGE_ENV.tmp.$$"
-  (
+# The env file is sourced as shell code, so what's saved there can never carry any: a value with a quote, $, `, a
+# backslash or a line break is refused (callers check values too, those from a chat service's API above all).
+# Several cage commands can change settings at once (the web app runs them side by side), so writers take turns
+# (a lock folder, which works on macOS too), and each writes a temp file next to it and moves it into place.
+env_edit() { # env_edit <set NAME VALUE | unset NAME...>
+  local lock="$CAGE_ENV.lock" i=0 holder
+  until mkdir "$lock" 2>/dev/null; do
+    # a cage that died while holding it, or anything holding it for over 10 s, loses it
+    holder="$(cat "$lock/pid" 2>/dev/null || true)"
+    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || [ $i -ge 100 ]; then rm -rf "$lock"; i=0; continue; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  ( trap 'rm -rf "$lock"' EXIT
     umask 077
-    { grep -v "^$1=" "$CAGE_ENV" || true; } > "$tmp"
-    printf '%s="%s"\n' "$1" "$2" >> "$tmp"
-    mv "$tmp" "$CAGE_ENV"
-  )
+    echo $$ > "$lock/pid"
+    local mode="$1" tmp n pat=()
+    shift
+    if [ "$mode" = set ]; then pat=(-e "^$1="); else for n in "$@"; do pat+=(-e "^$n="); done; fi
+    tmp="$(mktemp "$CAGE_ENV.XXXXXX")"
+    { grep -v "${pat[@]}" "$CAGE_ENV" || true; } > "$tmp"
+    if [ "$mode" = set ]; then printf '%s="%s"\n' "$1" "$2" >> "$tmp"; fi
+    mv "$tmp" "$CAGE_ENV" )
+}
+env_name_ok() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
+set_env() { # set_env NAME VALUE: upserts NAME="VALUE" in the env file
+  env_name_ok "$1" || die "refusing to save a setting called \"$1\""
+  case "$2" in *[\"\$\`\\]*|*$'\n'*) die "refusing to save an unexpected value for $1" ;; esac
+  env_edit set "$1" "$2"
 }
 
 prompt() { # prompt <message> <varname> [secret]
@@ -1273,6 +1294,7 @@ slack_bot_ok() { [[ "$1" =~ ^xoxb-[A-Za-z0-9-]{10,}$ ]]; }
 slack_app_ok() { [[ "$1" =~ ^xapp-[A-Za-z0-9-]{10,}$ ]]; }
 discord_token_ok() { [[ "$1" =~ ^[A-Za-z0-9_-]{18,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{20,}$ ]]; }
 ids_ok() { [ "$1" = "*" ] || [[ "$1" =~ ^[A-Za-z0-9]+(,[A-Za-z0-9]+)*$ ]]; }
+id_ok() { [[ "$1" =~ ^[A-Za-z0-9]{1,40}$ ]]; }   # one user id, as a chat service's API names it
 agent_hex() { case "$1" in claude) echo "#d97757" ;; codex) echo "#10a37f" ;; cursor) echo "#3b82f6" ;; *) echo "#8b5cf6" ;; esac; }
 jget() { { grep -o "\"$1\": *\"[^\"]*\"" || true; } | head -n 1 | sed 's/.*: *"\(.*\)"$/\1/'; }   # first string value
 jnum() { { grep -o "\"$1\": *[0-9]*" || true; } | head -n 1 | sed 's/.*: *//'; }                  # first number value
@@ -1376,7 +1398,7 @@ chat_add_slack() {
     prompt "your email in Slack, so only you can use it: " email
     r="$(api GET "$SLACK_API/users.lookupByEmail?email=$(urlencode "$email")" "Bearer $bt" 2>/dev/null || true)"
     uid="$(printf '%s' "$r" | jget id)"
-    [[ "$r" == *'"ok":true'* && -n "$uid" ]] && break
+    [[ "$r" == *'"ok":true'* ]] && id_ok "$uid" && break
     warn "no one in ${team:-the workspace} has that email; try again"
   done
   allow="$uid"
@@ -1390,7 +1412,7 @@ chat_add_slack() {
         for e in ${who//,/ }; do
           r="$(api GET "$SLACK_API/users.lookupByEmail?email=$(urlencode "$e")" "Bearer $bt" 2>/dev/null || true)"
           id="$(printf '%s' "$r" | jget id)"
-          if [[ "$r" == *'"ok":true'* && -n "$id" ]]; then allow="$allow,$id"; else warn "skipped $e (not found)"; fi
+          if [[ "$r" == *'"ok":true'* ]] && id_ok "$id"; then allow="$allow,$id"; else warn "skipped $e (not found)"; fi
         done ;;
     esac
   fi
@@ -1421,6 +1443,7 @@ chat_add_discord() {
   name="$(printf '%s' "$r" | jget name)"
   owner="$(printf '%s' "$r" | jget owner_user_id)"   # team-owned apps name their owner here
   [ -n "$owner" ] || owner="$(printf '%s' "$r" | { grep -o '"owner": *{[^}]*}' || true; } | jget id)"
+  [[ "$owner" =~ ^[0-9]{1,20}$ ]] || die "Discord didn't say who owns that app in a way cage expects; nothing was saved"
   flags="$(printf '%s' "$r" | jnum flags)"
   # cc-connect reads message text, which needs the Message Content intent: switch it on for the bot ourselves.
   if (( (${flags:-0} & (1 << 18 | 1 << 19)) == 0 )); then
@@ -1557,10 +1580,10 @@ chat_add() { # chat_add <slack|discord|whatsapp> [agent]
 }
 
 unset_env() { # unset_env <name>...: drops lines from the env file
-  local tmp="$CAGE_ENV.tmp.$$" n
-  ( umask 077; cp "$CAGE_ENV" "$tmp"
-    for n in "$@"; do grep -v "^$n=" "$tmp" > "$tmp.2" || true; mv "$tmp.2" "$tmp"; done
-    mv "$tmp" "$CAGE_ENV" )
+  local n
+  [ $# -gt 0 ] || return 0
+  for n in "$@"; do env_name_ok "$n" || die "refusing to change a setting called \"$n\""; done
+  env_edit unset "$@"
 }
 
 chat_rm() { # chat_rm <slack|discord> <agent>

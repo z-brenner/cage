@@ -13,8 +13,9 @@ ok() { pass=$((pass + 1)); echo "ok - $*"; }
 
 # --- mock Telegram Bot API: tokens "<n>:GOOD<x>" are valid; one pending message from user 4242
 cat > "$T/mock.py" <<'PY'
-import http.server, json, re, sys
+import http.server, json, os, re, sys
 log = open(sys.argv[2], "a")
+PWN = "$(touch " + os.environ["PWNED"] + ")"   # what a hostile service puts in an id or a name
 OWNER = {"id": 4242, "is_bot": False, "first_name": "Zack"}
 MANAGED = [{"update_id": 900 + i, "managed_bot": {"user": OWNER, "bot": {"id": bid, "is_bot": True, "first_name": n, "username": u}}}
            for i, (bid, n, u) in enumerate([(1001, "Claude", "dot_claude_bot"), (1002, "Codex", "dot_codex_bot")])]
@@ -32,7 +33,7 @@ class H(http.server.BaseHTTPRequestHandler):
             ok = self.auth().startswith("Bearer xapp-GOOD")
             return self.reply(200, {"ok": True, "url": "wss://x"} if ok else {"ok": False, "error": "invalid_auth"})
         if method == "users.lookupByEmail":
-            uid = {"zack%40acme.com": "U0ZACK", "amy%40acme.com": "U0AMY"}.get(self.path.split("email=")[-1])
+            uid = {"zack%40acme.com": "U0ZACK", "amy%40acme.com": "U0AMY", "evil%40acme.com": "U0EVIL" + PWN}.get(self.path.split("email=")[-1])
             return self.reply(200, {"ok": True, "user": {"id": uid, "name": "x"}} if uid else {"ok": False, "error": "users_not_found"})
         self.reply(404, {"ok": False})
     def discord(self, body):  # Discord REST: tokens with GOOD in them work; replies spaced like Discord's
@@ -42,6 +43,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(401, {"message": "401: Unauthorized", "code": 0}, spaced=True)
         if path == "/applications/@me" and self.command == "PATCH":
             DISCORD_APP["flags"] = json.loads(body)["flags"]
+        if path == "/applications/@me" and "HOSTILE" in self.auth():
+            return self.reply(200, dict(DISCORD_APP, owner={"id": "4242" + PWN}), spaced=True)
         if path == "/applications/@me":
             return self.reply(200, DISCORD_APP, spaced=True)
         if path == "/users/@me/guilds":
@@ -71,7 +74,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
         if method == "getMe":
             name = token.split(":GOOD")[1] or "x"
-            return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot", "username": "dot_" + name + "_bot",
+            return self.reply(200, {"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "Dot",
+                                                           "username": "dot" + PWN + "_bot" if name == "evil" else "dot_" + name + "_bot",
                                                            "can_manage_bots": name == "mgr"}})
         if method == "getUpdates" and "allowed_updates" in self.path:  # the manager bot: one managed_bot update per tap
             offset = int((re.search(r"offset=(\d+)", self.path) or [0, 0])[1])
@@ -99,7 +103,7 @@ s = http.server.HTTPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(s.server_port))
 s.serve_forever()
 PY
-python3 "$T/mock.py" "$T/port" "$T/requests.log" &
+PWNED="$T/PWNED" python3 "$T/mock.py" "$T/port" "$T/requests.log" &
 MOCK_PID=$!
 for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
 [ -s "$T/port" ] || fail "mock server did not start"
@@ -284,5 +288,23 @@ out="$(cage chat 2>&1)"; grep -q 'codex .*WhatsApp (your own number)' <<<"$out" 
 cage chat rm whatsapp codex 2>/dev/null && PATH="$T/msbbin:$PATH" cage up codex 2>/dev/null
 [ ! -e "$CAGE_HOME/agents/codex/whatsapp.env" ] && grep -qx '\[bridge\]' "$cx" || fail "whatsapp not removed (or the app's bridge went with it)"
 ok "whatsapp: spare or own number, owner-only, bridge and adapter settings for the VM, removable"
+
+# --- hostile replies from a chat service (or something posing as one): ids and names that would be shell code in
+# cage.env are refused before anything is saved, so nothing ever runs
+( export CAGE_HOME="$T/hostile"
+  cage init 2>/dev/null
+  if printf '%s\n' 'MTAwMDAwMDAwMDAwMDAwMDAw.GOODHOSTILE.cccccccccccccccccccccccccccc' | cage chat add discord claude 2>"$T/h.err"; then
+    fail "saved a Discord app whose owner id is shell code"
+  fi
+  grep -q "who owns that app" "$T/h.err" || fail "unclear refusal: $(cat "$T/h.err")"
+  printf '%s\n' 'xoxb-GOOD-1234567890' 'xapp-GOOD-1234567890' 'evil@acme.com' 'zack@acme.com' | cage chat add slack codex 2>/dev/null \
+    || fail "chat add slack"
+  printf '%s\n' '666:GOODevil' '667:GOODhost' 'y' | cage setup antigravity 2>/dev/null || fail "setup"
+  e="$CAGE_HOME/cage.env"
+  grep -qxF 'CAGE_SLACK_OWNER_codex="U0ZACK"' "$e" && grep -qxF 'CAGE_TELEGRAM_BOT_antigravity="dot_host_bot"' "$e" || fail "hostile replies: $(cat "$e")"
+  if grep -q 'DISCORD\|EVIL\|touch' "$e"; then fail "a hostile value was saved: $(cat "$e")"; fi
+  cage chat >/dev/null 2>&1
+  [ ! -e "$T/PWNED" ] || fail "a command from an API reply ran" )
+ok "hostile chat-service replies: an owner id, a user id or a bot name that would be shell code is never saved"
 
 echo "all $pass setup tests passed"

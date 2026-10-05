@@ -620,6 +620,34 @@ ok "memory review: links in the inbox removed unread, invisible characters taken
   grep -qF 'Open this link: https://example.com/y' <<<"$out" || fail "nothing to open it with, and the link wasn't shown: $out" )
 ok "opening links: plain web addresses only; on Windows passed to PowerShell as data; shown when nothing can open them"
 
+# settings: several cage commands at once (the web app runs them side by side) all keep their change; a value that
+# would be shell code in cage.env is never saved
+( fresh a
+  for round in 1 2 3 4 5; do
+    cp "$ROOT/cage.env.example" "$CAGE_HOME/cage.env"
+    "$ROOT/cage" fallback claude codex </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" approve codex on </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" ask-all on </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" voice off </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" network strict </dev/null >/dev/null 2>&1 &
+    "$ROOT/cage" allow h.example.com antigravity </dev/null >/dev/null 2>&1 &
+    wait
+    for k in CAGE_FALLBACK_claude CAGE_APPROVE_codex CAGE_ASK_ALL CAGE_VOICE CAGE_NETWORK CAGE_ALLOW_HOSTS_antigravity; do
+      [ "$(grep -c "^$k=" "$CAGE_HOME/cage.env")" = 1 ] || fail "round $round: $k lost (or doubled) by writers running at once: $(cat "$CAGE_HOME/cage.env")"
+    done
+  done
+  ! compgen -G "$CAGE_HOME/cage.env.*" >/dev/null || fail "a lock or temp file was left: $(ls -a "$CAGE_HOME")"
+  [ "$(stat -c %a "$CAGE_HOME/cage.env")" = 600 ] || fail "cage.env isn't 0600 any more"
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+  cp "$CAGE_HOME/cage.env" "$T/a.env"
+  for v in 'a"b' 'a$(touch '"$T"'/a.pwned)' 'a`id`' 'a\b' $'a\nCAGE_X=1'; do
+    if bash -c '. "$1" version >/dev/null; set_env CAGE_TEST "$2"' _ "$ROOT/cage" "$v" 2>/dev/null; then fail "saved the value $v"; fi
+  done
+  cmp -s "$CAGE_HOME/cage.env" "$T/a.env" && "$ROOT/cage" status >/dev/null 2>&1 && [ ! -e "$T/a.pwned" ] || fail "an unexpected value got into cage.env"
+  mkdir "$CAGE_HOME/cage.env.lock" && echo 999999 > "$CAGE_HOME/cage.env.lock/pid"   # left by a cage that died
+  timeout 20 "$ROOT/cage" ask-all off </dev/null >/dev/null 2>&1 && grep -q '^CAGE_ASK_ALL="off"' "$CAGE_HOME/cage.env" || fail "a dead cage's lock blocked settings" )
+ok "settings: writers at once all keep their change; values that would be code are refused; a dead writer's lock is taken over"
+
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
 mkdir -p "$T/wslroot" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$T/wslroot/"
