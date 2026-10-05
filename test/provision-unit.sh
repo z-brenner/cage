@@ -141,6 +141,7 @@ done
 ok "the browser's libraries: nothing when nothing is missing, the missing ones (no X server) through apt_install, a plain failure otherwise"
 
 wrapper() {
+  echo "waits ${BROWSER_WAIT}s"
   BROWSER_WRAPPER="$T/cage-browser" BROWSER_READY="$T/ready" BROWSER_WAIT=1
   browser_wrapper
   rm -f "$T/ready"
@@ -152,10 +153,12 @@ wrapper() {
 export -f wrapper
 lib wrapper || fail "cage-browser: $(shown)"
 grep -q 'STARTED BEFORE READY' "$T/out" && fail "cage-browser started before the browser was ready: $(shown)"
+# shorter than the agents' CLIs wait for a tool to start (Codex: 10s), or they give up before the message
+[ "$(sed -n 's/^waits \([0-9]*\)s$/\1/p' "$T/out")" -lt 10 ] || fail "cage-browser waits longer than the agents do: $(shown)"
 grep -qx 'cage-browser: the browser is still being set up; try again in a few minutes' "$T/out" || fail "no plain message: $(shown)"
 grep -q "^node $T/npm/@playwright/mcp/cli.js --headless --no-sandbox --no-webmcp .* --caps vision\$" "$T/calls" \
   || fail "cage-browser's Playwright MCP: $(shown)"
-ok "cage-browser says the browser is still being set up until it's ready, then starts Playwright MCP without WebMCP"
+ok "cage-browser says, within seconds, that the browser is still being set up until it's ready, then starts Playwright MCP without WebMCP"
 
 # --- cc-connect: checked against its SHA-256 (pinned, or the release's own list for other versions) ----------------
 case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac

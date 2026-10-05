@@ -197,7 +197,9 @@ install_antigravity() {
 PLAYWRIGHT_MCP_VERSION="${PLAYWRIGHT_MCP_VERSION:-0.0.83}"
 BROWSER_WRAPPER=/usr/local/bin/cage-browser
 BROWSER_READY=/opt/cage/browser-ready   # guest/browser.sh writes it at each boot, once the browser can start
-BROWSER_WAIT=60
+# Seconds cage-browser waits for it. Only a few: the agents' CLIs wait for their tools before they answer, and give up
+# on one that takes longer than theirs to start (Codex: 10 s), and then the agent never sees the message below.
+BROWSER_WAIT=5
 
 browser_wrapper() { # the browser connector's command, written at provisioning so the agent's CLI always finds it
   cat > "$BROWSER_WRAPPER" <<SH
