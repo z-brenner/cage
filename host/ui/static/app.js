@@ -147,7 +147,7 @@ function hostOf (url) { try { return new URL(url).hostname } catch (e) { return 
 // everything, look like the browser's own warnings, and can't be read out where they belong): a message that goes by
 // itself (role=status), and a small sheet with two answers. The safe answer has the focus, and Esc means it.
 function toast (text, tone) {
-  const t = h('div', { class: 'toast ' + (tone || 'bad') }, icon(tone === 'ok' ? 'circle-check' : 'circle-alert'), h('span', { class: 'grow' }, text),
+  const t = h('div', { class: 'toast ' + (tone || 'bad') }, icon(tone === 'ok' ? 'circle-check' : tone === 'info' ? 'info' : 'circle-alert'), h('span', { class: 'grow' }, text),
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => t.remove() }, icon('x')))
   document.getElementById('toasts').append(t)
   setTimeout(() => t.remove(), 8000)
@@ -1063,6 +1063,110 @@ const STARTERS = [
 ]
 let CHAT = null   // the open chat (one at a time): its element stays put while the page around it is redrawn
 
+// Recipes: ready-made tasks for knowledge work, to run now from the chat or on a schedule. Each says what it needs, as
+// honestly as can be told from here: Zapier connected is no proof that Gmail is added to your Zapier server, so the
+// tile names the apps too. A {blank} is yours to fill in (it's selected for you, and nothing goes until it's filled).
+const RECIPES = [
+  { id: 'briefing', title: 'Morning briefing', blurb: 'Today’s meetings and the emails that need you, before you start.',
+    prompt: 'Give me my morning briefing: today’s meetings (who, when, and what to prepare) and the emails from the last day that need me, most important first. Keep it short, and don’t send or change anything.',
+    schedule: { kind: 'weekdays', time: '07:45' }, needs: ['zapier'], apps: 'Gmail and Google Calendar, through Zapier' },
+  { id: 'triage', title: 'Inbox triage', blurb: 'What needs a reply, what’s for your information, what can wait. With drafts.',
+    prompt: 'Go through my inbox from the last day. Sort it into: needs a reply from me, for my information, and can wait. Write short replies for the first group as drafts in Gmail, but don’t send anything.',
+    schedule: { kind: 'weekdays', time: '12:00' }, needs: ['zapier'], apps: 'Gmail, through Zapier' },
+  { id: 'meetings', title: 'Prep for tomorrow’s meetings', blurb: 'Who’s coming, what it’s about, and what to ask.',
+    prompt: 'Look at tomorrow’s meetings in my calendar. For each one: who’s coming, what it’s about, my recent emails with them, and two or three questions I could ask.',
+    schedule: { kind: 'weekdays', time: '17:00' }, needs: ['zapier'], apps: 'Google Calendar and Gmail, through Zapier' },
+  { id: 'status', title: 'Friday status draft', blurb: 'Your week in five bullets, ready to send.',
+    prompt: 'Draft my weekly status update for {who it’s for}: what I got done this week (from my sent emails and my calendar), what’s next, and anything I’m stuck on. Five bullets at most, and don’t send it.',
+    schedule: { kind: 'weekly', time: '15:00', day: 5 }, needs: ['zapier'], apps: 'Gmail and Google Calendar, through Zapier' },
+  { id: 'contract', title: 'Contract or NDA first pass', blurb: 'The terms that matter and what to push back on.',
+    prompt: 'Read the attached contract. List the parties, the term and renewal, payment, liability caps, termination rights, confidentiality, and anything unusual or one-sided, with the clause numbers. Then say what I should push back on, and why. This is a first pass for me to check, not legal advice.',
+    attach: true, needs: [], apps: 'the contract you attach' },
+  { id: 'news', title: 'News watch on {topic}', blurb: 'The day’s five most important stories, with links.',
+    prompt: 'Look for news from the last day about {topic}. Give me the five most important stories, one line each, with a link to each source. Leave out anything you told me about before.',
+    schedule: { kind: 'daily', time: '08:00' }, needs: ['web'], apps: 'the web' },
+  { id: 'followups', title: 'Follow-ups I owe', blurb: 'What you promised, or still owe a reply on.',
+    prompt: 'Go through the emails I sent and got in the last two weeks. List what I promised to do or still owe a reply on: to whom, what, and since when, the most overdue first. Don’t send anything.',
+    schedule: { kind: 'weekly', time: '09:00', day: 1 }, needs: ['zapier'], apps: 'Gmail, through Zapier' },
+  { id: 'receipts', title: 'Receipts into a spreadsheet', blurb: 'Attach receipts; get back a spreadsheet with totals.',
+    prompt: 'Read the attached receipts and put them in a spreadsheet: date, shop or company, what it was for, amount, currency and tax, with a total for each currency. Send it back to me as a .csv file, which Excel and Google Sheets open.',
+    attach: true, needs: [], apps: 'the receipts you attach (PDFs or photos)' }
+]
+const BLANK = /\{[^{}\n]{1,40}\}/g
+const RECIPE_BLANKS = new Set(RECIPES.flatMap((r) => (r.title + r.prompt).match(BLANK) || []))
+function hasApp (name, agent) { // connected for this agent, and signed in
+  const c = STATE.connectors.find((x) => x.name === name)
+  return !!c && !c.broken && (!c.agents || c.agents === 'all' || c.agents.split(/[ ,]+/).includes(agent))
+}
+// What a recipe may need: an app (for this agent), or the web. Claude Code searches the web on its own; the others
+// read it best with their web browser (Apps).
+const NEEDS = {
+  zapier: { label: 'Zapier', has: (a) => hasApp('zapier', a) },
+  github: { label: 'GitHub', has: (a) => hasApp('github', a) },
+  browser: { label: 'the web browser', has: (a) => hasApp('browser', a) },
+  web: { label: 'the web browser', has: (a) => a === 'claude' || hasApp('browser', a) }
+}
+function blanked (text) { return text.split(/(\{[^{}\n]{1,40}\})/).map((p, i) => i % 2 ? h('mark', { class: 'blank' }, p) : p) }   // {blanks} marked
+function blanksLeft (text) { return (text.match(BLANK) || []).filter((b) => RECIPE_BLANKS.has(b)) }
+function pickBlank (ta) { // select the first blank still to fill in, so typing replaces it; false if there's none
+  const b = blanksLeft(ta.value)[0]
+  if (!b) return false
+  const i = ta.value.indexOf(b)
+  ta.focus()
+  ta.setSelectionRange(i, i + b.length)
+  return true
+}
+function recipeTiles (a, where) { // where: 'chat' (fills in the message) or 'schedule' (adds the task, or fills in the form)
+  return h('div', { class: 'recipes' }, RECIPES.filter((r) => where === 'chat' || r.schedule).map((r) => {
+    const missing = r.needs.filter((n) => !NEEDS[n].has(a.name))
+    const blanks = blanksLeft(r.prompt).length
+    return h('div', { class: 'recipe' },
+      h('b', {}, blanked(r.title)), h('p', {}, r.blurb),
+      h('span', { class: 'small muted' }, 'Uses ' + r.apps + (where === 'schedule' ? ' · ' + cronText(cronOf(r.schedule.kind, r.schedule.time, r.schedule.day)) : '')),
+      missing.length ? h('a', { class: 'btn sm', href: '#apps' }, `Connect ${NEEDS[missing[0]].label} first`) : h('button', {
+        type: 'button', class: 'btn sm', onclick: (e) => useRecipe(a, r, where, e.currentTarget), 'aria-label': (where === 'chat' ? 'Use: ' : 'Add: ') + r.title
+      }, icon('plus'), where === 'chat' ? (r.attach ? 'Use, and attach' : 'Use') : blanks ? 'Fill in and add' : 'Add'))
+  }))
+}
+async function useRecipe (a, r, where, button) {
+  if (where === 'chat') {
+    const C = CHAT
+    if (!C || C.agent !== a.name) return
+    C.ta.value = r.prompt
+    grow(C.ta)
+    blanksHint(C)
+    if (!pickBlank(C.ta)) C.ta.focus()
+    if (r.attach) C.form.querySelector('input[type=file]').click()
+    return
+  }
+  const sched = r.schedule
+  if (blanksLeft(r.prompt).length) { // the form, filled in, with the blank to fill selected
+    SCHED[a.name].draft = { prompt: r.prompt, title: r.title }
+    const set = (k, v) => { const el = document.querySelector(`[data-keep="${k}"]`); if (el) { el.value = v; el.dispatchEvent(new Event('kept')) } }
+    set('sched-kind', sched.kind)
+    set('sched-time', sched.time)
+    set('sched-day', String(sched.day ?? 1))
+    set('sched-what', r.prompt)
+    const ta = document.querySelector('[data-keep="sched-what"]')
+    if (ta) { ta.scrollIntoView({ block: 'center' }); pickBlank(ta) }
+    return
+  }
+  // as it is: the same task the form below would add (cc-connect's cron, through the agent's VM)
+  const expr = cronOf(sched.kind, sched.time, sched.day)
+  button.disabled = true   // (once: a second click would add it twice)
+  try {
+    await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: expr, prompt: r.prompt, description: r.title })
+    toast(`Added: ${r.title}, ${cronText(expr).replace(/^Every/, 'every')}.`, 'ok')
+    SCHED[a.name].jobs = null
+    render(true)
+  } catch (e) { toast('Couldn’t add it: ' + e.message) }
+  button.disabled = false
+}
+function blanksHint (C) { // under the message: what's still to fill in
+  const left = blanksLeft(C.ta.value)
+  C.hint.replaceChildren(...(left.length ? ['Fill in ', ...left.flatMap((b, i) => [i ? ', ' : '', h('mark', { class: 'blank' }, b)]), ', then send'] : ['Enter to send · Shift+Enter for a new line']))
+}
+
 function agentOf (name) { return STATE.agents.find((x) => x.name === name) }
 function fileUrl (a, p, dl) { return `/api/chat/${a}/file?p=${encodeURIComponent(p)}${dl ? '&dl=1' : ''}&token=${encodeURIComponent(TOKEN)}` }
 const isPicture = (name) => /\.(png|jpe?g|gif|webp)$/i.test(name || '')
@@ -1077,17 +1181,18 @@ function chatOpen (a) {
   C.empty = h('div', { class: 'chat-empty' },
     h('p', { class: 'chat-hello' }, 'What can ', nameOf(a), ' do for you?'),
     h('div', { class: 'starters' }, STARTERS.map(([t, text]) => h('button', { type: 'button', class: 'starter', onclick: () => { C.ta.value = text; C.ta.focus(); grow(C.ta) } }, t))),
-    h('p', { class: 'small muted' }, 'Attach files with the paperclip, or drop them here. It works on its own computer, so it can’t see yours unless you send something.'))
+    h('p', { class: 'small muted' }, 'Attach files with the paperclip, or drop them here. It works on its own computer, so it can’t see yours unless you send something.'),
+    C.recipes = h('div', { class: 'recipes-wrap' }))
   C.ta = h('textarea', { rows: 1, placeholder: 'Message ' + nameOf(a) + '…', 'aria-label': 'Message ' + nameOf(a) })
   C.chips = h('div', { class: 'attached' })
   const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => { attach(C, picker.files); picker.value = '' } })
   C.sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send', title: 'Send (Enter)', disabled: DOWN }, icon('arrow-up'))
   C.form = h('form', { class: 'composer chat-composer' }, C.chips, C.ta, h('div', { class: 'composer-bar' },
     h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker,
-    h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
+    C.hint = h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
   C.form.addEventListener('submit', (e) => { e.preventDefault(); chatSend(C) })
   C.ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(C) } })
-  C.ta.addEventListener('input', () => grow(C.ta))
+  C.ta.addEventListener('input', () => { grow(C.ta); if (C.hint.querySelector('mark') || blanksLeft(C.ta.value).length) blanksHint(C) })
   C.ta.addEventListener('paste', (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); attach(C, fs) } })
   C.banner = h('div', { class: 'chat-banner', hidden: true })
   C.el = h('div', { class: 'chat' }, C.empty, C.list, C.typing, h('div', { class: 'chat-dock' }, C.banner, C.form))
@@ -1412,11 +1517,12 @@ async function chatSend (C, text) {
   const files = C.attached.filter((f) => !f.uploading && f.path)
   if (!msg.trim() && !files.length) return
   if (C.attached.some((f) => f.uploading) || DOWN) return
+  if (text === undefined && pickBlank(C.ta)) { toast(`Fill in ${blanksLeft(msg)[0]} first.`, 'info'); return }
   if (!a.enabled || a.state === 'login') { drawChatState(C, true); return }
   try {
     await api(`/api/chat/${C.agent}/send`, { method: 'POST', body: { text: msg, files: files.map(({ path, name, mime }) => ({ path, name, mime })) } })
   } catch (e) { toast(e.message); return }
-  if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C) }
+  if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C); blanksHint(C) }
   C.typing.hidden = false
   if (['asleep', 'none'].includes(a.state) && !C.waking) wake(C)   // it waits in its folder until the agent is up
   drawChatState(C)
@@ -1441,6 +1547,11 @@ function drawChatState (C, nudge) {
   if (a.state === 'ready' || a.state === 'installing') { C.waking = false; C.woke = null }   // it's up (after all)
   const ban = (tone, ic, text, action) => { C.banner.className = 'chat-banner ' + tone; C.banner.replaceChildren(icon(ic), h('span', { class: 'grow' }, text), action || ''); C.banner.hidden = false }
   C.empty.hidden = C.list.childElementCount > 0 || !C.loaded
+  const needs = RECIPES.map((r) => r.needs.filter((n) => !NEEDS[n].has(a.name)).join()).join('|')
+  if (!C.empty.hidden && C.recipesFor !== needs) {
+    C.recipesFor = needs
+    C.recipes.replaceChildren(h('p', { class: 'recipes-title' }, 'Or start from a recipe'), recipeTiles(a, 'chat'))
+  }
   if (DOWN) ban('bad', 'circle-alert', 'cage isn’t answering, so messages can’t go out right now.')
   else if (!a.enabled) ban('info', 'sparkles', `Add ${a.label} to chat with it. It uses ${a.plan}.`, btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'sm primary'))
   else if (a.state === 'login') ban('warn', 'log-in', `Sign ${a.label} in first (it uses ${a.plan}).`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm primary'))
@@ -1492,6 +1603,12 @@ function cronOf (kind, time, day) {
   if (kind === 'weekly') return `${mm} ${hh} * * ${day}`
   return `${mm} ${hh} * * *`
 }
+function filledTitle (draft, prompt) { // a recipe's title with its blanks as you filled them in its prompt ('' if you changed more)
+  const names = draft.prompt.match(BLANK) || []
+  const m = new RegExp('^' + draft.prompt.split(BLANK).map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('([\\s\\S]+?)') + '$').exec(prompt)
+  return m ? draft.title.replace(BLANK, (b) => m[names.indexOf(b) + 1] ?? b) : ''
+}
+function blanksNote (text) { const left = blanksLeft(text); return left.length ? ['Fill in ', ...left.flatMap((b, i) => [i ? ', ' : '', h('mark', { class: 'blank' }, b)]), ' first.'] : [] }
 function cronText (expr) { // "0 8 * * 1-5" → "Every weekday at 8:00 AM"; anything unusual stays as it is
   const f = String(expr || '').trim().split(/\s+/)
   if (f.length === 6) f.shift()
@@ -1523,20 +1640,27 @@ function pageSchedule (a) {
     render(true)
   }
   if (awake && !S.loading && ((S.jobs === null && !S.error) || ARRIVED)) load()
-  const what = h('textarea', { rows: 3, placeholder: 'e.g. Summarize what came into my inbox overnight, most important first.', 'aria-label': 'What should it do?', 'data-keep': 'sched-what' })
-  const kind = h('select', { 'aria-label': 'How often', onchange: () => { day.hidden = kind.value !== 'weekly'; time.hidden = kind.value === 'hourly' } },
+  const sync = () => { day.hidden = kind.value !== 'weekly'; time.hidden = kind.value === 'hourly'; hint.replaceChildren(...blanksNote(what.value)) }
+  // (what you choose here is kept through a redraw, like what you type: data-keep)
+  const what = h('textarea', { rows: 3, placeholder: 'e.g. Summarize what came into my inbox overnight, most important first.', 'aria-label': 'What should it do?', 'data-keep': 'sched-what', oninput: () => sync(), onkept: () => sync() })
+  const kind = h('select', { 'aria-label': 'How often', 'data-keep': 'sched-kind', onchange: () => sync(), onkept: () => sync() },
     [['weekdays', 'Every weekday'], ['daily', 'Every day'], ['weekly', 'Every week on'], ['hourly', 'Every hour']].map(([v, t]) => h('option', { value: v }, t)))
-  const day = h('select', { 'aria-label': 'Day', hidden: true }, DAYS.map((d, i) => h('option', { value: String(i), selected: i === 1 }, d)))
-  const time = h('input', { type: 'time', value: '08:00', 'aria-label': 'Time', class: 'time' })
-  const form = h('form', { class: 'stack sched-form' }, field('What should it do?', what),
+  const day = h('select', { 'aria-label': 'Day', 'data-keep': 'sched-day' }, DAYS.map((d, i) => h('option', { value: String(i), selected: i === 1 }, d)))
+  const time = h('input', { type: 'time', value: '08:00', 'aria-label': 'Time', class: 'time', 'data-keep': 'sched-time' })
+  const hint = h('span', { class: 'field-hint' })   // a recipe's blanks still to fill in
+  const form = h('form', { class: 'stack sched-form' }, h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'What should it do?'), what, hint),
     h('div', { class: 'row' }, kind, day, h('span', { class: 'muted' }, 'at'), time, h('span', { class: 'grow' }), h('button', { type: 'submit', class: 'btn primary' }, icon('plus'), 'Add')))
+  sync()
   form.addEventListener('submit', async (e) => {
     e.preventDefault()
     const prompt = what.value.trim()
     if (!prompt) return what.focus()
+    if (pickBlank(what)) return toast(`Fill in ${blanksLeft(prompt)[0]} first.`, 'info')
     try {
-      await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: prompt.split('\n')[0].slice(0, 80) })
+      const title = S.draft ? filledTitle(S.draft, prompt) : ''
+      await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: (title || prompt.split('\n')[0]).slice(0, 80) })
       what.value = ''
+      S.draft = null
       await load()
     } catch (err) { toast('Couldn’t add it: ' + err.message) }
   })
@@ -1557,6 +1681,7 @@ function pageSchedule (a) {
           : S.error ? h('p', { class: 'empty' }, 'Couldn’t read its schedule: ' + S.error)
             : S.jobs === null ? h('p', { class: 'empty' }, 'Opening…')
               : rows(rowsOf, 'Nothing scheduled yet.'))),
+    awake ? section('Start from a recipe', 'Ready-made tasks. Add one as it is, or fill in its blanks first.', recipeTiles(a, 'schedule')) : null,
     awake ? section('Add a task', 'Or just ask in the chat, like “every weekday at 8am, summarize my inbox”.', h('div', { class: 'card sched-card' }, form)) : null
   ]
 }
@@ -2120,7 +2245,7 @@ function formState (root) {
   return s
 }
 function keepForm (root, s) {
-  root.querySelectorAll('[data-keep]').forEach((el) => { if (s.text[el.dataset.keep]) el.value = s.text[el.dataset.keep] })
+  root.querySelectorAll('[data-keep]').forEach((el) => { if (s.text[el.dataset.keep]) { el.value = s.text[el.dataset.keep]; el.dispatchEvent(new Event('kept')) } })
   root.querySelectorAll('input[type=checkbox][name]:not(:disabled)').forEach((el) => { // (one that was greyed out starts afresh)
     const was = s.ticks[el.name + '/' + el.value]
     if (was !== undefined && was !== el.checked) { el.checked = was; el.dispatchEvent(new Event('change')) }   // its menu's summary follows

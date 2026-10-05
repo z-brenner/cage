@@ -134,6 +134,22 @@ ok('ask v2: where they disagree, a 20,000-character follow-up with the earlier a
 // chat with an agent in the app: a starter, a file, a streamed answer, a file back, asking before acting
 await card.getByRole('link', { name: 'Chat', exact: true }).click()
 const chat = page.locator('.chat')
+// recipes in the empty chat: one says which app it needs that isn't connected; another fills in the message with its
+// blank picked out, and nothing goes until it's filled in; one that needs a file asks for it
+const recipes = chat.locator('.recipes')
+const briefingTile = recipes.locator('.recipe', { hasText: 'Morning briefing' })
+await briefingTile.getByText('Uses Gmail and Google Calendar, through Zapier').waitFor({ timeout: 10000 })
+if ((await briefingTile.getByRole('link', { name: 'Connect Zapier first' }).getAttribute('href')) !== '#apps') fail('a recipe whose app is not connected does not say so')
+await recipes.getByRole('button', { name: 'Use: News watch on {topic}' }).click()
+const composerBox = chat.locator('textarea')
+const picks = () => composerBox.evaluate((el) => el.value.slice(el.selectionStart, el.selectionEnd))
+if (!(await composerBox.inputValue()).startsWith('Look for news from the last day about {topic}.') || (await picks()) !== '{topic}') fail('the recipe did not fill the message with its blank picked: ' + await picks())
+await composerBox.press('Enter')
+await page.locator('#toasts .toast', { hasText: 'Fill in {topic} first.' }).waitFor({ timeout: 5000 })
+await page.waitForTimeout(500)
+if (fs.readFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), 'utf8').includes('Look for news')) fail('a recipe went out with its blank still in it')
+const [chooser] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5000 }), recipes.getByRole('button', { name: 'Use: Contract or NDA first pass' }).click()])
+if (!chooser.isMultiple() || !(await composerBox.inputValue()).startsWith('Read the attached contract.')) fail('the contract recipe does not ask for the contract')
 await chat.getByRole('button', { name: 'Summarize a document' }).click()
 if (!(await chat.locator('textarea').inputValue()).startsWith('Summarize the attached document')) fail('the starter did not fill the message')
 fs.writeFileSync(path.join(work, '..', 'brief.pdf'), '%PDF-1.4 brief')
@@ -340,6 +356,37 @@ await page.locator('.card li', { hasText: 'Summarize my inbox' }).getByRole('but
 await answer(/^Delete “Summarize my inbox”/, 'Delete')
 await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
 ok('scheduled tasks: added in plain words (weekdays at 8), run now answers in the chat, deleted')
+
+// recipes on the schedule: one whose app isn't connected says so, and once it is, Add adds it as it is (through
+// cc-connect's cron, as the form does); one with a blank fills in the form, and adds nothing until it's filled in
+const cronOfClaude = () => JSON.parse(fs.readFileSync(path.join(home, 'app', 'cron.claude.json'), 'utf8'))
+const briefing = page.locator('.recipe', { hasText: 'Morning briefing' })
+await briefing.getByRole('link', { name: 'Connect Zapier first' }).waitFor({ timeout: 10000 })
+fs.mkdirSync(path.join(home, 'connectors'), { recursive: true })
+fs.writeFileSync(path.join(home, 'connectors', 'zapier.conf'), 'url=https://mcp.zapier.com/api/v1/connect\nagents=all\ntitle=Zapier\n')
+await briefing.getByRole('button', { name: 'Add: Morning briefing' }).click({ timeout: 20000 })
+await page.locator('#toasts .toast', { hasText: /^Added: Morning briefing, every weekday at 7:45\sAM\.$/ }).waitFor({ timeout: 10000 })
+await page.locator('.card li', { hasText: 'Morning briefing' }).getByText(/Every weekday at 7:45\sAM/).waitFor({ timeout: 15000 })
+const [added] = cronOfClaude()
+if (cronOfClaude().length !== 1 || added.cron_expr !== '45 7 * * 1-5' || added.description !== 'Morning briefing' || !added.prompt.startsWith('Give me my morning briefing') ||
+  added.session_key !== 'app:you:you' || added.project !== 'claude') fail('the recipe added: ' + JSON.stringify(cronOfClaude()))
+await page.getByRole('button', { name: 'Add: News watch on {topic}' }).click()
+const what = page.getByLabel('What should it do?')
+if ((await what.evaluate((el) => el.value.slice(el.selectionStart, el.selectionEnd))) !== '{topic}' || (await page.getByLabel('How often').inputValue()) !== 'daily' ||
+  (await page.getByLabel('Time').inputValue()) !== '08:00') fail('the recipe did not fill in the form with its blank picked')
+await page.locator('.sched-form .field-hint', { hasText: 'Fill in {topic} first.' }).waitFor({ timeout: 5000 })
+await page.getByRole('button', { name: 'Add', exact: true }).click()
+await page.locator('#toasts .toast', { hasText: 'Fill in {topic} first.' }).waitFor({ timeout: 5000 })
+if (cronOfClaude().length !== 1) fail('a task was added with its blank still in it')
+await page.keyboard.type('electric cars')   // (what you type replaces the blank, which is picked again)
+if (await page.locator('.sched-form .field-hint mark').count()) fail('the blank filled in is still asked for')
+await page.getByRole('button', { name: 'Add', exact: true }).click()
+await page.locator('.card li', { hasText: 'News watch on electric cars' }).getByText(/Every day at 8:00\sAM/).waitFor({ timeout: 15000 })
+const news = cronOfClaude()[1]
+if (news.cron_expr !== '0 8 * * *' || !news.prompt.startsWith('Look for news from the last day about electric cars.')) fail('the recipe with a blank added: ' + JSON.stringify(news))
+fs.rmSync(path.join(home, 'connectors', 'zapier.conf'))
+fs.writeFileSync(path.join(home, 'app', 'cron.claude.json'), '[]')
+ok('recipes: they say which app they need; added as they are, or with their blanks filled in first, as scheduled tasks; in the chat, nothing goes with a blank in it')
 
 // an asleep agent: sending wakes it up, and the message waits in its folder; if it can't be woken, the page says so
 await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
