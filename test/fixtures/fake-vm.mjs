@@ -28,6 +28,8 @@ async function handle (r) {
   if (r.type === 'message') {
     if (session === 'you') log({ t: 'you', session, id: r.id, text: r.text, files: (r.files || []).map((f) => ({ ...f, size: fs.statSync(path.join(dir, f.path)).size })) })
     if (r.text === '/usage') return log({ t: 'card', session, ctx: r.id, card: USAGE })
+    if (r.text === '/stop') { log({ t: 'reply', session, ctx: r.id, text: '⏹ Execution stopped.' }); return log({ t: 'typing', session, on: false }) }
+    if (r.text === '/new') return log({ t: 'reply', session, ctx: r.id, text: '✅ New session created' })
     log({ t: 'typing', session, on: true })
     if (/email/i.test(r.text)) {
       await sleep(300)

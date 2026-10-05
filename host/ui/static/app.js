@@ -1072,7 +1072,8 @@ function chatOpen (a) {
   chatClose()
   const C = { agent: a, offset: 0, previews: new Map(), shared: [], waking: false, attached: [], connected: null, lastWho: '' }
   C.list = h('div', { class: 'chat-list', role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation with ' + nameOf(a) })
-  C.typing = h('div', { class: 'typing', hidden: true }, h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('span', {}, nameOf(a) + ' is working…'))
+  C.typing = h('div', { class: 'typing', hidden: true }, h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('span', {}, nameOf(a) + ' is working…'),
+    h('button', { type: 'button', class: 'btn sm ghost', title: 'Stop it (Esc)', onclick: () => chatSend(C, '/stop') }, icon('square'), 'Stop'))
   C.empty = h('div', { class: 'chat-empty' },
     h('p', { class: 'chat-hello' }, 'What can ', nameOf(a), ' do for you?'),
     h('div', { class: 'starters' }, STARTERS.map(([t, text]) => h('button', { type: 'button', class: 'starter', onclick: () => { C.ta.value = text; C.ta.focus(); grow(C.ta) } }, t))),
@@ -1147,6 +1148,7 @@ function chatAdd (C, e, history) {
       C.typing.hidden = history && !recent
       const text = (e.text || '').trim()
       if (text === '/new' || text === '/reset') { add(C, h('div', { class: 'chat-divider' }, h('span', {}, 'New conversation')), ''); break }
+      if (text === '/stop') { add(C, h('div', { class: 'chat-divider' }, h('span', {}, 'You stopped it')), ''); break }
       for (const f of e.files || []) C.shared.push({ ...f, from: 'you', at: e.at })
       add(C, h('div', { class: 'msg-you' }, h('div', { class: 'bubble' },
         (e.files || []).length ? h('div', { class: 'bubble-files' }, e.files.map((f) => fileChip(C.agent, f))) : null,
@@ -1168,7 +1170,7 @@ function chatAdd (C, e, history) {
       for (const [k, m] of C.previews) if (!e.ctx || m.dataset.ctx === e.ctx) { m.remove(); C.previews.delete(k) }
       whoLast(C)
       C.typing.hidden = true
-      add(C, agentMsg(C, md(e.text || ''), '', e.at), 'agent')
+      add(C, agentMsg(C, md(e.text || ''), '', e.at, e.text), 'agent')
       break
     case 'buttons': C.typing.hidden = true; settled(C); add(C, buttonsMsg(C, e), 'agent'); break
     case 'card': C.typing.hidden = true; add(C, agentMsg(C, cardOf(C, e.card), 'card-msg', e.at), 'agent'); break
@@ -1198,11 +1200,34 @@ function add (C, el, who) {
   C.lastWho = who
 }
 function clock (t) { return t ? new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
-function agentMsg (C, body, cls, at) {
+function agentMsg (C, body, cls, at, text) { // text: an answer's own words, to copy or save
   const first = C.lastWho !== 'agent'
   return h('div', { class: 'msg-agent' + (cls ? ' ' + cls : '') + (first ? ' first' : '') },
     first ? h('div', { class: 'agent-who' }, avatar(C.agent, 20), h('b', {}, nameOf(C.agent)), at ? h('time', {}, clock(at)) : null) : null,
-    h('div', { class: 'agent-body' }, body))
+    h('div', { class: 'agent-body' }, body),
+    text ? h('div', { class: 'msg-tools' },
+      h('button', { type: 'button', class: 'icon-btn', title: 'Copy', 'aria-label': 'Copy this answer', onclick: (e) => copyAnswer(text, e.currentTarget) }, icon('copy')),
+      h('button', { type: 'button', class: 'icon-btn', title: 'Save as a file', 'aria-label': 'Save this answer as a file', onclick: () => saveAnswer(C.agent, text, at) }, icon('download'))) : null)
+}
+async function copyAnswer (text, button) { // with its formatting (a list stays a list in Word or an email), and as plain text
+  try {
+    if (window.ClipboardItem && navigator.clipboard.write) {
+      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }), 'text/html': new Blob([md(text).outerHTML], { type: 'text/html' }) })])
+    } else await navigator.clipboard.writeText(text)
+    button.replaceChildren(icon('check'))
+    button.setAttribute('aria-label', 'Copied')
+    setTimeout(() => { button.replaceChildren(icon('copy')); button.setAttribute('aria-label', 'Copy this answer') }, 1500)
+  } catch (e) { toast('Couldn’t copy it: ' + e.message) }
+}
+function saveAnswer (agent, text, at) { // as a Markdown file: "claude 2026-10-05 0821.md"
+  const d = new Date(at || Date.now())
+  const two = (n) => String(n).padStart(2, '0')
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown' }))
+  const link = h('a', { href: url, download: `${agent} ${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}${two(d.getMinutes())}.md` })
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 function fileChip (a, f) {
   const name = f.name || (f.path || '').split('/').pop()
@@ -1876,6 +1901,11 @@ function paletteItems () {
     ['sparkles', 'Ask your agents', () => { go('home'); setTimeout(() => { const t = document.querySelector('.composer textarea'); if (t) t.focus() }, 60) }]
   ]
   for (const a of S.agents) items.push([null, a.label, () => go('agent/' + a.name), a.name, STATUS[statusOf(a)].label])
+  for (const a of agentsOn()) {
+    items.push(['square-pen', 'New conversation with ' + a.label, () => newConversation(a.name)],
+      ['calendar-clock', 'Schedule a task for ' + a.label, () => { go('agent/' + a.name + '/schedule'); setTimeout(() => { const t = document.querySelector('[data-keep="sched-what"]'); if (t) t.focus() }, 60) }])
+    if (a.state === 'ready') items.push(['square', 'Stop ' + a.label, () => openChat(a.name) && chatSend(CHAT, '/stop')])
+  }
   items.push(['blocks', 'Apps', () => go('apps')], ['key-round', 'Sign-ins & keys', () => go('signins')], ['brain', 'Memory', () => go('memory')],
     ['shield', 'Security', () => go('security')], ['settings', 'Settings', () => go('settings')])
   if (agentsOn().some((a) => a.reachable && ['asleep', 'none'].includes(a.state))) items.push(['power', 'Wake everyone', () => runJob(['up'], 'Waking your agents')])
@@ -1917,10 +1947,44 @@ function openPalette () {
   input.focus()
 }
 pal.addEventListener('click', (e) => { if (e.target === pal) pal.close() })   // a click on the backdrop
+function openChat (name) { // an agent's chat, now (not after the next hashchange): the open chat, or null if you stayed
+  if (page !== 'agent/' + name) { location.hash = 'agent/' + name; route() }
+  return CHAT && CHAT.agent === name && page === 'agent/' + name ? CHAT : null
+}
+function newConversation (name) { const C = openChat(name); if (C) chatSend(C, '/new') }
+// Shortcuts: Ctrl+K (⌘K) jumps anywhere; Alt+1…4 opens an agent's chat (as listed in the sidebar); Ctrl+Shift+O
+// (⌘⇧O) starts a new conversation with the agent you're on; Esc stops an agent that's working, while you haven't
+// typed anything; ? lists them.
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
+const KEYS = [[MAC ? '⌘K' : 'Ctrl K', 'Go to, or do, anything'], [MAC ? '⌥1 … ⌥4' : 'Alt 1 … Alt 4', 'Open an agent’s chat, as listed on the left'],
+  [MAC ? '⌘⇧O' : 'Ctrl Shift O', 'Start a new conversation with this agent'], ['Esc', 'Stop the agent while it’s working (with nothing typed)'],
+  ['Enter', 'Send'], ['Shift Enter', 'A new line'], ['?', 'These shortcuts']]
+const keysSheet = document.getElementById('keys')
+function showKeys () {
+  keysSheet.replaceChildren(h('header', { class: 'sheet-head' }, h('h2', { id: 'keys-title' }, 'Keyboard shortcuts'),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => keysSheet.close() }, icon('x'))),
+  h('dl', { class: 'keys-list' }, KEYS.map(([k, what]) => h('div', {}, h('dt', {}, k.split(' ').map((x) => x === '…' ? ' … ' : h('kbd', {}, x))), h('dd', {}, what)))))
+  keysSheet.showModal()
+}
+keysSheet.addEventListener('click', (e) => { if (e.target === keysSheet) keysSheet.close() })
 document.addEventListener('keydown', (e) => {
   if (dlg.open) return   // in the side panel, Ctrl+K is the terminal's (and the panel is modal anyway)
   if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (pal.open) pal.close(); else openPalette() }
   if (e.key === 'Escape' && document.body.classList.contains('nav-open')) document.body.classList.remove('nav-open')
+  if (!STATE || !STATE.configured || document.querySelector('dialog[open]')) return
+  const field = typing(document.activeElement)
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-4]$/.test(e.code)) { // (by the key: on a Mac, Alt+1 types "¡")
+    const a = STATE.agents.slice().sort((x, y) => y.enabled - x.enabled)[+e.code.slice(5) - 1]
+    if (a) { e.preventDefault(); go('agent/' + a.name) }
+  } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyO') {
+    if (page.startsWith('agent/')) { e.preventDefault(); newConversation(page.split('/')[1]) }
+  } else if (e.key === 'Escape' && CHAT && page === 'agent/' + CHAT.agent && !CHAT.typing.hidden && !CHAT.ta.value.trim() && (!field || document.activeElement === CHAT.ta)) {
+    e.preventDefault()
+    chatSend(CHAT, '/stop')
+  } else if (e.key === '?' && !field && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault()
+    showKeys()
+  }
 })
 
 // --- notifications: replies and questions from agents you're not looking at ----------------------------------------
@@ -2179,4 +2243,4 @@ window.addEventListener('hashchange', route)
 try { TOKEN = localStorage.getItem('cage-token') || '' } catch (e) {}
 route()
 document.getElementById('jump').addEventListener('click', () => { document.body.classList.remove('nav-open'); openPalette() })
-if (/Mac|iPhone|iPad/.test(navigator.platform)) document.getElementById('jump-key').textContent = '⌘K'
+if (MAC) document.getElementById('jump-key').textContent = '⌘K'
