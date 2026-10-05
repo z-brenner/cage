@@ -18,6 +18,7 @@ block_watch() { trap '[ $? = 0 ] || : > "$T/failed"' EXIT; }   # first thing in 
 mkdir -p "$T/bin"
 cat > "$T/bin/msb" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --version ]; then cat "$MSB_STUB_VERSION" 2>/dev/null || echo "msb 0.7.5"; exit 0; fi   # the one cage pins
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
@@ -40,10 +41,18 @@ if [ "$cmd" = exec ]; then
   vmname=""; for x in "$@"; do case "$x" in cage-*) vmname="$x"; break ;; esac; done
   case "$*" in
     *cage:ready*) echo cage:ready ;;   # every agent is signed in
+    *mask/map.json*) case " ${MSB_MAPS:-} " in *" $vmname "*) echo forgot ;; esac ;;   # cage mask forget: it had a map
     *"cc-connect send"*)               # a message into a chat: record it (the reply file is in that agent's /cage-config)
       for x in "$@"; do case "$x" in /cage-config/replies/*) f="$CAGE_HOME/agents/${vmname#cage-}/${x#/cage-config/}" ;; esac; done
       { printf '%s %s <- ' "$vmname" "${!#}"; cat "$f"; printf '\n---\n'; } >> "$MSB_SENT" ;;
-    *--disallowedTools*|*"codex exec"*|*"cursor-agent --print"*|*"agy -p"*) printf 'answer from %s to: %s' "$vmname" "${!#}" ;;
+    *--disallowedTools*|*"codex exec"*|*"cursor-agent --print"*|*"agy -p"*)   # an asked agent: the question is in a file
+      q=""; for x in "$@"; do case "$x" in /cage-config/replies/*.q) q="$(cat "$CAGE_HOME/agents/${vmname#cage-}/${x#/cage-config/}")" ;; esac; done
+      if [ -n "${MSB_PS:-}" ]; then { ps -eo args 2>/dev/null || ps -o args; } >> "$MSB_PS"; fi   # what anyone here could see meanwhile
+      case "${MSB_ASK:-}" in
+        fail) echo "Error: not signed in" >&2; exit 1 ;;            # signed out, out of quota
+        long) head -c 200000 /dev/zero | tr '\0' x; exit $? ;;     # more than cage reads: it stops, so this gets SIGPIPE
+      esac
+      printf 'answer from %s to: %s' "$vmname" "$q" ;;
     *'cat ~/.cage/whatsapp/status.json'*)   # WhatsApp's status, as the VM wrote it: $MSB_WA_STATUS.1 once, then $MSB_WA_STATUS
       if [ -e "${MSB_WA_STATUS:-}.1" ]; then cat "$MSB_WA_STATUS.1"; rm -f "$MSB_WA_STATUS.1"; else cat "${MSB_WA_STATUS:-/dev/null}"; fi ;;
   esac
@@ -59,6 +68,9 @@ fi
 exit 0
 EOF
 chmod +x "$T/bin/msb"
+# the internet, as cage's network checks see it (test/fake-curl.sh): all there unless a test says otherwise
+REAL_CURL="$(command -v curl)"; export REAL_CURL MSB_STUB_VERSION="$T/msb.version"
+ln -s "$ROOT/test/fake-curl.sh" "$T/bin/curl"
 export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" MSB_VOLUMES="$T/volumes" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
 export MSB_HOME="$T/msbhome"   # never your own ~/.microsandbox
 : > "$MSB_EXISTING"
@@ -152,6 +164,22 @@ TZ='../../etc/passwd' cage up claude 2>/dev/null
 if grep '^run | ' "$MSB_LOG" | grep -q -- 'TZ='; then fail "an odd TZ went into the VM"; fi
 TZ=America/New_York cage _state | python3 -c 'import json,sys; assert json.load(sys.stdin)["settings"]["tz"] == "America/New_York"' || fail "time zone not in the state"
 ok "the VM runs in your time zone (TZ, checked), and the app shows it"
+
+# an apt mirror for Ubuntu's packages (CAGE_APT_MIRROR in cage.env) goes to the VM, which checks it (guest/provision.sh)
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+if grep -q 'CAGE_APT_MIRROR' "$MSB_LOG"; then fail "a mirror went to the VM though none is set"; fi
+echo 'CAGE_APT_MIRROR="http://mirror.example:8080/ubuntu/"' >> "$CAGE_HOME/cage.env"
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+grep '^run | ' "$MSB_LOG" | grep -q -- '-e | CAGE_APT_MIRROR=http://mirror.example:8080/ubuntu/ |' || fail "no apt mirror for the VM: $(cat "$MSB_LOG")"
+sed -i '/^CAGE_APT_MIRROR=/d' "$CAGE_HOME/cage.env"
+echo 'CAGE_APT_MIRROR="http://mirror.example/ubuntu/ --net-rule x"' >> "$CAGE_HOME/cage.env"   # one argument, whatever it holds
+: > "$MSB_LOG"
+cage up claude 2>/dev/null
+grep '^run | ' "$MSB_LOG" | grep -q -- '-e | CAGE_APT_MIRROR=http://mirror.example/ubuntu/ --net-rule x |' || fail "the mirror was split: $(cat "$MSB_LOG")"
+sed -i '/^CAGE_APT_MIRROR=/d' "$CAGE_HOME/cage.env"
+ok "CAGE_APT_MIRROR in cage.env goes to the VM, as one setting"
 
 # ask mode
 sed -i 's/^CAGE_MODE=yolo/CAGE_MODE=ask/' "$CAGE_HOME/cage.env"
@@ -452,9 +480,25 @@ timeout 30 "$ROOT/cage" _outbox 2>/dev/null || fail "the outbox hung or failed"
 [ -z "$(ls -A "$O")" ] && [ -f "$T/elsewhere/4-4-4/text" ] || fail "hostile entries left behind, or a link followed"
 ok "a hostile outbox (links, a FIFO, a bad session key) is cleared without reading through it or sending anything"
 
+grep -q '^CAGE_MASK=' "$CAGE_HOME/cage.env" && fail "this part expects the privacy mask off everywhere (the default)"
+: > "$MSB_LOG"
 out="$(cage ask "is it raining?" claude codex 2>/dev/null)"
 grep -q "answer from cage-claude to: is it raining?" <<<"$out" && grep -q "answer from cage-codex to: is it raining?" <<<"$out" || fail "cage ask: $out"
-ok "cage ask: every awake agent answers on this computer"
+grep -q '/cage/mask.py' "$MSB_LOG" && fail "cage ask ran the CLIs behind the mask, which is off: $(cat "$MSB_LOG")"
+ok "cage ask: every awake agent answers on this computer (with the mask off, as it is)"
+
+# an agent that can't answer (signed out, out of quota) or says too much: the question file still goes, and the web
+# app still gets an answer event for it (an empty one), so it doesn't wait forever
+for mode in fail long; do
+  out="$(MSB_ASK=$mode timeout 60 "$ROOT/cage" ask "my salary is $mode-42" codex 2>/dev/null)" || fail "cage ask ($mode) failed or hung"
+  if [ "$mode" = fail ]; then grep -q "no answer: signed out, busy, or out of quota" <<<"$out" || fail "cage ask ($mode): $out"; fi
+  [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "the question stayed on disk ($mode): $(ls "$CAGE_HOME/agents/codex/replies")"
+  ev="$(MSB_ASK=$mode CAGE_PROTO=1 timeout 60 "$ROOT/cage" ask "again $mode" codex 2>&1 >/dev/null </dev/null | tr '\036' '\n')" \
+    || fail "cage ask for the web app ($mode) failed or hung: $ev"
+  grep -q '{"t":"answer","text":"[x]*","agent":"codex"}' <<<"$ev" || fail "cage ask for the web app ($mode): $ev"
+  [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "the question stayed on disk ($mode, app)"
+done
+ok "cage ask: an agent that fails or says too much leaves no question on disk, and the app gets its (empty) answer"
 ev="$(CAGE_PROTO=1 "$ROOT/cage" ask 'is it "raining"?' claude codex 2>&1 >/dev/null </dev/null | tr '\036' '\n')"
 grep -qF '{"t":"asking","text":"is it \"raining\"?","agents":["claude","codex"]}' <<<"$ev" || fail "cage ask for the web app, the question: $ev"
 grep -qF '{"t":"answer","text":"answer from cage-claude to: is it \"raining\"?","agent":"claude"}' <<<"$ev" \
@@ -520,10 +564,91 @@ grep -qx 'Acme Corp' "$CAGE_HOME/agents/claude/mask.terms" && [ -e "$CAGE_HOME/a
 [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "codex marked as masked"
 out="$(cage mask try "write to bob@example.com about Acme Corp" 2>&1)"
 grep -qF "write to [EMAIL_1] about [TERM_1]" <<<"$out" || fail "cage mask try: $out"
+grep -q "a placeholder you typed" <<<"$out" && fail "cage mask try explained a placeholder nobody typed: $out"
+out="$(cage mask try "mail [EMAIL_1] and bob@example.com" 2>&1)"
+grep -qF "mail 〔EMAIL_1〕 and [EMAIL_1]" <<<"$out" && grep -qF "〔EMAIL_1〕: a placeholder you typed goes as it is" <<<"$out" \
+  || fail "cage mask try, with a placeholder typed: $out"
 cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
 cage up claude 2>/dev/null
 if grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" || [ -e "$CAGE_HOME/agents/claude/mask.on" ] || [ -s "$CAGE_HOME/mask.terms" ]; then fail "mask still on"; fi
 ok "privacy mask: per agent, the CLI runs behind guest/mask.py with your terms; cage mask try previews it"
+
+# your terms go where a masked agent's words can: to it, and to its stand-in (and with /all on, every agent); a
+# stand-in for a masked agent answers behind the mask
+# even where the mask is off; and the conversation reaches its VM in a file, never on a command line (anyone on this
+# computer can read those with ps)
+cage mask add "Acme Corp" </dev/null 2>/dev/null
+out="$(cage mask on claude </dev/null 2>&1)"
+grep -q "not covered: files and pictures you send, notes and web pages the agent opens" <<<"$out" && grep -q "voice notes go to Groq as they are" <<<"$out" \
+  && grep -q "anyone who can chat with the agent can ask it about masked values, and so can a web page or app result it reads" <<<"$out" \
+  && grep -q "the real values are kept in the agent's VM" <<<"$out" \
+  || fail "cage mask on doesn't say what it doesn't cover: $out"
+cage fallback claude codex </dev/null 2>/dev/null
+cage up claude codex cursor 2>/dev/null
+for a in claude codex; do grep -qx 'Acme Corp' "$CAGE_HOME/agents/$a/mask.terms" || fail "$a has no mask terms"; done
+[ ! -e "$CAGE_HOME/agents/cursor/mask.terms" ] || fail "cursor got your terms, though no masked agent passes it anything"
+cage ask-all on </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
+grep -qx 'Acme Corp' "$CAGE_HOME/agents/cursor/mask.terms" || fail "with /all on, cursor has no mask terms"
+cage ask-all off </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
+[ ! -e "$CAGE_HOME/agents/cursor/mask.terms" ] || fail "cursor kept your terms with /all off again"
+[ -e "$CAGE_HOME/agents/claude/mask.on" ] && [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "mask.on isn't per agent"
+printf 'cage-claude\ncage-codex\n' > "$T/running"
+export MSB_RUNNING="$T/running" MSB_SENT="$T/sent" MSB_PS="$T/ps"
+: > "$MSB_SENT"; : > "$MSB_PS"; : > "$MSB_LOG"; rm -f "$CAGE_HOME/outbox/.last-claude" "$CAGE_HOME/outbox/.seen"
+marker="IBAN-DE89370400440532013000-$RANDOM$RANDOM"
+d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"
+mkdir -p "$d" && printf fallback > "$d/kind" && printf 'telegram:1:1' > "$d/session"
+printf 'User: draft the email to HR, my %s\nAgent: You have hit your limit' "$marker" > "$d/text"
+cage _outbox 2>/dev/null
+grep -q '^exec | --no-tty | -w | /home/agent/work | cage-codex | ' "$MSB_LOG" && grep -q 'exec python3 /cage/mask.py codex exec' "$MSB_LOG" \
+  || fail "the stand-in didn't answer behind the mask: $(cat "$MSB_LOG")"
+grep -qF "$marker" "$MSB_SENT" || fail "the conversation didn't reach the stand-in: $(cat "$MSB_SENT")"
+[ -s "$MSB_PS" ] || fail "no process list taken during the ask"
+if grep -qF "$marker" "$MSB_LOG" "$MSB_PS"; then fail "the conversation was on a command line"; fi
+[ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "question files left behind"
+: > "$MSB_LOG"
+cage ask "is it $marker?" codex >/dev/null 2>&1
+grep -q '^exec | .*cage-codex' "$MSB_LOG" || fail "cage ask didn't ask codex"
+grep -q '/cage/mask.py' "$MSB_LOG" && fail "cage ask masked for codex, which has it off"
+cage fallback claude off </dev/null 2>/dev/null
+ok "relays keep the mask: your terms go where a masked agent's words can, a stand-in answers behind it, never via ps"
+
+# an answer is the VM's text: printed here, it can't carry terminal control codes (to rewrite the screen, set the clipboard)
+out="$(cage ask $'hi \033]52;c;Y3VybA==\007 \033[2Jthere' codex 2>/dev/null)"
+grep -q 'answer from cage-codex to: hi' <<<"$out" || fail "cage ask: $out"
+if grep -q $'\033\|\007' <<<"$out"; then fail "cage ask printed control codes: $(cat -v <<<"$out")"; fi
+ok "cage ask prints answers without terminal control codes"
+
+# cage mask forget: each awake VM drops its map (and its notes get placeholders afresh); asleep ones are named
+cp "$MSB_EXISTING" "$T/existing.saved"
+printf 'cage-claude\ncage-codex\ncage-cursor\n' > "$MSB_EXISTING"
+: > "$MSB_LOG"
+out="$(MSB_MAPS=cage-claude cage mask forget 2>&1)"
+[ "$(grep -c '^exec | .*runuser -u agent -- flock "$f.lock" rm -f "$f" || exit 1; echo forgot; fi; bash /cage/memory.sh' "$MSB_LOG")" = 2 ] || fail "forget: $(cat "$MSB_LOG")"
+grep -q 'rm -rf' "$MSB_LOG" && fail "forget removed more than the map: $(cat "$MSB_LOG")"
+grep -q "Cursor is asleep, so it still keeps its masked values" <<<"$out" || fail "forget didn't name the asleep agent: $out"
+grep -q "Claude Code forgot the values behind its placeholders" <<<"$out" && grep -q "Codex had no masked values" <<<"$out" \
+  && ! grep -q "Codex forgot" <<<"$out" || fail "forget, for an agent that had a map and one that hadn't: $out"
+mv "$T/existing.saved" "$MSB_EXISTING"
+unset MSB_RUNNING MSB_SENT MSB_PS
+ok "cage mask forget: awake agents drop the values behind their placeholders; it says which had none, and which are asleep"
+
+# CAGE_MASK_TYPES: the extra kinds reach the VM's mask (and memory.sh); a kind the mask doesn't know is refused
+echo 'CAGE_MASK_TYPES="email phone ip,address"' >> "$CAGE_HOME/cage.env"
+cage up claude 2>/dev/null
+grep -q '^cmd = "python3 /cage/mask.py --types email,phone,ip,address claude"$' "$CAGE_HOME/agents/claude/cc-connect.toml" \
+  || fail "types not passed: $(grep '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml")"
+[ "$(cat "$CAGE_HOME/agents/claude/mask.on")" = "email,phone,ip,address" ] || fail "mask.on: $(cat "$CAGE_HOME/agents/claude/mask.on")"
+out="$(cage mask try "server 81.2.69.160, mail ana@example.com" 2>&1)"
+grep -qF "server [IP_1], mail [EMAIL_1]" <<<"$out" || fail "cage mask try with CAGE_MASK_TYPES: $out"
+sed -i 's/^CAGE_MASK_TYPES=.*/CAGE_MASK_TYPES="email phonee"/' "$CAGE_HOME/cage.env"
+if cage up claude 2>"$T/err"; then fail "an unknown kind was accepted"; fi
+grep -q "names a kind the mask doesn't know" "$T/err" || fail "unknown kind: $(cat "$T/err")"
+sed -i '/^CAGE_MASK_TYPES=/d' "$CAGE_HOME/cage.env"
+cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
+cage up claude codex cursor 2>/dev/null
+for a in claude codex cursor; do [ ! -e "$CAGE_HOME/agents/$a/mask.terms" ] || fail "$a kept the mask terms with the mask off everywhere"; done
+ok "CAGE_MASK_TYPES: the kinds you name reach each VM's mask; an unknown kind is refused"
 
 # --- the web app's side of cage: protocol mode (JSON events, answers on stdin) and the state snapshot
 out="$(printf 'proto-v4lue\n' | CAGE_PROTO=1 "$ROOT/cage" secret add PROTO_KEY api.proto.example claude 2>&1 >/dev/null)"
@@ -1091,6 +1216,96 @@ mv "$T/bin/powershell.exe" "$T/ps.off"
 grep -q 'Windows interop is off' "$T/err" || fail "no warning without interop: $(cat "$T/err")"
 unset WSL_DISTRO_NAME
 ok "without Windows interop, or with a cage folder Windows can't be handed, up says that WSL will stop the VMs, and why"
+
+# cage update when the internet isn't there: nothing changes, the agents keep running
+: > "$MSB_LOG"
+if NET_DOWN=registry.npmjs.org cage update claude 2>"$T/err"; then fail "update went ahead offline"; fi
+grep -q "you're offline (or a firewall is in the way); nothing was changed, your agents keep running" "$T/err" || fail "offline update: $(cat "$T/err")"
+if NET_BLOCKED=github.com cage update claude 2>"$T/err"; then fail "update went ahead with GitHub blocked"; fi
+grep -q "you're offline" "$T/err" || fail "blocked update: $(cat "$T/err")"
+if NET_MISSING=/cc-connect/releases/ cage update claude 2>"$T/err"; then fail "update went ahead without its cc-connect"; fi
+grep -q "there's no cc-connect v[0-9.]* to download (CAGE_CC_CONNECT_VERSION in $CAGE_HOME/cage.env): fix or remove that line" "$T/err" &&
+  ! grep -q "offline" "$T/err" || fail "a cc-connect version that doesn't exist: $(cat "$T/err")"
+grep -q '^run | \|^rm | \|^stop | ' "$MSB_LOG" && fail "an offline update touched the VMs: $(cat "$MSB_LOG")"
+ok "cage update offline (or with GitHub blocked, or no such cc-connect) changes nothing and leaves the agents running"
+
+# the cc-connect version earlier cages wrote into cage.env goes, so this cage's own applies; one you picked stays
+grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env" && fail "the test config already pins cc-connect"
+( export CAGE_HOME="$T/fresh"; "$ROOT/cage" init 2>/dev/null
+  if grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env"; then fail "init pins cc-connect in the user's config"; fi )
+echo 'CAGE_CC_CONNECT_VERSION=v1.5.0' >> "$CAGE_HOME/cage.env"
+cage update claude 2>/dev/null
+grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env" && fail "update kept the old default cc-connect pin"
+want="$(sed -n 's/.*CAGE_CC_CONNECT_VERSION:-\(v[^}]*\)}.*/\1/p' "$ROOT/cage")"   # load_env's default
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "-e | CC_CONNECT_VERSION=$want |" || fail "the VM didn't get this cage's cc-connect ($want)"
+echo 'CAGE_CC_CONNECT_VERSION="v1.4.2"' >> "$CAGE_HOME/cage.env"
+cage update claude 2>/dev/null
+grep -qx 'CAGE_CC_CONNECT_VERSION="v1.4.2"' "$CAGE_HOME/cage.env" || fail "update dropped a cc-connect version the user picked"
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- '-e | CC_CONNECT_VERSION=v1.4.2 |' || fail "the user's cc-connect version isn't used"
+sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
+ok "cage update drops the cc-connect pin earlier versions froze in cage.env, and keeps one you picked"
+
+# microsandbox: cage installs the version it pins, with the official installer (here a stand-in), and says so when
+# the installed one isn't that version
+cat > "$T/msb-installer.sh" <<'EOF'
+#!/bin/sh
+# stands in for https://install.microsandbox.dev (scripts/install-msb.sh replaces this lookup with its pin)
+get_latest_version() {
+    VERSION=v9.9.9
+}
+main() {
+    if [ -n "${FAIL_MSB_INSTALL:-}" ]; then echo "error: glibc 2.28 or newer is required (found 2.17)" >&2; exit 1; fi
+    get_latest_version
+    mkdir -p "$MSB_HOME/bin"
+    printf '#!/bin/sh\necho "msb %s"\n' "${VERSION#v}" > "$MSB_HOME/bin/msb"
+    chmod +x "$MSB_HOME/bin/msb"
+    echo "msb ${VERSION#v}" > "$MSB_STUB_VERSION"   # the msb on PATH is the new one now
+    echo "Installed msb to $MSB_HOME/bin/msb"
+}
+main "$@"
+EOF
+export CAGE_MSB_INSTALLER="$T/msb-installer.sh" MSB_HOME="$T/msbhome"
+pin="$(sed -n 's/^CAGE_MSB_VERSION=v//p' "$ROOT/cage")"
+[ -n "$pin" ] || fail "no CAGE_MSB_VERSION in cage"
+mkdir -p "$T/nomsb" && ln -sf "$(command -v bash)" "$T/nomsb/bash"   # a PATH without msb (bash is elsewhere on some systems)
+nomsb="$T/nomsb:/usr/bin:/bin"
+out="$(printf 'y\nn\n' | PATH="$nomsb" HOME="$T/fixhome" CAGE_HOME="$T/fixhome/.cage" "$ROOT/cage" fix 2>&1 || true)"
+grep -q "✓ microsandbox $pin" <<<"$out" || fail "cage fix didn't install microsandbox $pin: $out"
+[ "$("$MSB_HOME/bin/msb" --version)" = "msb $pin" ] || fail "cage fix installed something else"
+grep -q "Installed msb" "$T/fixhome/.cage/msb-install.log" || fail "the installer's output isn't in msb-install.log"
+rm -rf "$MSB_HOME"
+out="$(printf 'y\n' | FAIL_MSB_INSTALL=1 PATH="$nomsb" HOME="$T/fixhome2" CAGE_HOME="$T/fixhome2/.cage" "$ROOT/cage" fix 2>&1 || true)"
+grep -q "couldn't install microsandbox: error: glibc 2.28 or newer is required (found 2.17)" <<<"$out" || fail "the installer's error isn't shown: $out"
+grep -q "$T/fixhome2/.cage/msb-install.log" <<<"$out" || fail "no pointer to the installer's log: $out"
+# an older msb from another install, first on PATH, still wins after the pinned one went into ~/.microsandbox
+mkdir -p "$T/oldmsb" && printf '#!/bin/sh\necho "msb 0.7.4"\n' > "$T/oldmsb/msb" && chmod +x "$T/oldmsb/msb"
+rc=0; out="$(printf 'y\n' | PATH="$T/oldmsb:$nomsb" HOME="$T/fixhome3" CAGE_HOME="$T/fixhome3/.cage" "$ROOT/cage" fix 2>&1)" || rc=$?
+[ "$rc" != 0 ] && grep -q "microsandbox $pin is installed, but an older one (0.7.4) comes first on your PATH: $T/oldmsb/msb" <<<"$out" ||
+  fail "an older msb first on PATH: $out"
+grep -q "✓ microsandbox\|ready for your agents" <<<"$out" && fail "cage fix said all is well with the old msb still in use: $out"
+rm -rf "$MSB_HOME"
+ok "cage fix installs the microsandbox version cage pins, shows the installer's error when it fails, and an older one that still comes first"
+
+echo "msb 0.7.99" > "$MSB_STUB_VERSION"
+out="$(CAGE_HOME="$T/doc" cage doctor 2>&1 || true)"
+grep -q "! microsandbox 0.7.99 (cage is tested with $pin)" <<<"$out" || fail "doctor didn't warn about the msb version: $out"
+CAGE_HOME="$T/doc" cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+assert c["msb"]["status"] == "warn" and "0.7.99" in c["msb"]["title"], c["msb"]' || fail "the app's check doesn't warn about the msb version"
+echo "msb 0.7.4" > "$MSB_STUB_VERSION"
+out="$(CAGE_HOME="$T/doc" cage doctor 2>&1 || true)"
+grep -q "✗ microsandbox 0.7.4 is too old for cage" <<<"$out" && grep -q "run: cage fix" <<<"$out" || fail "doctor: an old msb: $out"
+CAGE_HOME="$T/doc" cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+assert c["msb"]["status"] == "bad" and c["msb"]["fix"], c["msb"]' || fail "the app's check: an old msb isn't something cage fixes"
+: > "$MSB_LOG"
+if cage up claude 2>"$T/err"; then fail "up ran with a microsandbox that's too old"; fi
+grep -q "microsandbox 0.7.4 is too old for cage; run: cage fix" "$T/err" || fail "up: $(cat "$T/err")"
+grep -q '^run | ' "$MSB_LOG" && fail "up started a VM with an old msb"
+printf 'y\n' | cage update claude 2>"$T/err" || fail "update with an old msb: $(cat "$T/err")"
+grep -q "✓ microsandbox $pin" "$T/err" || fail "update didn't install microsandbox $pin: $(cat "$T/err")"
+grep -q '^run | ' "$MSB_LOG" || fail "update didn't go on to the agents"
+rm -f "$MSB_STUB_VERSION"
+unset CAGE_MSB_INSTALLER MSB_HOME
+ok "doctor and the app's check warn about an msb cage isn't tested with; up refuses a too-old one, update replaces it"
 
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   cat >> "$CAGE_HOME/cage.env" <<'EOF'

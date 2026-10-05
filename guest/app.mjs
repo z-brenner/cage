@@ -7,12 +7,20 @@
 //   out/<id>.json  answers to the app's other requests: scheduled tasks (cc-connect's management API) and the
 //                  agent's work folder (list, fetch, put)
 // Started by guest/app.sh as the agent user, with APP_DIR, APP_BRIDGE_URL, APP_MGMT_URL, APP_TOKEN and APP_WORK in
-// its environment. Node 22's own WebSocket and fetch; no packages.
+// its environment. Node 22's own WebSocket and fetch; no packages. test/relay.test.mjs runs it against a fake bridge.
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
 export const MAX_FILE = 25 * 1024 * 1024
 const MAX_LOG = 8 * 1024 * 1024
+const HOUR = 3600 * 1000
+
+// What the relay tells cc-connect it takes. cc-connect sends a kind of message only if it's listed here (a video
+// fails instead of arriving), so every kind the relay handles must be in it (test/app.test.mjs checks).
+export const CAPABILITIES = ['text', 'image', 'file', 'audio', 'video', 'card', 'buttons', 'typing', 'update_message',
+  'preview', 'delete_message', 'reconstruct_reply']
+const MEDIA = ['image', 'file', 'audio', 'video']
 
 // --- pure helpers (test/app.test.mjs) ------------------------------------------------------------------------------
 // One person ("you") talks to the agent; "session" names a conversation: "you" is the chat, "usage" asks for the
@@ -24,6 +32,10 @@ export function safeName (name) { // a plain file name: no folders, no leading d
   const base = path.basename(String(name || '')).replace(/[^\w.\- ()+,@]+/g, '_').replace(/^[.\s]+/, '').slice(-120)
   return base || 'file'
 }
+
+// Where a file goes in files/: <ms>-<4 hex>-<name>, like the app's own uploads. The app strips exactly that prefix
+// to show the name, so "q3-results.txt" stays "q3-results.txt".
+export const sharedName = (name) => `files/${Date.now()}-${crypto.randomBytes(2).toString('hex')}-${safeName(name)}`
 
 // Buttons as cc-connect sends them (its Go names, Text/Data, or the documented text/data), as [[{text, data}]].
 export const buttonsOf = (rows) => (Array.isArray(rows) ? rows : []).map((row) =>
@@ -47,6 +59,9 @@ export function entryOf (m) {
   }
 }
 
+// The kinds of message from cc-connect that the relay acts on (besides register_ack and pong).
+export const handles = (type) => type === 'preview_start' || MEDIA.includes(type) || entryOf({ type }) !== null
+
 // A path inside the agent's work folder, or null if it would leave it.
 export function inWork (work, rel) {
   const p = path.resolve(work, String(rel || '.').replace(/^\/+/, ''))
@@ -56,6 +71,48 @@ export function inWork (work, rel) {
 // The management API paths the app may call: scheduled tasks, and cc-connect's status.
 export const apiAllowed = (method, p) => /^\/api\/v1\/(cron(\/[\w-]+(\/exec)?)?|status)(\?[\w=&%.-]*)?$/.test(String(p || '')) &&
   ['GET', 'POST', 'DELETE', 'PATCH'].includes(method)
+
+// Keeps the chat folder from growing forever on your computer's disk. A file in files/ that log.jsonl, log.1.jsonl
+// or a request still waiting in in/ mentions is always kept. Any other goes once it's older than 7 days, or, while
+// files/ holds more than 2 GB, oldest first (but not in its first hour: it may be an upload about to be sent, or a
+// download the app is about to fetch). Answers in out/ that the app never picked up go after 10 minutes.
+export function tidy (dir, { now = Date.now(), keep = 7 * 24 * HOUR, max = 2 * 1024 ** 3, fresh = HOUR, answers = 10 * 60 * 1000 } = {}) {
+  const used = new Set()
+  const waiting = (() => { try { return fs.readdirSync(path.join(dir, 'in')).map((n) => path.join('in', n)) } catch { return [] } })()
+  for (const rel of ['log.jsonl', 'log.1.jsonl', ...waiting]) {
+    let text
+    try { text = fs.readFileSync(path.join(dir, rel), 'utf8') } catch { continue }
+    for (const m of text.matchAll(/"(files\\?\/(?:[^"\\]|\\.)*)"/g)) { // as JSON strings, so escaped names count too
+      try { used.add(JSON.parse(`"${m[1]}"`)) } catch {}
+    }
+  }
+  const files = []
+  let total = 0
+  for (const name of (() => { try { return fs.readdirSync(path.join(dir, 'files')) } catch { return [] } })()) {
+    try {
+      const st = fs.lstatSync(path.join(dir, 'files', name))
+      if (st.isDirectory()) continue
+      total += st.size
+      if (!used.has(`files/${name}`)) files.push({ name, size: st.size, at: st.mtimeMs })
+    } catch {}
+  }
+  let removed = 0
+  let freed = 0
+  const drop = (f) => {
+    try { fs.rmSync(path.join(dir, 'files', f.name), { force: true }); removed++; freed += f.size; total -= f.size } catch {}
+  }
+  files.sort((a, b) => a.at - b.at)
+  for (const f of files) if (now - f.at > keep) drop(f)
+  for (const f of files) if (total > max && now - f.at > fresh && now - f.at <= keep) drop(f)
+  for (const name of (() => { try { return fs.readdirSync(path.join(dir, 'out')) } catch { return [] } })()) {
+    const p = path.join(dir, 'out', name)
+    try {
+      const st = fs.lstatSync(p)
+      if (!st.isDirectory() && now - st.mtimeMs > answers) fs.rmSync(p, { force: true })
+    } catch {}
+  }
+  return { removed, freed }
+}
 
 // --- the relay -----------------------------------------------------------------------------------------------------
 async function main () {
@@ -68,12 +125,25 @@ async function main () {
   const say = (...a) => console.log('cage-app:', ...a)
   for (const d of ['in', 'out', 'files']) fs.mkdirSync(path.join(DIR, d), { recursive: true })
   process.umask(0o022)   // the app on your computer reads what's written here
+  // One bad moment (an odd message, a hiccup on the shared folder) mustn't take the relay down: while it restarts,
+  // cc-connect has nowhere to send replies, and they're lost.
+  process.on('uncaughtException', (e) => say('unexpected error (still running):', e?.stack || e))
 
+  // Writes to the shared folder. If they fail (your computer's disk is full, say), that's said once, not on every
+  // message, and the relay keeps going.
+  const failing = new Set()
+  const write = (what, fn) => {
+    try { fn(); failing.delete(what); return true } catch (e) {
+      if (!failing.has(what)) say(`couldn't write ${what} (is your computer's disk full?):`, e.message)
+      failing.add(what)
+      return false
+    }
+  }
   const log = (e) => {
     try {
       if (fs.statSync(LOG).size > MAX_LOG) fs.renameSync(LOG, path.join(DIR, 'log.1.jsonl'))   // the app starts over
     } catch {}
-    fs.appendFileSync(LOG, JSON.stringify({ at: Date.now(), ...e }) + '\n')
+    write('the chat log', () => fs.appendFileSync(LOG, JSON.stringify({ at: Date.now(), ...e }) + '\n'))
   }
   const out = (id, data) => {
     const f = path.join(DIR, 'out', safeName(id) + '.json')
@@ -81,10 +151,13 @@ async function main () {
     fs.renameSync(f + '.tmp', f)
   }
   const saveFile = (name, data, kind, session, mime) => {
-    const rel = `files/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${safeName(name)}`
+    const rel = sharedName(name)
     const buf = Buffer.from(String(data || ''), 'base64')
-    fs.writeFileSync(path.join(DIR, rel), buf)
-    log({ t: 'file', session, kind, name: safeName(name), path: rel, mime: mime || '', size: buf.length })
+    if (write('a file from the agent', () => fs.writeFileSync(path.join(DIR, rel), buf))) {
+      log({ t: 'file', session, kind, name: safeName(name), path: rel, mime: mime || '', size: buf.length })
+    } else {
+      log({ t: 'error', session, text: `The agent sent ${safeName(name)}, but it couldn't be saved on your computer.` })
+    }
   }
   const readShared = (rel) => { // a file the app put in files/, for cc-connect
     if (!/^files\/[^/]+$/.test(rel)) throw new Error('not a shared file: ' + rel)
@@ -93,6 +166,14 @@ async function main () {
     if (!st.isFile() || st.size > MAX_FILE) throw new Error('not a file, or too big: ' + rel)
     return fs.readFileSync(p).toString('base64')
   }
+  const tidyUp = () => {
+    try {
+      const { removed, freed } = tidy(DIR)
+      if (removed) say(`tidied the chat folder: removed ${removed} old file(s), ${Math.round(freed / 1e6)} MB`)
+    } catch (e) { say('couldn\'t tidy the chat folder:', e.message) }
+  }
+  tidyUp()
+  setInterval(tidyUp, HOUR)
 
   // streaming previews: write at most every 600 ms per message, and always the last version
   const pending = new Map()
@@ -111,49 +192,57 @@ async function main () {
   let ready = false
   let delay = 1000
   const send = (o) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)) }
+  const canSend = () => ready && ws?.readyState === WebSocket.OPEN
+  function onFrame (m) {
+    if (m.type === 'register_ack') {
+      ready = !!m.ok
+      if (ready) { delay = 1000; log({ t: 'status', connected: true }) } else say('bridge refused:', m.error)
+      return
+    }
+    if (!handles(m.type)) return
+    const session = sessionOf(m.session_key)
+    if (m.type === 'preview_start') {
+      const handle = `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      send({ type: 'preview_ack', ref_id: m.ref_id, preview_handle: handle })
+      log({ t: 'preview', session, ctx: String(m.reply_ctx ?? ''), handle, text: String(m.content ?? '') })
+      return
+    }
+    if (MEDIA.includes(m.type)) {
+      const ext = m.type === 'audio' ? '.' + (m.format || 'mp3') : m.type === 'video' ? '.' + (m.format || 'mp4') : ''
+      saveFile(m.file_name || `${m.type}${ext}`, m.data, m.type, session, m.mime_type)
+      return
+    }
+    const e = entryOf(m)
+    if (e.t === 'update') return update(e)
+    if (e.t === 'delete') settle(e.handle)
+    else if (e.t !== 'typing') for (const h of [...pending.keys()]) settle(h)   // a preview's last words come first
+    log(e)
+  }
   function connect () {
     const sock = new WebSocket(BRIDGE)
     ws = sock
     sock.addEventListener('open', () => {
-      send({ type: 'register', platform: 'app', capabilities: ['text', 'image', 'file', 'audio', 'card', 'buttons', 'typing', 'update_message', 'preview', 'delete_message', 'reconstruct_reply'], metadata: { description: "cage's app" } })
+      send({ type: 'register', platform: 'app', capabilities: CAPABILITIES, metadata: { description: "cage's app" } })
     })
     sock.addEventListener('message', (ev) => {
       let m
       try { m = JSON.parse(String(ev.data)) } catch { return }
-      if (m.type === 'register_ack') {
-        ready = !!m.ok
-        if (ready) { delay = 1000; log({ t: 'status', connected: true }) } else say('bridge refused:', m.error)
-        return
-      }
-      if (m.type === 'pong') return
-      const session = sessionOf(m.session_key)
-      if (m.type === 'preview_start') {
-        const handle = `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-        send({ type: 'preview_ack', ref_id: m.ref_id, preview_handle: handle })
-        log({ t: 'preview', session, ctx: String(m.reply_ctx ?? ''), handle, text: String(m.content ?? '') })
-        return
-      }
-      if (['image', 'file', 'audio', 'video'].includes(m.type)) {
-        const ext = m.type === 'audio' ? '.' + (m.format || 'mp3') : m.type === 'video' ? '.' + (m.format || 'mp4') : ''
-        saveFile(m.file_name || `${m.type}${ext}`, m.data, m.type, session, m.mime_type)
-        return
-      }
-      const e = entryOf(m)
-      if (!e) return
-      if (e.t === 'update') return update(e)
-      if (e.t === 'delete') settle(e.handle)
-      else if (e.t !== 'typing') for (const h of [...pending.keys()]) settle(h)   // a preview's last words come first
-      log(e)
+      if (!m || typeof m !== 'object') return
+      try { onFrame(m) } catch (e) { say('bad frame from cc-connect:', e.message) }
     })
-    sock.addEventListener('close', () => {
+    // Node's WebSocket says 'error' and never 'close' when nothing is listening (cc-connect restarting), so either
+    // one means this connection is over: try again.
+    const lost = () => {
       if (ws !== sock) return
       if (ready) log({ t: 'status', connected: false })
       ready = false
       ws = null
+      try { sock.close() } catch {}
       setTimeout(connect, delay)
       delay = Math.min(delay * 2, 30000)
-    })
-    sock.addEventListener('error', () => {})
+    }
+    sock.addEventListener('close', lost)
+    sock.addEventListener('error', lost)
   }
   connect()
   setInterval(() => send({ type: 'ping', ts: Date.now() }), 30000)
@@ -188,7 +277,9 @@ async function main () {
           body: r.body === undefined ? undefined : JSON.stringify(r.body), signal: AbortSignal.timeout(15000)
         })
         out(id, await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` })))
-      } catch (e) { out(id, { ok: false, error: String(e.message || e) }) }
+      } catch (e) {
+        out(id, { ok: false, error: e?.cause?.code === 'ECONNREFUSED' ? "the agent's chat service isn't running right now; try again in a minute" : String(e.message || e) })
+      }
     } else if (r.type === 'ls') {
       const dir = inWork(WORK, r.path)
       if (!dir) return out(id, { ok: false, error: 'outside the work folder' })
@@ -207,7 +298,7 @@ async function main () {
         if (!real || !inWork(WORK, path.relative(WORK, real))) throw new Error('outside the work folder')
         const st = fs.statSync(real)
         if (!st.isFile() || st.size > MAX_FILE) throw new Error(st.isFile() ? 'too big (25 MB at most)' : 'not a file')
-        const rel = `files/${Date.now()}-${safeName(path.basename(real))}`
+        const rel = sharedName(path.basename(real))
         fs.copyFileSync(real, path.join(DIR, rel))
         out(id, { ok: true, path: rel, name: path.basename(real), size: st.size })
       } catch (e) { out(id, { ok: false, error: String(e.message || e) }) }
@@ -225,18 +316,21 @@ async function main () {
     }
   }
 
+  // Messages and button presses go to cc-connect in order, so while it's away they wait in in/: once one has to
+  // wait, every later one waits behind it. The other requests don't need it and are answered meanwhile (the work
+  // folder at once; scheduled tasks get a quick "not running" rather than running late, after the app gave up).
   let busy = false
   setInterval(async () => {
     if (busy) return
     busy = true
     try {
       const names = fs.readdirSync(path.join(DIR, 'in')).filter((n) => /^[\w-]+\.json$/.test(n)).sort()
+      let blocked = false
       for (const n of names) {
         const f = path.join(DIR, 'in', n)
         let r = null
         try { r = JSON.parse(fs.readFileSync(f, 'utf8')) } catch {}
-        // messages wait for cc-connect; the other requests don't need it
-        if (r && ['message', 'action'].includes(r.type) && !ready) break
+        if (r && ['message', 'action'].includes(r.type) && (blocked || !canSend())) { blocked = true; continue }
         fs.rmSync(f, { force: true })
         if (!r) continue
         try { await handle(r) } catch (e) { log({ t: 'error', session: r.session || 'you', text: String(e.message || e) }); say(e) }
