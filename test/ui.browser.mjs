@@ -161,7 +161,13 @@ fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), 
 await page.locator('.chat-banner', { hasText: 'Claude Code’s chat service is reconnecting' }).waitFor({ timeout: 10000 })
 fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'status', connected: true }) + '\n')
 await page.locator('.chat-banner').waitFor({ state: 'hidden', timeout: 10000 })
-ok('a new chat log keeps the conversation on screen, also after a reload; a link says where it really goes; a dropped relay is shown')
+// an error on the agent's side ends its "working…" dots: it isn't working on anything any more
+fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'typing', session: 'you', on: true }) + '\n')
+await chat.locator('.typing').waitFor({ state: 'visible', timeout: 10000 })
+fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), t: 'error', session: 'you', text: 'the agent stopped' }) + '\n')
+await chat.locator('.chat-note.bad', { hasText: 'The agent stopped' }).waitFor({ timeout: 10000 })
+if (await chat.locator('.typing').isVisible()) fail('the agent still looks busy after an error')
+ok('a new chat log keeps the conversation on screen, also after a reload; a link says where it really goes; a dropped relay is shown; an error ends "working…"')
 
 // its files and its plan usage
 await page.locator('.tabs').getByRole('link', { name: 'Files' }).click()
@@ -388,6 +394,21 @@ if (!/CAGE_ASK_ALL="on"/.test(fs.readFileSync(path.join(home, 'cage.env'), 'utf8
 await dialog.getByRole('button', { name: 'Close' }).click()
 ok('a yes/no question: answered with a button; the setting is saved')
 
+// Stopping a backup (or an update, an add, a restore) halfway asks first, and No keeps it going
+await page.evaluate(() => runJob(['backup'], 'Backing up'))
+await secret.waitFor({ timeout: 15000 })   // its passphrase
+let stopAsked = ''
+page.once('dialog', (d) => { stopAsked = d.message(); d.dismiss() })
+await dialog.getByRole('button', { name: 'Stop' }).click()
+if (!/^Stop the backup\? Nothing will be saved/.test(stopAsked)) fail('Stop did not ask first: ' + stopAsked)
+const listed = async () => (await (await fetch(base + '/api/jobs', { headers: { 'X-Cage-Token': token } })).json()).jobs.some((j) => j.title === 'Backing up')
+for (let i = 0; i < 5; i++) { if (!(await listed())) fail('the backup stopped though you said No'); await page.waitForTimeout(200) }
+page.once('dialog', (d) => d.accept())
+await dialog.getByRole('button', { name: 'Stop' }).click()
+await page.locator('#job-status', { hasText: 'didn’t work' }).waitFor({ timeout: 15000 })
+await dialog.getByRole('button', { name: 'Close' }).click()
+ok('Stop asks first for a backup: No keeps it going, Yes stops it')
+
 // cage mask try: what the vendor would see
 await page.getByPlaceholder('Try: email bob@acme.com about Acme').fill('mail bob@example.com')
 await page.getByRole('button', { name: 'Preview' }).click()
@@ -525,14 +546,21 @@ await p3.goto(base3 + '/#' + token)
 await p3.locator('#version', { hasText: 'cage v1.0.0' }).waitFor({ timeout: 15000 })
 await p3.evaluate(() => { window.__oldPage = true })
 const srv = path.join(inst, 'host', 'ui', 'server.py')
-fs.writeFileSync(srv, fs.readFileSync(srv, 'utf8').replace('return self.send(200, "ok", "text/plain")', 'return self.send(200, "ok, updated", "text/plain")'))
+// a log left open doesn't hold the restart up (it's stopped: the page can open it again)
+const viewer = await (await fetch(base3 + '/api/jobs', { method: 'POST', headers: { 'X-Cage-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify({ args: ['logs', 'codex'], title: 'Codex: activity log' }) })).json()
+if (!viewer.id) fail('the log did not start: ' + JSON.stringify(viewer))
+// the update renames each new file into place, dated as the release dates it: maybe the same as the one before
+const was = fs.statSync(srv)
+fs.writeFileSync(srv + '.new', fs.readFileSync(srv, 'utf8').replace('return self.send(200, "ok", "text/plain")', 'return self.send(200, "ok, updated", "text/plain")'))
+fs.utimesSync(srv + '.new', was.atime, was.mtime)
+fs.renameSync(srv + '.new', srv)
 fs.writeFileSync(path.join(inst, 'VERSION'), 'v1.0.1\n')
 const healthz = async () => { try { return await (await fetch(base3 + '/healthz')).text() } catch (e) { return '' } }
 for (let i = 0; i < 50 && (await healthz()) !== 'ok, updated'; i++) await p3.waitForTimeout(200)
 if ((await healthz()) !== 'ok, updated') fail('the server did not restart with its new code')
 await p3.waitForFunction(() => !window.__oldPage, null, { timeout: 20000 })   // a new page, not just a redraw
 await p3.locator('#version', { hasText: 'cage v1.0.1' }).waitFor({ timeout: 20000 })
-ok('updating while the app is open: the server restarts with its new code, and the page reloads')
+ok('updating while the app is open: the server restarts with its new code (same date, a log open), and the page reloads')
 
 // cage stops answering: within 15 seconds the page says so, greys out the agents and won't send; the installed app
 // (the service worker) shows a page that says what to do instead of the browser's error
@@ -556,6 +584,21 @@ await p3.reload()
 await p3.getByRole('heading', { name: 'cage isn’t running on this computer' }).waitFor({ timeout: 10000 })
 await p3.close()
 ok('cage not answering: a banner within 15 s, sending off (not when it\'s only slow); reloading shows what to do, not a browser error')
+
+// the first answer can take a while after the computer wakes up: after 8 seconds, the page says so
+const p5 = await (await fresh()).newPage()
+watch(p5)
+await p5.clock.install()
+await p5.addInitScript(() => { // cage's state never comes
+  const real = window.fetch
+  window.fetch = (url, o) => String(url).startsWith('/api/state') ? new Promise(() => {}) : real(url, o)
+})
+await p5.goto(base + '/#pair=' + pairing())
+await p5.getByText('Waking up…').waitFor({ timeout: 10000 })
+await p5.clock.fastForward(9000)
+await p5.getByText('Still starting… This can take a minute after your computer wakes up.').waitFor({ timeout: 5000 })
+await p5.context().close()
+ok('a slow first answer: after 8 seconds, the page says it is still starting')
 
 // on a phone: the sidebar is a menu
 const offscreen = () => page.waitForFunction(() => document.getElementById('sidebar').getBoundingClientRect().right <= 0, null, { timeout: 5000 })

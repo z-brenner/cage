@@ -4,9 +4,10 @@ without a browser or a running server. test/ui.sh tests the running server.
 
   python3 test/server_test.py
 """
-import importlib.util, io, json, os, signal, socket, struct, sys, tempfile, threading, time, unittest
+import atexit, contextlib, importlib.util, io, json, os, shutil, signal, socket, struct, sys, tempfile, threading, time, unittest
 
 HOME = tempfile.mkdtemp()
+atexit.register(shutil.rmtree, HOME, True)
 os.environ["CAGE_HOME"] = HOME
 spec = importlib.util.spec_from_file_location("server", os.path.join(os.path.dirname(__file__), "..", "host", "ui", "server.py"))
 server = importlib.util.module_from_spec(spec)
@@ -48,14 +49,18 @@ class Names(unittest.TestCase):
 
 
 class FakeHandler(server.Handler):
-    """Just enough of a request for Handler.length() and Handler.body()."""
+    """Just enough of a request for Handler.length(), Handler.body() and Handler.route(); what it would answer goes
+    in .answers."""
     def __init__(self, headers, body=b""):
-        self.headers, self.rfile = headers, io.BytesIO(body)
+        self.headers, self.rfile, self.answers = headers, body if hasattr(body, "read") else io.BytesIO(body), []
 
         class Conn:
             def settimeout(self, t):
                 pass
         self.connection = Conn()
+
+    def send(self, status, body=b"", ctype="application/json", extra=None):
+        self.answers.append((status, body))
 
 
 class Requests(unittest.TestCase):
@@ -80,6 +85,26 @@ class Requests(unittest.TestCase):
         self.refused(400, {"Content-Length": "3"}, b"{no")
         self.refused(400, {"Content-Length": "9"}, b"{}")   # cut short
         self.refused(413, {"Content-Length": "500"}, b"{}" * 250)
+
+    def test_a_body_that_never_comes(self):
+        """A client that says how big its body is, then stalls, gets 408 (after 30 seconds), not a thread for ever."""
+        class Stalled:
+            def read(self, n):
+                raise socket.timeout("timed out")
+        self.refused(408, {"Content-Length": "8"}, Stalled())
+
+    def test_a_bug_still_gets_an_answer(self):
+        """Something unexpected going wrong answers the page in JSON (500), not with a dropped connection."""
+        h = FakeHandler({})
+        h.path = "/api/state"
+
+        def broken(method):
+            raise RuntimeError("a bug")
+        h.dispatch = broken
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            h.route("GET")
+        self.assertEqual(h.answers, [(500, {"error": "something went wrong in cage's web app"})])
+        self.assertIn("RuntimeError('a bug')", log.getvalue())   # the details go to the log (ui.log)
 
 
 class Arguments(unittest.TestCase):
@@ -159,6 +184,40 @@ class Jobs(unittest.TestCase):
             server.Job.jobs = saved
         self.assertEqual(sorted(jobs), ["fresh", "log", "long", "recent", "stuck", "watched"])
         self.assertEqual(sorted(stopped), [("logs", signal.SIGTERM), ("up", signal.SIGKILL)])
+
+
+class SlowState(unittest.TestCase):
+    """`cage _state` can be slow (just after the computer wakes up): the page gets the last answer, marked stale, or,
+    with none yet, a 504 in words, instead of waiting for ever."""
+    def setUp(self):
+        self.stub, self.slow = os.path.join(HOME, "cage-stub"), os.path.join(HOME, "slow")
+        with open(self.stub, "w") as f:
+            f.write('#!/bin/sh\nif [ -e "%s" ]; then sleep 5; fi\necho \'{"version": "v1"}\'\n' % self.slow)
+        os.chmod(self.stub, 0o755)
+        self.saved = server.CAGE, server.State.TIMEOUT
+        server.CAGE, server.State.TIMEOUT = self.stub, 0.5
+        server.State.at, server.State.body, server.State.ok = 0.0, b"{}", False
+
+    def tearDown(self):
+        server.CAGE, server.State.TIMEOUT = self.saved
+        server.State.at, server.State.body, server.State.ok = 0.0, b"{}", False
+        if os.path.exists(self.slow):
+            os.unlink(self.slow)
+
+    def test_slow(self):
+        open(self.slow, "w").close()
+        with self.assertRaises(server.Refused) as e:   # nothing to show yet
+            server.State.get()
+        self.assertEqual((e.exception.status, e.exception.error), (504, "cage is taking too long to answer"))
+        os.unlink(self.slow)
+        server.State.stale()
+        self.assertEqual(json.loads(server.State.get()), {"version": "v1"})
+        open(self.slow, "w").close()
+        server.State.stale()
+        self.assertEqual(json.loads(server.State.get()), {"version": "v1", "stale": True})   # the last answer, said to be old
+        os.unlink(self.slow)
+        server.State.stale()
+        self.assertEqual(json.loads(server.State.get()), {"version": "v1"})
 
 
 class Peers(unittest.TestCase):

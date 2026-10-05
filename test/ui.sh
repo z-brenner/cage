@@ -408,6 +408,7 @@ ok "a work-folder file downloads under its own name"
 # An installed release (a VERSION file), for updating while the app is open: the server restarts itself with the new
 # code once nothing is running, and the page reloads to get the new page
 mkdir -p "$T/inst" && tar --exclude=.git --exclude=node_modules -C "$ROOT" -cf - . | tar -C "$T/inst" -xf - && echo v1.0.0 > "$T/inst/VERSION"
+touch -d '2000-01-01 00:00Z' "$T/inst/host/ui/server.py"   # dated as a release dates its files (to the second)
 PORT3="$(free_port)"
 CAGE_UI_PORT="$PORT3" "$T/inst/cage" ui --no-open 2>/dev/null || fail "the installed cage ui"
 SERVER3="$(up_pid "$CAGE_HOME")"

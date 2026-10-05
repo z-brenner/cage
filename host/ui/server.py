@@ -496,6 +496,7 @@ class Chat:
 
 class State:
     lock, at, body, ok = threading.Lock(), 0.0, b"{}", False
+    TIMEOUT = 20   # seconds `cage _state` may take
 
     @classmethod
     def get(cls):
@@ -508,7 +509,7 @@ class State:
                 env = dict(os.environ)
                 env.pop("CAGE_PROTO", None)
                 try:
-                    out = subprocess.run([CAGE, "_state"], capture_output=True, env=env, timeout=20).stdout
+                    out = subprocess.run([CAGE, "_state"], capture_output=True, env=env, timeout=cls.TIMEOUT).stdout
                     d = json.loads(out)
                     if isinstance(d, dict):
                         cls.body, cls.ok = out, True
