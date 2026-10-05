@@ -1734,9 +1734,63 @@ msb_version_ok() { # false when the installed microsandbox is older than cage wo
 }
 msb_tested() { [ -z "$MSB_HAVE" ] || [ "$MSB_HAVE" = "${CAGE_MSB_VERSION#v}" ]; }   # after msb_version_ok
 
+nested_vm() { # this computer is itself a virtual machine, one that doesn't pass virtualization on to cage's VMs
+  local f="${CAGE_CPUINFO:-/proc/cpuinfo}"
+  grep -qw hypervisor "$f" 2>/dev/null && ! grep -qwE 'vmx|svm' "$f" 2>/dev/null
+}
+
+cc_connect_url() { # the cc-connect download the VMs fetch (cage.env's version, or this cage's), for the network checks
+  local v arch=amd64
+  # load_env without a config: its defaults only (its "no config yet" is no problem here)
+  v="$( die() { :; }; [ -f "$CAGE_ENV" ] || CAGE_ENV=/dev/null; load_env 2>/dev/null; printf '%s' "${CAGE_CC_CONNECT_VERSION:-}" )"
+  case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; esac
+  printf 'https://github.com/chenhg5/cc-connect/releases/download/%s/cc-connect-%s-linux-%s.tar.gz' "$v" "$v" "$arch"
+}
+
+reach() { # reach <url>: ok (it answered), blocked (a proxy or firewall said no) or down (no answer at all)
+  local r
+  r="$(curl -sS -o /dev/null -I --max-time 8 -w '%{http_code} %{http_connect}' "$1" 2>/dev/null)" || true
+  case "$r" in
+    403\ *|407\ *|*\ 4[0-9][0-9]) echo blocked ;;   # these addresses answer 200 or 302; a 403 is something in between
+    [1-9]*) echo ok ;;
+    *) echo down ;;
+  esac
+}
+
+and_list() { # and_list <word>...: "a", "a and b", "a, b and c"
+  local out="" i=0 w
+  for w in "$@"; do
+    i=$((i + 1))
+    if [ $i = 1 ]; then out="$w"; elif [ $i = $# ]; then out="$out and $w"; else out="$out, $w"; fi
+  done
+  printf '%s' "$out"
+}
+
+NET_PROBLEM=""
+net_check() { # can this computer reach what the VMs download from? npm, cc-connect's releases on GitHub, Ubuntu's
+  # packages, each on its own (in parallel), so the answer names only the ones that failed. Sets NET_PROBLEM (in words).
+  local urls=(https://registry.npmjs.org/ "$(cc_connect_url)" http://archive.ubuntu.com/ubuntu/) d i h down=() blocked=() pids=""
+  d="$(mktemp -d)"
+  for i in 0 1 2; do reach "${urls[$i]}" > "$d/$i" & pids="$pids $!"; done
+  # shellcheck disable=SC2086
+  wait $pids
+  for i in 0 1 2; do
+    h="${urls[$i]#*://}" h="${h%%/*}"
+    case "$(cat "$d/$i")" in ok) ;; blocked) blocked+=("$h") ;; *) down+=("$h") ;; esac
+  done
+  rm -rf "$d"
+  NET_PROBLEM=""
+  [ ${#down[@]} = 0 ] || NET_PROBLEM="$(and_list "${down[@]}") didn't answer."
+  [ ${#blocked[@]} = 0 ] || NET_PROBLEM="${NET_PROBLEM:+$NET_PROBLEM }A proxy or firewall blocks $(and_list "${blocked[@]}")."
+  [ -z "$NET_PROBLEM" ]
+}
+
+need_hint() { if command -v apt-get >/dev/null 2>&1; then echo "sudo apt-get install $1"; else echo "install $1"; fi; }
+
 # Checks this computer. Prints one line per check (and a fix under each problem); fails if anything is missing.
+# CAGE_KVM and CAGE_CPUINFO stand in for /dev/kvm and /proc/cpuinfo (for the tests).
 check_host() {
-  local good=0
+  local good=0 kvm="${CAGE_KVM:-/dev/kvm}"
   if find_msb && command -v "$MSB" >/dev/null 2>&1; then
     if ! msb_version_ok; then
       echo "  ${C_ERR}✗${C_0} microsandbox $MSB_HAVE is too old for cage"
@@ -1755,16 +1809,25 @@ check_host() {
     Darwin/arm64) echo "  ${C_OK}✓${C_0} macOS on Apple Silicon (untested)" ;;
     Darwin/*) echo "  ${C_ERR}✗${C_0} microsandbox needs Apple Silicon on macOS"; good=1 ;;
     Linux/*)
-      if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "  ${C_OK}✓${C_0} KVM is ready (/dev/kvm accessible)"
-      elif is_wsl && [ ! -e /dev/kvm ]; then
+      if [ -r "$kvm" ] && [ -w "$kvm" ]; then echo "  ${C_OK}✓${C_0} KVM is ready (/dev/kvm accessible)"
+      elif is_wsl && [ ! -e "$kvm" ]; then
         echo "  ${C_ERR}✗${C_0} no /dev/kvm in WSL: cage needs WSL 2 on Windows 11 with nested virtualization"
-        echo "    ${C_DIM}→ it's on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run wsl --shutdown${C_0}"; good=1
+        echo "    ${C_DIM}→ it's on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run: wsl --shutdown${C_0}"; good=1
       elif is_wsl; then
         echo "  ${C_ERR}✗${C_0} /dev/kvm isn't accessible to you"
-        echo "    ${C_DIM}→ sudo usermod -aG kvm \$USER, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen${C_0}"; good=1
-      elif [ -e /dev/kvm ]; then
+        echo "    ${C_DIM}→ run: cage fix, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen${C_0}"; good=1
+      elif [ -e "$kvm" ]; then
         echo "  ${C_ERR}✗${C_0} /dev/kvm isn't accessible to you"
-        echo "    ${C_DIM}→ sudo usermod -aG kvm \$USER, then log out and back in${C_0}"; good=1
+        echo "    ${C_DIM}→ run: cage fix (it adds you to the kvm group), then log out and back in${C_0}"; good=1
+      elif nested_vm; then
+        # Inside a VM, the BIOS isn't the problem: the program running this VM has to pass virtualization on.
+        echo "  ${C_ERR}✗${C_0} no /dev/kvm: this computer is itself a virtual machine, and it doesn't let cage start VMs inside it"
+        echo "    ${C_DIM}→ turn on nested virtualization for it, then restart it:${C_0}"
+        echo "      ${C_DIM}VirtualBox: Settings > System > Processor > Enable Nested VT-x/AMD-V${C_0}"
+        echo "      ${C_DIM}VMware: Processors > Virtualize Intel VT-x/EPT or AMD-V/RVI${C_0}"
+        echo "      ${C_DIM}Parallels: Hardware > CPU & Memory > Advanced > Enable nested virtualization (a Mac needs an M3 or newer)${C_0}"
+        echo "      ${C_DIM}Hyper-V, on the Windows host: Set-VMProcessor -VMName <name> -ExposeVirtualizationExtensions \$true${C_0}"
+        echo "      ${C_DIM}a cloud server: an instance type with nested virtualization turned on, or a bare-metal one${C_0}"; good=1
       else
         echo "  ${C_ERR}✗${C_0} no /dev/kvm: this machine can't run VMs yet"
         echo "    ${C_DIM}→ turn on virtualization (Intel VT-x / AMD-V) in your BIOS or UEFI settings${C_0}"; good=1
@@ -1774,18 +1837,29 @@ check_host() {
           echo "  ${C_OK}✓${C_0} WSL distro $WSL_DISTRO_NAME with Windows interop"
         else
           echo "  ${C_ERR}✗${C_0} Windows interop is off, so cage can't keep WSL running after you close its window"
-          echo "    ${C_DIM}→ set enabled=true under [interop] in /etc/wsl.conf, then wsl --shutdown${C_0}"; good=1
+          echo "    ${C_DIM}→ set enabled=true under [interop] in /etc/wsl.conf, then run: wsl --shutdown${C_0}"; good=1
         fi
       fi
       ;;
   esac
+  # Not needed for the agents themselves, so only a warning: the web app and app sign-ins, and backups.
+  if command -v python3 >/dev/null 2>&1; then echo "  ${C_OK}✓${C_0} python3, for the web app (cage ui)"
+  else
+    echo "  ${C_AMBER}!${C_0} no python3: the web app (cage ui) and signing in to apps need it"
+    echo "    ${C_DIM}→ run: $(need_hint python3)${C_0}"
+  fi
+  if command -v openssl >/dev/null 2>&1; then echo "  ${C_OK}✓${C_0} openssl, for encrypted backups"
+  else
+    echo "  ${C_AMBER}!${C_0} no openssl: backups need it"
+    echo "    ${C_DIM}→ run: $(need_hint openssl)${C_0}"
+  fi
   return $good
 }
 
 # The setup screen's check of this computer, as JSON: [{id, status: ok|warn|bad, title, detail, fix, it}]. "fix": cage
 # can fix it itself (cage fix); "it": what to ask your IT department for, on a computer they manage.
 check_json() {
-  local out="" gb
+  local out="" gb kvm="${CAGE_KVM:-/dev/kvm}"
   item() {
     out="$out${out:+,}{\"id\":$(jstr "$1"),\"status\":$(jstr "$2"),\"title\":$(jstr "$3"),\"detail\":$(jstr "$4"),\"fix\":$(jbool test -n "$5"),\"it\":$(jstr "$6")}"
   }
@@ -1797,10 +1871,12 @@ check_json() {
     item msb warn "microsandbox $MSB_HAVE is installed" "It runs your agents' private computers. cage is tested with ${CAGE_MSB_VERSION#v}; this one will most likely work too." "" ""
   else item msb ok "microsandbox is installed" "It runs your agents' private computers." "" ""; fi
   if [ "$(uname -s)" = Linux ]; then
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then item kvm ok "This computer can run virtual machines" "Each agent gets one of its own." "" ""
-    elif [ -e /dev/kvm ]; then item kvm bad "You can't use virtual machines yet" "cage adds you to the kvm group; it may ask for your password." fix ""
+    if [ -r "$kvm" ] && [ -w "$kvm" ]; then item kvm ok "This computer can run virtual machines" "Each agent gets one of its own." "" ""
+    elif [ -e "$kvm" ]; then item kvm bad "You can't use virtual machines yet" "cage adds you to the kvm group; it may ask for your password." fix ""
     elif is_wsl; then item kvm bad "Virtual machines are turned off inside WSL" "cage runs each agent in a small virtual machine inside WSL 2, which needs nested virtualization. Windows 11 allows it unless it's turned off." "" \
       "nested virtualization for WSL 2 (Intune: WSL settings > Allow nested virtualization, or nestedVirtualization=true in .wslconfig)"
+    elif nested_vm; then item kvm bad "This computer is a virtual machine that can't start its own" "cage runs each agent in a small virtual machine of its own, so the program running this one (VirtualBox, VMware, Parallels, Hyper-V or a cloud provider) has to allow nested virtualization. Turn it on in this virtual machine's settings, then restart it." "" \
+      "nested virtualization turned on for this virtual machine (VirtualBox: Enable Nested VT-x/AMD-V; VMware: Virtualize Intel VT-x/EPT; Hyper-V: Set-VMProcessor -ExposeVirtualizationExtensions \$true; cloud: an instance type with nested virtualization)"
     else item kvm bad "Virtualization is turned off" "Turn on Intel VT-x or AMD-V (SVM) in this computer's BIOS or UEFI settings, then restart." "" \
       "hardware virtualization (Intel VT-x or AMD-V) turned on in the firmware settings"; fi
     if is_wsl; then
@@ -1817,10 +1893,11 @@ check_json() {
     if [ "$gb" -ge 8 ]; then item memory ok "$gb GB of memory" "Each awake agent uses up to ${CAGE_MEMORY:-4G}B." "" ""
     else item memory warn "$gb GB of memory" "Each awake agent uses up to ${CAGE_MEMORY:-4G}B, so keep one or two awake at a time." "" ""; fi
   fi
-  if curl -fsS -o /dev/null --max-time 8 https://registry.npmjs.org/ 2>/dev/null && curl -fsS -o /dev/null --max-time 8 https://github.com/ 2>/dev/null; then
+  if net_check; then
     item network ok "This computer reaches the internet" "Agents download their tools once, then talk to their AI service." "" ""
-  else item network bad "This computer can't reach what the agents need" "github.com and registry.npmjs.org didn't answer. A company firewall or proxy may be in the way." "" \
+  else item network bad "This computer can't reach everything the agents need" "$NET_PROBLEM Your agents download their tools from there." "" \
     "access to github.com, registry.npmjs.org, deb.nodesource.com, archive.ubuntu.com and each AI service (claude.ai, anthropic.com, chatgpt.com, openai.com, cursor.com, google.com)"; fi
+  command -v openssl >/dev/null 2>&1 || item openssl warn "Backups need openssl" "Everything else works without it. To make backups: $(need_hint openssl)." "" ""
   printf '{"checks":[%s]}\n' "$out"
 }
 
@@ -1836,7 +1913,13 @@ cmd_fix() { # cage fix: what cage can fix on this computer itself (microsandbox,
 
 cmd_doctor() {
   local good=1 t u any
+  echo "  ${C_OK}✓${C_0} cage $(cage_version)"
   check_host || good=0
+  if net_check; then echo "  ${C_OK}✓${C_0} the internet: npm, GitHub and Ubuntu's packages answer (your agents download from them)"
+  else
+    echo "  ${C_ERR}✗${C_0} $NET_PROBLEM Your agents download their tools from there."
+    echo "    ${C_DIM}→ check your internet connection; on a work network, ask IT to allow them${C_0}"; good=0
+  fi
   if [ -f "$CAGE_ENV" ]; then
     load_env
     echo "  ${C_OK}✓${C_0} config $CAGE_ENV (agents: $CAGE_AGENTS)"
@@ -1846,7 +1929,7 @@ cmd_doctor() {
       :   # no Telegram bots, so no Telegram allowlist needed
     else
       echo "  ${C_ERR}✗${C_0} no Telegram allowlist yet"
-      echo "    ${C_DIM}→ cage setup${C_0}"; good=0
+      echo "    ${C_DIM}→ run: cage setup${C_0}"; good=0
     fi
     for a in $CAGE_AGENTS; do
       t="$(token_for "$a")" any=0
@@ -1854,7 +1937,7 @@ cmd_doctor() {
         if u="$(bot_username "$t")"; then echo "  ${C_OK}✓${C_0} $a bot: @$u"; any=1
         else
           echo "  ${C_ERR}✗${C_0} Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"
-          echo "    ${C_DIM}→ check the token in @BotFather, then cage setup $a${C_0}"; good=0
+          echo "    ${C_DIM}→ check the token in @BotFather, then run: cage setup $a${C_0}"; good=0
         fi
       fi
       t="$(cvar SLACK_BOT_TOKEN "$a")"
@@ -1863,7 +1946,7 @@ cmd_doctor() {
           echo "  ${C_OK}✓${C_0} $a in Slack ($(cvar SLACK_TEAM "$a"))"; any=1
         else
           echo "  ${C_ERR}✗${C_0} Slack rejected (or could not be reached for) $a's bot token"
-          echo "    ${C_DIM}→ cage chat add slack $a${C_0}"; good=0
+          echo "    ${C_DIM}→ run: cage chat add slack $a${C_0}"; good=0
         fi
       fi
       t="$(cvar DISCORD_TOKEN "$a")"
@@ -1872,7 +1955,7 @@ cmd_doctor() {
           echo "  ${C_OK}✓${C_0} $a in Discord"; any=1
         else
           echo "  ${C_ERR}✗${C_0} Discord rejected (or could not be reached for) $a's bot token"
-          echo "    ${C_DIM}→ cage chat add discord $a${C_0}"; good=0
+          echo "    ${C_DIM}→ run: cage chat add discord $a${C_0}"; good=0
         fi
       fi
       if [ $any = 0 ] && ! valid_token "$(token_for "$a")"; then
@@ -1883,7 +1966,7 @@ cmd_doctor() {
     else echo "  ${C_DIM}· no QR codes for your phone; to get them: sudo apt-get install qrencode${C_0}"; fi
   else
     echo "  ${C_ERR}✗${C_0} no config at $CAGE_ENV yet"
-    echo "    ${C_DIM}→ cage${C_0}"; good=0
+    echo "    ${C_DIM}→ run: cage, to set things up${C_0}"; good=0
   fi
   [ $good = 1 ] || exit 1
 }

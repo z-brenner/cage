@@ -40,7 +40,9 @@ fi
 exit 0
 EOF
 chmod +x "$T/bin/msb"
-export MSB_STUB_VERSION="$T/msb.version"
+# the internet, as cage's network checks see it (test/fake-curl.sh): all there unless a test says otherwise
+REAL_CURL="$(command -v curl)"; export REAL_CURL MSB_STUB_VERSION="$T/msb.version"
+ln -s "$ROOT/test/fake-curl.sh" "$T/bin/curl"
 export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" MSB_VOLUMES="$T/volumes" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
 : > "$MSB_EXISTING"
 cage() { "$ROOT/cage" "$@"; }
