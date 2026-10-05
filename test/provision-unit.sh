@@ -54,13 +54,20 @@ printf '#!/bin/sh\nexit 0\n' > "$T/bin/certutil"   # it's there (browser.sh need
 chmod +x "$T/bin/"*
 export T PATH="$T/bin:$PATH"
 
-lib() { # lib <case function>: runs a case below in a subshell, with provision.sh's functions and set -Eeuo pipefail
+lib() { # lib <case function> [args…]: runs a case below with provision.sh's functions and its set -Eeuo pipefail
+  # In a bash of its own, not a subshell: lib is called next to || and in if, where bash would turn set -e off for
+  # everything inside, subshells too. The cases are exported to it (export -f).
   : > "$T/calls"
-  ( CAGE_PROVISION_LIB=1 . "$ROOT/guest/provision.sh" claude
+  bash -c 'CAGE_PROVISION_LIB=1 . "$0" claude
     STEP_FILE="$T/step" CACHE="$T/cache" CACHED=0
-    "$@" ) > "$T/out" 2>&1
+    "$@"' "$ROOT/guest/provision.sh" "$@" > "$T/out" 2>&1
 }
 shown() { echo "$(cat "$T/out")"$'\n'"calls: $(cat "$T/calls")"; }
+
+still_running() { false; echo "STILL RUNNING after a command failed"; }
+export -f still_running
+if lib still_running || grep -q 'STILL RUNNING' "$T/out"; then fail "the cases run with set -e off: $(shown)"; fi
+ok "the cases run with provision.sh's set -e on, as provisioning does"
 
 # --- apt_install: its limits hold when it is an `if` condition (bash then ignores set -e and the ERR trap) ----------
 slow_apt() { # slow_apt <update|download>
@@ -69,6 +76,7 @@ slow_apt() { # slow_apt <update|download>
   if apt_install vim; then echo "IF-BRANCH TAKEN"; fi
   echo "took $((SECONDS - start))s"
 }
+export -f slow_apt
 export CAGE_APT_UPDATE_LIMIT=2 CAGE_APT_FETCH_LIMIT=2
 lib slow_apt update || fail "slow update: $(shown)"
 grep -q 'IF-BRANCH' "$T/out" && fail "apt_install worked although the package lists never came: $(shown)"
@@ -91,6 +99,7 @@ ok "apt_install's last step can't download (--no-download), and dpkg never asks 
 
 # --- the browser's libraries: Playwright only says which are missing (--dry-run); apt_install installs them ---------
 libs() { export STUB_NODE="$1"; install_browser; }
+export -f libs
 for f in ok missing other; do
   rc=0; lib libs "$f" || rc=$?
   if grep '^node .*install-deps' "$T/calls" | grep -qv -- '--dry-run'; then fail "Playwright ran apt itself ($f): $(shown)"; fi
@@ -115,6 +124,7 @@ wrapper() {
   touch "$T/ready"
   "$T/cage-browser" --caps vision
 }
+export -f wrapper
 lib wrapper || fail "cage-browser: $(shown)"
 grep -q 'STARTED BEFORE READY' "$T/out" && fail "cage-browser started before the browser was ready: $(shown)"
 grep -qx 'cage-browser: the browser is still being set up; try again in a few minutes' "$T/out" || fail "no plain message: $(shown)"
@@ -134,6 +144,7 @@ cc() { # cc <version>
   mkdir -p "$CACHE"
   install_cc_connect
 }
+export -f cc
 if lib cc v1.5.0; then fail "a cc-connect that doesn't match its pinned checksum was installed: $(shown)"; fi
 grep -q "cc-connect's download doesn't match its checksum; not using it" "$T/out" || fail "no plain message: $(shown)"
 [ ! -e "$T/cc-connect" ] && [ -z "$(ls -A "$T/cache")" ] || fail "the mismatched download was kept: $(ls -R "$T/cache")"
@@ -156,6 +167,7 @@ mirror() {
   printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates\n\nTypes: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n' > "$SOURCES"
   use_mirror "$1"
 }
+export -f mirror
 lib mirror http://azure.archive.ubuntu.com/ubuntu/ || fail "mirror: $(shown)"
 [ "$(cat "$T/mirrors.txt")" = $'http://azure.archive.ubuntu.com/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/' ] || fail "mirror list: $(cat "$T/mirrors.txt")"
 grep -qx "URIs: mirror+file:$T/mirrors.txt" "$T/ubuntu.sources" && grep -qx 'URIs: http://security.ubuntu.com/ubuntu/' "$T/ubuntu.sources" \
@@ -167,7 +179,11 @@ deb http://evil.example/ x main'; do
   [ ! -e "$T/mirrors.txt" ] && grep -qx 'URIs: http://archive.ubuntu.com/ubuntu/' "$T/ubuntu.sources" || fail "used a bad mirror: $bad"
   grep -q "CAGE_APT_MIRROR isn't a plain http(s) address" "$T/out" || fail "no plain message: $(shown)"
 done
-ok "CAGE_APT_MIRROR: a plain http(s) mirror goes first, Ubuntu's own servers second; anything else is ignored"
+no_sources() { SOURCES="$T/no-such.sources" MIRRORS="$T/mirrors.txt"; use_mirror http://azure.archive.ubuntu.com/ubuntu/; }
+export -f no_sources
+lib no_sources || fail "a system without Ubuntu's sources file stopped provisioning: $(shown)"
+[ ! -e "$T/mirrors.txt" ] && grep -q "doesn't get its packages from archive.ubuntu.com, so it isn't used" "$T/out" || fail "no plain message: $(shown)"
+ok "CAGE_APT_MIRROR: a plain http(s) mirror goes first, Ubuntu's own servers second; anything else is ignored, as is a system without Ubuntu's sources"
 
 grep -Eq '^provision\[claude\]: still on base packages \(3 min\) \([0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$' \
   <<<"$( (CAGE_PROVISION_LIB=1 . "$ROOT/guest/provision.sh" claude; log "still on base packages (3 min)") )" || fail "log lines have no time"
@@ -191,6 +207,7 @@ beat() { # beat <seconds the step has been going>
   if [[ "$(awk '{ print $3 }' "/proc/$(cat "$T/sleep.pid")/stat" 2>/dev/null)" =~ ^[RSD]$ ]]; then echo "SLEEP LEFT BEHIND"; fi
   cat "$T/beat"
 }
+export -f beat
 lib beat 130 || fail "heartbeat: $(shown)"
 grep -Eq '^provision\[claude\]: still on base packages \(2 min\) \(' "$T/out" || fail "no heartbeat line: $(shown)"
 grep -q 'SLEEP LEFT BEHIND' "$T/out" && fail "the heartbeat's sleep outlived it: $(shown)"

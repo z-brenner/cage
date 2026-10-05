@@ -62,6 +62,7 @@ apt_cached() { cached && compgen -G "$CACHE/apt/lists/*_Packages*" >/dev/null; }
 use_mirror() { # use_mirror <url>: Ubuntu's packages from that mirror (CAGE_APT_MIRROR), its own servers if it fails
   [[ "$1" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]*$ ]] \
     || { log "CAGE_APT_MIRROR isn't a plain http(s) address; using Ubuntu's own servers"; return 0; }
+  [ -f "$SOURCES" ] || { log "CAGE_APT_MIRROR: this system doesn't get its packages from archive.ubuntu.com, so it isn't used"; return 0; }
   printf '%s\nhttp://archive.ubuntu.com/ubuntu/\n' "$1" > "$MIRRORS"
   # Only the main archive: security updates keep coming from security.ubuntu.com
   sed -i "s#^URIs: http://archive.ubuntu.com/ubuntu/\\?\$#URIs: mirror+file:$MIRRORS#" "$SOURCES"
