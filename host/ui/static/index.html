@@ -39,23 +39,28 @@
         <img src="logo.svg" alt="" width="22" height="22">
         <span id="crumb"></span>
       </header>
+      <div id="notice" class="notice" role="status" hidden></div>
       <main id="main" tabindex="-1">
         <p class="loading">Waking up…</p>
       </main>
     </div>
   </div>
 
+  <!-- a job whose panel is hidden: it keeps going, and this brings it back -->
+  <button type="button" id="job-pill" class="job-pill" aria-live="polite" hidden></button>
+
   <dialog id="job" aria-labelledby="job-title">
     <header class="sheet-head">
       <h2 id="job-title">cage</h2>
-      <button type="button" class="icon-btn" id="job-x" aria-label="Dismiss" title="Dismiss (Esc)"><span class="ic" data-icon="x"></span></button>
+      <button type="button" class="icon-btn" id="job-x" aria-label="Hide" title="Hide (Esc). It keeps going."><span class="ic" data-icon="x"></span></button>
     </header>
     <div class="sheet-progress" aria-hidden="true"></div>
     <div id="job-log" class="job-log" aria-live="polite"></div>
     <div id="job-term" class="job-term" hidden></div>
     <footer class="sheet-foot">
       <span id="job-status" class="job-status"></span>
-      <button type="button" id="job-cancel" class="btn">Stop</button>
+      <button type="button" id="job-cancel" class="btn ghost danger">Stop</button>
+      <button type="button" id="job-hide" class="btn">Hide</button>
       <button type="button" id="job-close" class="btn primary" hidden>Close</button>
     </footer>
   </dialog>

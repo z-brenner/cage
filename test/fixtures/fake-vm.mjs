@@ -1,7 +1,8 @@
 // Plays an agent's VM for the web app's tests: what guest/app.mjs and cc-connect would write to its chat folder.
-//   node test/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
+//   node test/fixtures/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
 // A message gets a streamed reply; "email" asks before acting; "/usage" answers with a card; files come back; scheduled
 // tasks live in cron.json, and running one answers in the chat.
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 const [dir, work] = process.argv.slice(2)
@@ -37,7 +38,7 @@ async function handle (r) {
     const p = path.join(work, r.path || '')
     out(r.id, { ok: true, path: r.path || '', entries: fs.readdirSync(p, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory(), size: d.isDirectory() ? 0 : fs.statSync(path.join(p, d.name)).size, at: Date.now() })) })
   } else if (r.type === 'fetch') {
-    const rel = 'files/' + Date.now() + '-' + path.basename(r.path)
+    const rel = 'files/' + Date.now() + '-' + crypto.randomBytes(2).toString('hex') + '-' + path.basename(r.path)   // as the guest names them
     fs.copyFileSync(path.join(work, r.path), path.join(dir, rel))
     out(r.id, { ok: true, path: rel, name: path.basename(r.path), size: fs.statSync(path.join(dir, rel)).size })
   } else if (r.type === 'put') {

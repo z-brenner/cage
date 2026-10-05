@@ -665,6 +665,30 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["configure
   || fail "cage _state isn't the JSON the web app expects: $(head -c 400 "$T/state.json")"
 ok "web app side: protocol events (questions, hidden answers, yes/no) and the state snapshot"
 
+# The web app gives each job a code of its own (CAGE_PROTO=<code>), and cage puts it in front of every event, so what
+# a VM prints can't pass for one of cage's questions. Questions come in a file in ~/.cage/jobs, not on the command line.
+out="$(printf 'n\n' | CAGE_PROTO=c0ffee12 "$ROOT/cage" ask-all on 2>&1 >/dev/null)"
+grep -q $'^\036c0ffee12{"t":"confirm","text":"Restart .*","default":"y"}$' <<<"$out" || fail "events with the job's code: $(cat -v <<<"$out")"
+if grep -q $'\036{' <<<"$out"; then fail "an event without the job's code: $(cat -v <<<"$out")"; fi
+cage ask-all off </dev/null 2>/dev/null
+mkdir -p "$CAGE_HOME/jobs" && chmod 700 "$CAGE_HOME/jobs"
+printf 'is it "snowing"?\nasks the second line' > "$CAGE_HOME/jobs/q1.txt"
+out="$(cage ask --text-file "$CAGE_HOME/jobs/q1.txt" claude 2>/dev/null)"
+grep -q 'answer from cage-claude to: is it "snowing"?' <<<"$out" && grep -q 'asks the second line' <<<"$out" || fail "ask --text-file: $out"
+[ ! -e "$CAGE_HOME/jobs/q1.txt" ] || fail "ask --text-file left the question behind"
+echo 'mail bob@example.com' > "$CAGE_HOME/jobs/m1.txt"
+out="$(cage mask try --text-file "$CAGE_HOME/jobs/m1.txt" 2>&1)"
+grep -qF 'mail [EMAIL_1]' <<<"$out" && [ ! -e "$CAGE_HOME/jobs/m1.txt" ] || fail "mask try --text-file: $out"
+echo 'not for you' > "$T/elsewhere.txt"
+ln -s "$T/elsewhere.txt" "$CAGE_HOME/jobs/link.txt"
+for f in "$T/elsewhere.txt" "$CAGE_HOME/jobs/link.txt" "$CAGE_HOME/jobs/../cage.env" "$CAGE_HOME/jobs/missing.txt"; do
+  if cage ask --text-file "$f" claude >/dev/null 2>"$T/err"; then fail "ask --text-file read $f"; fi
+  grep -q 'no text from the web app' "$T/err" || fail "ask --text-file $f: $(cat "$T/err")"
+done
+[ -f "$T/elsewhere.txt" ] && [ -f "$CAGE_HOME/cage.env" ] || fail "ask --text-file removed a file outside ~/.cage/jobs"
+rm -f "$CAGE_HOME/jobs/link.txt"
+ok "web app side: each job's events carry its code; questions come in a file in ~/.cage/jobs, and nothing else is read"
+
 # --- backup and restore: ~/.cage and each agent's home volume, in one encrypted file
 V="$T/volumes/cage-claude-home"
 mkdir -p "$V/.claude" "$V/work" "$V/.cache/ms-playwright/chromium" "$T/volumes/cage-codex-home/.codex"
@@ -678,6 +702,8 @@ export CAGE_BACKUP_DIR="$T/backups"
 # the cage installed here: the releases cage rollback goes back to, and microsandbox's install log (cage fix)
 mkdir -p "$CAGE_HOME/releases/v0.3.0" && echo "this computer's cage" > "$CAGE_HOME/releases/v0.3.0/cage-v0.3.0.tar.gz"
 echo "installed msb" > "$CAGE_HOME/msb-install.log"
+# the web app's own files: a question waiting for its job, the one-time pairing code, the server's pid
+mkdir -p "$CAGE_HOME/jobs" && echo "a question" > "$CAGE_HOME/jobs/0a1b.txt"; echo pair > "$CAGE_HOME/ui.pair"; echo 1 > "$CAGE_HOME/ui.pid"
 if CAGE_BACKUP_PASSPHRASE=short cage backup 2>"$T/err"; then fail "accepted a 5-character passphrase"; fi
 CAGE_BACKUP_PASSPHRASE="correct horse battery" cage backup 2>"$T/err" || fail "backup: $(cat "$T/err")"
 bk="$(ls "$T/backups"/cage-*.cagebackup)"
@@ -688,8 +714,9 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass pass:"correct horse batte
 grep -qx 'manifest.json' "$T/members" && grep -qx 'config/cage.env' "$T/members" && grep -qx 'volumes/cage-claude-home/work/notes.md' "$T/members" \
   || fail "unexpected layout: $(head -20 "$T/members")"
 if grep -q 'ms-playwright\|config/msb/' "$T/members"; then fail "backup has caches or generated files"; fi
-if grep -qx 'config/ui.token\|config/autostart\|config/refresh.pid\|config/msb-install.log' "$T/members" || grep -q '^config/releases' "$T/members"; then
-  fail "backup has this computer's own files: $(grep -e '^config/releases' -e '^config/\(ui.token\|autostart\|refresh.pid\|msb-install.log\)$' "$T/members" | head -n 3)"
+if grep -qx 'config/ui.token\|config/autostart\|config/refresh.pid\|config/msb-install.log\|config/ui.pair\|config/ui.pid' "$T/members" ||
+   grep -q '^config/releases\|^config/jobs' "$T/members"; then
+  fail "backup has this computer's own files: $(grep -e '^config/releases' -e '^config/jobs' -e '^config/\(ui.token\|autostart\|refresh.pid\|msb-install.log\|ui.pair\|ui.pid\)$' "$T/members" | head -n 3)"
 fi
 ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches, nor the cage installed here)"
 

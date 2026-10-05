@@ -46,10 +46,8 @@ jobs:
           test/mask.sh
           docker run --rm -v "$PWD:/w:ro" -w /w python:3.9-slim bash test/mask.sh
           test/mask-vm.sh
-      - name: "adapter rules (node): WhatsApp, and the app's chat relay"
-        run: node --test test/whatsapp.test.mjs test/app.test.mjs test/relay.test.mjs
-      - name: speech-to-text server in the VM (with a stand-in for the Whisper model)
-        run: python3 test/stt_test.py
+      - name: "unit tests: node's (the WhatsApp adapter, the app's chat relay) and Python's (speech-to-text in the VM, the web app's server)"
+        run: test/all.sh unit
       - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
         run: |
           curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/cc-connect.tgz" \

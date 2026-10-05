@@ -191,6 +191,7 @@ p = plistlib.load(open(sys.argv[1], "rb"))
 assert p["Label"] == "dev.cage.up"
 assert p["ProgramArguments"] == [sys.argv[2], "_autostart"], p["ProgramArguments"]
 assert p["RunAtLoad"] is True
+assert p["AbandonProcessGroup"] is True   # the web app and the background helper outlive _autostart
 assert p["EnvironmentVariables"]["CAGE_HOME"] == sys.argv[3]
 assert "/opt/homebrew/bin" in p["EnvironmentVariables"]["PATH"]
 PY
@@ -205,6 +206,8 @@ PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart on 2>/dev/null
 unit="$HOME/.config/systemd/user/cage-up.service"
 grep -qx "ExecStart=\"$ROOT/cage\" _autostart" "$unit" || fail "unit ExecStart: $(cat "$unit")"   # never restarts an awake agent
 grep -qx 'WantedBy=default.target' "$unit" || fail "unit WantedBy"
+# a oneshot unit's leftovers are killed when it ends: the web app and the background helper must outlive _autostart
+grep -qx 'KillMode=process' "$unit" && grep -qx 'RemainAfterExit=yes' "$unit" || fail "unit would kill what _autostart starts: $(cat "$unit")"
 grep -q 'systemctl --user enable cage-up.service' "$T/os.log" || fail "unit not enabled"
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart off 2>/dev/null
 [ ! -e "$unit" ] || fail "unit not removed"
