@@ -4326,7 +4326,7 @@ usage() {
   row "  ask-all on|off" "/all <question> in chat: all of them answer"
   row "  fallback <a> <b>" "when a is out of quota, b answers instead"
   row "  voice on|off" "voice notes, turned into text on each VM"
-  row "  mask on|off|add|try" "emails, numbers, keys reach the model as tokens"
+  row "  mask on|off|add|forget" "emails, numbers, keys reach the AI as placeholders (try \"…\" shows how)"
   row "  connect [add|rm]" "apps your agents can use: Gmail, GitHub, …"
   row "  password add|list|rm" "website sign-ins they use but never see"
   row "  secret add|list|rm" "keys agents can use but never see"
