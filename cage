@@ -1688,8 +1688,9 @@ whatsapp_link() { # whatsapp_link <agent>: shows the code to scan until the phon
         else hint "message $a's number from your phone to talk to it"; fi
         return 0 ;;
       qr) code="$(printf '%s' "$st" | jget qr)"
-          # also from the VM: what WhatsApp's codes are made of (never an option for qrencode, like -r <a file of yours>)
-          if [[ "$code" =~ ^[A-Za-z0-9@+/=][A-Za-z0-9@,+/=._:-]{0,1023}$ ]]; then
+          # also from the VM: what WhatsApp's codes are made of (never an option for qrencode, like -r <a file of yours>).
+          # The length is checked on its own: a Mac's regex can't count past 255, and {0,1023} would refuse every code there
+          if [ ${#code} -le 1024 ] && [[ "$code" =~ ^[A-Za-z0-9@+/=][A-Za-z0-9@,+/=._:-]*$ ]]; then
             [ "$code" = "$last" ] || { last="$code"; qr_redraw "$code"; }
           elif [ $odd = 0 ]; then odd=1; warn "the code to scan came out wrong, so cage doesn't show it"; fi ;;
       code) pc="$(printf '%s' "$st" | jget code)"
