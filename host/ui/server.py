@@ -558,28 +558,37 @@ def activity(c, since):
 
 
 def ask_usage(c, timeout=25):
-    """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show): the
-    question's id, and the card, reply or error cc-connect answers with (None if none comes in time)."""
-    start, _ = c.size()
-    rid = c.send({"type": "message", "session": "usage", "text": "/usage"})
+    """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show), and waits
+    a while for the answer: {"rid": the question's id, "pos": how far its log has been read for the answer, "entry": the
+    card, reply or error cc-connect answered with, or None}."""
+    pos, _ = c.size()
+    q = {"rid": c.send({"type": "message", "session": "usage", "text": "/usage"}), "pos": pos, "entry": None}
     end = time.time() + timeout
-    while time.time() < end:
-        entries, _ = c.read_log(start)
-        for _, e in entries:
-            if e.get("session") == "usage" and e.get("ctx") == rid and e.get("t") in ("reply", "card", "error"):
-                return rid, e
+    while not usage_answer(c, q) and time.time() < end:
         time.sleep(0.4)
-    return rid, None
+    return q
+
+
+def usage_answer(c, q):
+    """The answer to that question, if it's in the log by now (read on from where the last look stopped), or None."""
+    entries, q["pos"] = c.read_log(q["pos"])
+    for _, e in entries:
+        if e.get("session") == "usage" and e.get("ctx") == q["rid"] and e.get("t") in ("reply", "card", "error"):
+            q["entry"] = e
+            break
+    return q["entry"]
 
 
 class Usage:
     """Each agent's plan usage, as its /usage card says it ("5h limit\nRemaining: 58%\nResets: 2h 13m"). Home shows it,
-    so an agent is asked at most every 10 minutes ("Check again": every 30 seconds), and after no answer at all, once a
-    minute. Asking costs no quota, but it's a request to the AI company each time. The last good answer (a card) is
-    kept with when it came, for when a later one is an error."""
-    EVERY, SOONEST, RETRY = 600, 30, 60
+    and pages look again every minute, but an agent is asked at most every 10 minutes ("Check again": 30 seconds).
+    Asking costs no quota, but it's a request to the AI company each time. An answer that didn't come in time (the
+    agent was still waking up, say) is looked for in the log at each look instead, which costs nothing; and while the
+    agent hasn't even taken a question (its relay is down), no second one piles up behind it. The last good answer
+    (a card) is kept with when it was asked, for when a later one is an error."""
+    EVERY, SOONEST = 600, 30
     lock, asking, last, good = threading.Lock(), {}, {}, {}
-    ask = staticmethod(ask_usage)
+    ask, look = staticmethod(ask_usage), staticmethod(usage_answer)
 
     @classmethod
     def get(cls, c, fresh=False):
@@ -587,15 +596,14 @@ class Usage:
             one = cls.asking.setdefault(c.agent, threading.Lock())
         with one:   # one question at a time per agent: another page waits for its answer instead of asking again
             last = cls.last.get(c.agent)
-            wait = cls.RETRY if last and not last["entry"] else cls.SOONEST if fresh else cls.EVERY
-            if not last or time.time() - last["asked"] >= wait:
-                if last and not last["entry"] and c.waiting(last["rid"]):   # it hasn't taken the last one: no second
-                    rid, entry = last["rid"], None
-                else:
-                    rid, entry = cls.ask(c)
-                last = cls.last[c.agent] = {"asked": time.time(), "entry": entry, "rid": rid}
-                if entry and entry.get("t") == "card":
-                    cls.good[c.agent] = last
+            if last and not last["entry"]:
+                cls.look(c, last)
+            due = not last or time.time() - last["asked"] >= (cls.SOONEST if fresh else cls.EVERY)
+            if due and not (last and not last["entry"] and c.waiting(last["rid"])):
+                asked = time.time()
+                last = cls.last[c.agent] = dict(cls.ask(c), asked=asked)
+            if last["entry"] and last["entry"].get("t") == "card":
+                cls.good[c.agent] = last
             good = cls.good.get(c.agent)
         if good and good is not last:   # this one didn't say (its service is down, say): the last good answer, marked
             return dict(good["entry"], asked=good["asked"], stale=True)

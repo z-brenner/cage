@@ -391,14 +391,15 @@ class Activity(unittest.TestCase):
 
 class Usages(unittest.TestCase):
     """Plan usage on Home costs a question to the AI company: asked at most every 10 minutes (30 seconds when you ask
-    again), after no answer once a minute, and the last good answer is kept for when a later one isn't."""
+    again), never sooner after no answer (a late one is looked for instead), and the last good answer is kept for when
+    a later one isn't."""
     CARD = {"t": "card", "card": {"elements": [{"type": "markdown", "content": "5h limit\nRemaining: 58%\nResets: 2h 13m"}]}}
 
     def setUp(self):
         server.Usage.last.clear()
         server.Usage.good.clear()
-        self.asked, self.answers, self.untaken = 0, [], False
-        server.Usage.ask = staticmethod(self.answer)
+        self.asked, self.answers, self.late, self.untaken = 0, [], {}, False
+        server.Usage.ask, server.Usage.look = staticmethod(self.answer), staticmethod(self.look)
         test = self
 
         class Chat:
@@ -409,17 +410,21 @@ class Usages(unittest.TestCase):
         self.chat = Chat()
 
     def tearDown(self):
-        server.Usage.ask = staticmethod(server.ask_usage)
+        server.Usage.ask, server.Usage.look = staticmethod(server.ask_usage), staticmethod(server.usage_answer)
 
     def answer(self, c):
         self.asked += 1
-        return f"q{self.asked}", self.answers.pop(0)
+        return {"rid": f"q{self.asked}", "pos": 0, "entry": self.answers.pop(0)}
+
+    def look(self, c, q):   # an answer that came after all
+        q["entry"] = self.late.get(q["rid"])
+        return q["entry"]
 
     def older(self, seconds):   # as if the last question was asked that long ago
         server.Usage.last["claude"]["asked"] -= seconds
 
     def test_asked_seldom(self):
-        self.answers = [self.CARD, {"t": "reply", "text": "Failed to fetch usage: 503"}, None, self.CARD]
+        self.answers = [self.CARD, {"t": "reply", "text": "Failed to fetch usage: 503"}, None]
         first = server.Usage.get(self.chat)
         self.assertEqual((self.asked, first["card"], first.get("stale")), (1, self.CARD["card"], None))
         server.Usage.get(self.chat)
@@ -428,33 +433,52 @@ class Usages(unittest.TestCase):
         self.older(31)
         e = server.Usage.get(self.chat, fresh=True)   # asked again: an error, so the last good answer, marked
         self.assertEqual((self.asked, e["card"], e["stale"], e["asked"]), (2, self.CARD["card"], True, first["asked"] - 31))
+        self.older(599)
         server.Usage.get(self.chat)
         self.assertEqual(self.asked, 2)   # an error is an answer too: not asked again for 10 minutes
-        self.older(600)
-        self.assertTrue(server.Usage.get(self.chat)["stale"])   # no answer at all
-        self.older(59)
-        server.Usage.get(self.chat)
-        self.assertEqual(self.asked, 3)   # tried again after a minute, not sooner
         self.older(1)
+        self.assertTrue(server.Usage.get(self.chat)["stale"])   # no answer at all
+        self.assertEqual(self.asked, 3)
+        self.older(599)
+        server.Usage.get(self.chat)
+        self.assertEqual(self.asked, 3)   # nor after no answer at all: it's looked for instead
+        self.late["q3"] = self.CARD
         e = server.Usage.get(self.chat)
-        self.assertEqual((self.asked, e.get("stale")), (4, None))
+        self.assertEqual((self.asked, e["card"], e.get("stale")), (3, self.CARD["card"], None))   # it came late
 
     def test_not_taken(self):
         """While the agent hasn't taken the last question (its relay is down), no second one piles up behind it."""
         self.answers, self.untaken = [None, self.CARD], True
         server.Usage.get(self.chat)
-        self.older(60)
+        self.older(3600)
         self.assertIsNone(server.Usage.get(self.chat))
         self.assertEqual(self.asked, 1)
-        self.untaken = False
-        self.older(60)
+        self.untaken = False   # it took it, and lost it (its VM restarted, say): asked again
         self.assertEqual((server.Usage.get(self.chat)["card"], self.asked), (self.CARD["card"], 2))
 
     def test_never_a_good_answer(self):
         self.answers = [None, {"t": "reply", "text": "Current agent does not support `/usage`."}]
         self.assertIsNone(server.Usage.get(self.chat))
-        self.older(60)
+        self.older(600)
         self.assertEqual(server.Usage.get(self.chat)["text"], "Current agent does not support `/usage`.")
+
+
+class UsageAnswers(unittest.TestCase):
+    """The answer to a /usage question, in the agent's chat log: only to that question, and found later too."""
+    setUp, tearDown, write = Logs.setUp, Logs.tearDown, Logs.write
+
+    def test_late_answer(self):
+        self.write({"t": "reply", "text": "before", "at": 1})
+        q = server.ask_usage(self.chat, timeout=0)
+        self.assertIsNone(q["entry"])
+        self.assertTrue(self.chat.waiting(q["rid"]))   # still in in/, for the VM to take
+        self.write({"t": "card", "session": "usage", "ctx": "another question", "card": {}},
+                   {"t": "card", "session": "you", "ctx": q["rid"], "card": {}},
+                   {"t": "card", "session": "usage", "ctx": q["rid"], "card": {"header": {"title": "Usage"}}})
+        self.assertEqual(server.usage_answer(self.chat, q)["card"], {"header": {"title": "Usage"}})
+        self.assertEqual(q["pos"], os.path.getsize(self.path))   # read on from there next time
+        os.unlink(os.path.join(server.APPDIR, "claude", "in", q["rid"] + ".json"))
+        self.assertFalse(self.chat.waiting(q["rid"]))
 
 
 if __name__ == "__main__":
