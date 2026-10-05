@@ -1165,6 +1165,11 @@ async function useRecipe (a, r, where, button) {
     if (ta) { ta.scrollIntoView({ block: 'center' }); pickBlank(ta) }
     return
   }
+  // One that reads your email runs by itself with nobody watching, and anyone can send you an email: without "Ask
+  // before acting", what an email says could get the agent to send or change things in your apps. Say so first.
+  if (r.needs.includes('zapier') && !a.approve && !(await confirmSheet(`${r.title} runs by itself and reads your email, which anyone can send you. ` +
+    `${a.label} doesn’t ask before acting in your apps now, so an email could get it to send or change something there. To be safe, turn on “Ask before acting” in its settings first.`,
+  'Add it anyway', 'Not now'))) return
   // as it is: the same task the form below would add (cc-connect's cron, through the agent's VM)
   const expr = cronOf(sched.kind, sched.time, sched.day)
   button.disabled = true   // (once: a second click would add it twice)

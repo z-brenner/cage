@@ -430,6 +430,13 @@ await briefing.getByRole('link', { name: 'Connect Zapier first' }).waitFor({ tim
 fs.mkdirSync(path.join(home, 'connectors'), { recursive: true })
 fs.writeFileSync(path.join(home, 'connectors', 'zapier.conf'), 'url=https://mcp.zapier.com/api/v1/connect\nagents=all\ntitle=Zapier\n')
 await briefing.getByRole('button', { name: 'Add: Morning briefing' }).click({ timeout: 20000 })
+// it reads your email by itself, which anyone can send you: with "Ask before acting" off, the page says so first, and
+// Not now adds nothing
+await answer(/^Morning briefing runs by itself and reads your email, which anyone can send you\. Claude Code doesn’t ask before acting in your apps now, .* turn on “Ask before acting” in its settings first\.$/, 'Not now')
+await page.waitForTimeout(500)
+if (cronOfClaude().length) fail('Not now added the recipe: ' + JSON.stringify(cronOfClaude()))
+await briefing.getByRole('button', { name: 'Add: Morning briefing' }).click()
+await answer(/^Morning briefing runs by itself/, 'Add it anyway')
 await page.locator('#toasts .toast', { hasText: /^Added: Morning briefing, every weekday at 7:45\sAM\.$/ }).waitFor({ timeout: 10000 })
 await page.locator('.card li', { hasText: 'Morning briefing' }).getByText(/Every weekday at 7:45\sAM/).waitFor({ timeout: 15000 })
 const [added] = cronOfClaude()
