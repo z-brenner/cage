@@ -2,7 +2,7 @@
 # Tests install.sh against local copies of this repo: from git (fresh install, the `cage` command, PATH setup, re-run
 # update), and from releases on a local stand-in for GitHub Releases (checksums, in-place updates, a tampered download).
 # Then everything that can go wrong on the way: no network, GitHub down while git works, a disk that fills up halfway,
-# running as root, an older release.
+# running as root, an older release; plus going back (a pinned version, cage rollback).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -25,11 +25,23 @@ git -C "$T/src" init -q -b main
 commit add -A
 commit commit -qm snapshot
 
+# Stand-ins, first on PATH: the internet as `cage update` checks it (test/fake-curl.sh; the release server below is
+# reached for real), and microsandbox.
+mkdir -p "$T/stub"
+ln -s "$ROOT/test/fake-curl.sh" "$T/stub/curl"
+cat > "$T/stub/msb" <<'EOF'
+#!/bin/sh
+[ "$1" = --version ] && exit 0
+echo "$*" >> "$MSB_LOG"
+exit 0
+EOF
+chmod +x "$T/stub/msb"
+REAL_CURL="$(command -v curl)"
 # The tests are a normal user even where they run as root (in a container); one test below is root on purpose.
-export CAGE_TEST_EUID=1000
+export REAL_CURL MSB_LOG="$T/msb.log" CAGE_TEST_EUID=1000
 
 # --- from git ---------------------------------------------------------------------------------------------------
-export HOME="$T/home" CAGE_REPO="$T/src" CAGE_REF=main CAGE_NO_START=1 PATH="/usr/local/bin:/usr/bin:/bin" SHELL=/bin/bash
+export HOME="$T/home" CAGE_REPO="$T/src" CAGE_REF=main CAGE_NO_START=1 PATH="$T/stub:/usr/local/bin:/usr/bin:/bin" SHELL=/bin/bash
 mkdir -p "$HOME"
 bash "$ROOT/install.sh" 2>"$T/err" || fail "install failed: $(cat "$T/err")"
 [ -x "$HOME/cage/cage" ] || fail "cage not cloned into ~/cage"
@@ -154,6 +166,16 @@ grep -q "couldn't update cage itself (still v9.9.10)" "$T/err" || fail "cage upd
 ok "refuses a download that doesn't match the release's checksum, and leaves cage as it was"
 
 # --- when things go wrong: nothing is lost, nothing is half-done -----------------------------------------------
+# with a config, an update that went ahead would rebuild the agents (these releases have no cage.env.example)
+mkdir -p "$CAGE_HOME" && printf 'CAGE_AGENTS="claude codex"\n' > "$CAGE_HOME/cage.env"
+: > "$MSB_LOG"
+if CAGE_RELEASES="$DEAD" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" update 2>"$T/err"; then fail "cage update succeeded without GitHub"; fi
+grep -q "can't reach 127.0.0.1:.*check your internet connection or company proxy, then try again. Nothing was changed." "$T/err" || fail "offline update: $(cat "$T/err")"
+grep -q 'your agents keep running as they are' "$T/err" && ! grep -q 'updating the agents anyway' "$T/err" || fail "offline update went on: $(cat "$T/err")"
+[ "$(version)" = v9.9.10 ] && [ "$("$HOME/.local/bin/cage" --version)" = "cage v9.9.10" ] || fail "an offline update changed cage"
+[ ! -s "$MSB_LOG" ] || fail "an offline update rebuilt the agents: $(cat "$MSB_LOG")"
+ok "cage update with GitHub unreachable keeps ~/cage as it was and leaves the agents running"
+
 if CAGE_RELEASES="$DEAD" bash "$ROOT/install.sh" 2>"$T/err"; then fail "installed without reaching the releases"; else rc=$?; fi
 [ "$rc" = 3 ] || fail "exit code $rc, not 3 (unreachable): $(cat "$T/err")"
 [ "$(version)" = v9.9.10 ] && [ ! -e "$HOME/cage/.git" ] || fail "with the releases unreachable, the release install became a git checkout"
@@ -209,5 +231,22 @@ for f in .bashrc .zshrc .profile .config/fish/conf.d/cage.fish; do
   [ "$(grep -c 'added by the cage installer' "$HOME/$f")" = 1 ] || fail "$f: the PATH line twice"
 done
 ok "PATH: a new .zshrc when zsh is your shell, fish's conf.d when fish is installed, once each"
+
+# --- a version of your choice, and going back ---------------------------------------------------------------------
+: > "$MSB_LOG"
+CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" update --to v9.9.9 2>"$T/err" || fail "update --to: $(cat "$T/err")"
+grep -q 'installed cage v9.9.9 (checksum verified)' "$T/err" && [ "$(version)" = v9.9.9 ] || fail "update --to v9.9.9: $(cat "$T/err")"
+grep -q 'cage-claude' "$MSB_LOG" || fail "update --to didn't go on to the agents"
+[ "$(ls "$CAGE_HOME/releases" | tr '\n' ' ')" = "v9.9.12 v9.9.9 " ] || fail "kept releases: $(ls "$CAGE_HOME/releases")"
+[ -f "$CAGE_HOME/releases/v9.9.9/SHA256SUMS" ] || fail "a kept release without its checksums"
+: > "$MSB_LOG"
+CAGE_RELEASES="$DEAD" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" rollback 2>"$T/err" || fail "rollback: $(cat "$T/err")"
+[ "$(version)" = v9.9.12 ] && [ "$("$HOME/.local/bin/cage" --version)" = "cage v9.9.12" ] || fail "rollback didn't go back to v9.9.12: $(cat "$T/err")"
+grep -q 'installed cage v9.9.12 (checksum verified)' "$T/err" || fail "rollback: $(cat "$T/err")"
+grep -q 'cage-claude' "$MSB_LOG" || fail "rollback didn't wake the agents"
+printf 'tampered' >> "$CAGE_HOME/releases/v9.9.9/cage-v9.9.9.tar.gz"
+if CAGE_RELEASES="$DEAD" CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" rollback 2>"$T/err"; then fail "rolled back to a changed copy"; fi
+grep -q "doesn't match its checksum" "$T/err" && [ "$(version)" = v9.9.12 ] || fail "a changed kept copy: $(cat "$T/err")"
+ok "a release of your choice (cage update --to, older ones too), and cage rollback with no network; the last two are kept"
 
 echo "all $pass installer tests passed"

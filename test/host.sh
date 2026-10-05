@@ -591,6 +591,31 @@ grep -q 'Windows interop is off' "$T/err" || fail "no warning without interop: $
 unset WSL_DISTRO_NAME
 ok "without Windows interop, up warns that WSL will stop the VMs"
 
+# cage update when the internet isn't there: nothing changes, the agents keep running
+: > "$MSB_LOG"
+if NET_DOWN=registry.npmjs.org cage update claude 2>"$T/err"; then fail "update went ahead offline"; fi
+grep -q "you're offline (or a firewall is in the way); nothing was changed, your agents keep running" "$T/err" || fail "offline update: $(cat "$T/err")"
+if NET_BLOCKED=github.com cage update claude 2>"$T/err"; then fail "update went ahead with GitHub blocked"; fi
+grep -q "you're offline" "$T/err" || fail "blocked update: $(cat "$T/err")"
+grep -q '^run | \|^rm | \|^stop | ' "$MSB_LOG" && fail "an offline update touched the VMs: $(cat "$MSB_LOG")"
+ok "cage update offline (or with GitHub blocked) changes nothing and leaves the agents running"
+
+# the cc-connect version earlier cages wrote into cage.env goes, so this cage's own applies; one you picked stays
+grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env" && fail "the test config already pins cc-connect"
+( export CAGE_HOME="$T/fresh"; "$ROOT/cage" init 2>/dev/null
+  if grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env"; then fail "init pins cc-connect in the user's config"; fi )
+echo 'CAGE_CC_CONNECT_VERSION=v1.5.0' >> "$CAGE_HOME/cage.env"
+cage update claude 2>/dev/null
+grep -q '^CAGE_CC_CONNECT_VERSION=' "$CAGE_HOME/cage.env" && fail "update kept the old default cc-connect pin"
+want="$(sed -n 's/.*CAGE_CC_CONNECT_VERSION:-\(v[^}]*\)}.*/\1/p' "$ROOT/cage")"   # load_env's default
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- "-e | CC_CONNECT_VERSION=$want |" || fail "the VM didn't get this cage's cc-connect ($want)"
+echo 'CAGE_CC_CONNECT_VERSION="v1.4.2"' >> "$CAGE_HOME/cage.env"
+cage update claude 2>/dev/null
+grep -qx 'CAGE_CC_CONNECT_VERSION="v1.4.2"' "$CAGE_HOME/cage.env" || fail "update dropped a cc-connect version the user picked"
+grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- '-e | CC_CONNECT_VERSION=v1.4.2 |' || fail "the user's cc-connect version isn't used"
+sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
+ok "cage update drops the cc-connect pin earlier versions froze in cage.env, and keeps one you picked"
+
 # microsandbox: cage installs the version it pins, with the official installer (here a stand-in), and says so when
 # the installed one isn't that version
 cat > "$T/msb-installer.sh" <<'EOF'
