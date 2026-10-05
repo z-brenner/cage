@@ -1361,6 +1361,28 @@ grep '^run | ' "$MSB_LOG" | tail -1 | grep -q -- '-e | CC_CONNECT_VERSION=v1.4.2
 sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
 ok "cage update drops the cc-connect pin earlier versions froze in cage.env, and keeps one you picked"
 
+# Running the installer again updates cage but leaves cage.env as it is: a pin an earlier cage froze there still gives
+# way to the version this cage is tested with. Shown with a copy of cage that is tested with another version.
+( fresh ccpin
+  P="$T/newer cage"; mkdir -p "$P" && cp "$ROOT/cage" "$ROOT/cage.env.example" "$P/"
+  sed -i 's/CAGE_CC_CONNECT_VERSION:-v[^}]*}/CAGE_CC_CONNECT_VERSION:-v9.9.9}/' "$P/cage"
+  grep -q 'CAGE_CC_CONNECT_VERSION:-v9.9.9}' "$P/cage" || fail "can't find load_env's cc-connect default; update this test"
+  shipped="$(sed -n 's/^SHIPPED_CC_CONNECT="\([^"]*\)".*/\1/p' "$ROOT/cage")"
+  [ -n "$shipped" ] || fail "can't find SHIPPED_CC_CONNECT in cage; update this test"
+  vm_cc() { : > "$MSB_LOG"; "$P/cage" up claude </dev/null >/dev/null 2>&1; grep '^run | ' "$MSB_LOG" | tail -1 | sed -n 's/.*-e | CC_CONNECT_VERSION=\([^ ]*\) |.*/\1/p'; }
+  for v in $shipped; do
+    for line in "CAGE_CC_CONNECT_VERSION=$v" "CAGE_CC_CONNECT_VERSION=\"$v\""; do
+      echo "$line" >> "$CAGE_HOME/cage.env"
+      [ "$(vm_cc)" = v9.9.9 ] || fail "with $line left in cage.env by an earlier cage, the VM gets cc-connect $(vm_cc)"
+      sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
+    done
+  done
+  echo 'CAGE_CC_CONNECT_VERSION="v1.4.2"' >> "$CAGE_HOME/cage.env"
+  [ "$(vm_cc)" = v1.4.2 ] || fail "the cc-connect version you picked gave way: $(vm_cc)"
+  sed -i '/^CAGE_CC_CONNECT_VERSION=/d' "$CAGE_HOME/cage.env"
+  [ "$(vm_cc)" = v9.9.9 ] || fail "without a pin, the VM gets cc-connect $(vm_cc)" )
+ok "a cc-connect pin an earlier cage froze in cage.env gives way to this cage's version without cage update too; one you picked stays"
+
 # microsandbox: cage installs the version it pins, with the official installer (here a stand-in), and says so when
 # the installed one isn't that version
 cat > "$T/msb-installer.sh" <<'EOF'
