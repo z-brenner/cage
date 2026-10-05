@@ -5,8 +5,9 @@
 #   Chromium itself downloads once into the home volume;
 #   when microsandbox inspects this VM's HTTPS (it does once there are secrets or website passwords), Chromium is told
 #   to trust microsandbox's CA: it keeps its own certificate store (NSS), separate from the system one.
-# Each step has a time limit, and the whole is tried again until it works. Then /opt/cage/browser-ready lets
-# cage-browser (see provision.sh) start; until then it tells the agent the browser is still being set up.
+# Each step has a time limit, and the whole is tried again until it works; the limits grow with each try (up to 8
+# times), since Chromium's download starts over every time. Then /opt/cage/browser-ready lets cage-browser (see
+# provision.sh) start; until then it tells the agent the browser is still being set up.
 #   usage: browser.sh <claude|codex|cursor|antigravity>
 set -uo pipefail
 KIND="${1:?usage: browser.sh <agent>}"
@@ -14,14 +15,15 @@ U=agent
 H=/home/agent
 CA=/.msb/tls/ca.pem
 READY=/opt/cage/browser-ready
+PROVISION=/cage/provision.sh
 log() { echo "cage-browser: $*"; }
 
-get_chromium() { # Chromium itself, into the home volume (it downloads once)
+get_chromium() { # get_chromium <time limit>: Chromium itself, into the home volume (it downloads once)
   local cli
   cli="$(find "$(npm root -g)/@playwright/mcp" -maxdepth 1 -name cli.js 2>/dev/null | head -n 1)"
   [ -n "$cli" ] || { log "Playwright MCP isn't installed"; return 1; }
   if ! ls -d "$H"/.cache/ms-playwright/chromium-* >/dev/null 2>&1; then log "downloading Chromium (once)"; fi
-  timeout -k 30 900 runuser -u "$U" -- env HOME="$H" PLAYWRIGHT_BROWSERS_PATH="$H/.cache/ms-playwright" \
+  timeout -k 30 "$1" runuser -u "$U" -- env HOME="$H" PLAYWRIGHT_BROWSERS_PATH="$H/.cache/ms-playwright" \
     bash -c 'set -a; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a; node "$1" install-browser --no-shell chromium >/dev/null' _ "$cli"
 }
 
@@ -47,13 +49,23 @@ trust_cas() { # prints how many extra CA certificates Chromium now trusts
   return "$rc"
 }
 
+browser_try() { # browser_try <try>: the system's part, Chromium, then the CAs; sets $cas to how many it trusts
+  local max=$(( 900 * ($1 < 8 ? $1 : 8) ))
+  CAGE_PROVISION_ATTEMPT="$1" timeout -k 30 "$max" bash "$PROVISION" "$KIND" --browser </dev/null \
+    && get_chromium "$max" </dev/null && cas="$(trust_cas)"
+}
+
+if [ "${CAGE_BROWSER_LIB:-}" = 1 ]; then return 0; fi   # test/provision-unit.sh: just the functions above
+
 command -v cage-browser >/dev/null || { log "not installed (provision.sh)"; exit 1; }
 rm -f "$READY"   # a container that restarts keeps its system disk; a VM never does
+try=1
 delay=15
-until timeout -k 30 900 bash /cage/provision.sh "$KIND" --browser </dev/null && get_chromium </dev/null && n="$(trust_cas)"; do
+until browser_try "$try"; do
   log "not ready yet; trying again in ${delay}s"
   sleep "$delay"
   delay=$(( delay * 2 < 300 ? delay * 2 : 300 ))
+  try=$((try + 1))
 done
 mkdir -p "$(dirname "$READY")" && touch "$READY"
-log "ready (trusts $n extra CA certificate(s))"
+log "ready (trusts $cas extra CA certificate(s))"

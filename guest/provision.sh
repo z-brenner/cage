@@ -10,8 +10,8 @@
 # volume of this agent's own (/var/cache/cage), so waking up reinstalls from there in seconds, without asking any
 # vendor's servers; only the first boot and `cage update` download.
 # Every step that downloads has a time limit: a slow or stalled mirror becomes a failure that entry.sh retries (apt
-# keeps what it already fetched), never a VM that waits forever. Each line has the time, and while a step runs, a
-# line every minute says which one.
+# keeps what it already fetched), never a VM that waits forever. The limits grow with each try, so a slow connection
+# still gets there. Each line has the time, and while a step runs, a line every minute says which one.
 # Vendor CLIs install system-wide (/opt/cage/tools, /usr/local/bin) so the agent's persistent home
 # volume holds only its login and work, never binaries.
 set -Eeuo pipefail   # -E: the ERR trap below fires inside functions too
@@ -23,6 +23,11 @@ CC_CONNECT_VERSION="${CC_CONNECT_VERSION:-v1.5.0}"
 CACHE=/var/cache/cage
 TOOLS=/opt/cage/tools
 MARK="/opt/cage/provisioned-$KIND"
+# Which try this is (entry.sh and guest/browser.sh count them, from 1). Every time limit below grows with it, up to 8
+# times as long: a download that can't pick up where it stopped (a vendor's installer, npm, Chromium) then still
+# finishes on a slow connection, a few tries in, and one that has stalled is still stopped.
+ATTEMPT="${CAGE_PROVISION_ATTEMPT:-1}"
+case "$ATTEMPT" in [1-8]) ;; *[!0-9]*|''|0*) ATTEMPT=1 ;; *) ATTEMPT=8 ;; esac
 REFRESH=0
 CACHED=0
 export DEBIAN_FRONTEND=noninteractive
@@ -40,6 +45,7 @@ MIRRORS=/etc/apt/cage-mirrors.txt
 STEP_FILE="/run/cage-step.$$"
 
 log() { echo "provision[$KIND]: $* ($(date -u +%H:%M:%SZ))"; }
+limit() { echo $(( $1 * ATTEMPT )); }   # limit <seconds>: a time limit, for this try
 step() { # step <what>: logs the step; while it runs, the heartbeat repeats it once a minute
   log "$*"
   { printf '%s %s\n' "$(date +%s)" "$*" > "$STEP_FILE"; } 2>/dev/null || true
@@ -73,20 +79,22 @@ use_mirror() { # use_mirror <url>: Ubuntu's packages from that mirror (CAGE_APT_
 apt_install() { # apt_install <packages…>: from the cache if it has them all, else from Ubuntu; fails if that's too slow
   # Each step returns on failure itself: callers use apt_install as an `if` condition, where bash turns off set -e and
   # the ERR trap, so a step that ran out of time would otherwise carry on as if it had worked.
+  local lists fetch
   if apt_cached && "${APT[@]}" install -y -qq --no-install-recommends --no-download "$@" >/dev/null 2>&1; then
     return 0
   fi
-  timeout -k 30 "$APT_UPDATE_LIMIT" "${APT[@]}" update -qq \
-    || { log "Ubuntu's package lists didn't arrive within ${APT_UPDATE_LIMIT}s"; return 1; }
-  timeout -k 30 "$APT_FETCH_LIMIT" "${APT[@]}" install -y -qq --no-install-recommends --download-only "$@" >/dev/null \
-    || { log "the downloads didn't finish within ${APT_FETCH_LIMIT}s (what arrived is kept for the next try)"; return 1; }
+  lists="$(limit "$APT_UPDATE_LIMIT")" fetch="$(limit "$APT_FETCH_LIMIT")"
+  timeout -k 30 "$lists" "${APT[@]}" update -qq \
+    || { log "Ubuntu's package lists didn't arrive within ${lists}s"; return 1; }
+  timeout -k 30 "$fetch" "${APT[@]}" install -y -qq --no-install-recommends --download-only "$@" >/dev/null \
+    || { log "the downloads didn't finish within ${fetch}s (what arrived is kept for the next try)"; return 1; }
   # From what was just fetched, never the network, so it needs no time limit of its own
   "${APT[@]}" install -y -qq --no-install-recommends --no-download "$@" >/dev/null \
     || { log "couldn't install what was downloaded"; return 1; }
 }
 
 npm_install() { # npm_install <packages…>: global npm packages, under a time limit
-  timeout -k 30 600 npm install -g --no-fund --no-audit --fetch-timeout=60000 --fetch-retries=3 "$@" </dev/null
+  timeout -k 30 "$(limit 600)" npm install -g --no-fund --no-audit --fetch-timeout=60000 --fetch-retries=3 "$@" </dev/null
 }
 
 link_npm_bins() { # global npm commands, from the cache's prefix onto PATH
@@ -129,7 +137,7 @@ vendor_install() { # vendor_install <url> [installer args…]: a vendor's own in
   # for a labelled one, gunzip by hand for an unlabelled one. Retries and time limits, so a stall can't hang the VM.
   curl -fsSL --compressed --retry 3 --connect-timeout 20 --max-time 300 -o "$f" "$1" || { rm -f "$f"; return 1; }
   if [ "$(head -c 2 "$f" | od -An -tx1 | tr -d ' \n')" = 1f8b ]; then gunzip -c < "$f" > "$f.sh"; mv "$f.sh" "$f"; fi
-  HOME="$TOOLS" timeout -k 30 900 bash "$f" "${@:2}" </dev/null || rc=$?
+  HOME="$TOOLS" timeout -k 30 "$(limit 900)" bash "$f" "${@:2}" </dev/null || rc=$?
   rm -f "$f"
   return "$rc"
 }
@@ -285,7 +293,7 @@ install_cc_connect() {
         "$CC_CONNECT_RELEASES/$CC_CONNECT_VERSION/checksums.txt" | awk -v n="$name" '$2 == n { print $1; exit }')" || want=""
       [ -n "$want" ] || { log "couldn't get cc-connect $CC_CONNECT_VERSION's checksums.txt"; rm -rf "$tmp"; return 1; }
     fi
-    curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 -o "$f.part" \
+    curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time "$(limit 300)" -o "$f.part" \
       "$CC_CONNECT_RELEASES/$CC_CONNECT_VERSION/$name" || { log "couldn't download cc-connect"; rm -rf "$f.part" "$tmp"; return 1; }
     if ! sha256_is "$want" "$f.part"; then
       log "cc-connect's download doesn't match its checksum; not using it"

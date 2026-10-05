@@ -15,7 +15,8 @@ KIND="${1:?usage: entry.sh <claude|codex|cursor|antigravity>}"
 U=agent
 H=/home/agent
 CONFIG_SRC=/cage-config/cc-connect.toml
-PROVISION_LIMIT="${CAGE_PROVISION_LIMIT:-1800}"   # seconds for one try at provisioning, then it starts over
+PROVISION=/cage/provision.sh
+PROVISION_LIMIT="${CAGE_PROVISION_LIMIT:-1800}"   # seconds for the first try at provisioning, then it starts over
 [[ "$PROVISION_LIMIT" =~ ^[0-9]+$ ]] || PROVISION_LIMIT=1800
 
 log() { echo "cage-entry[$KIND]: $*"; }
@@ -25,6 +26,26 @@ log() { echo "cage-entry[$KIND]: $*"; }
 refresh_arg() { # refresh_arg <attempt>: --refresh for the first two tries of `cage update`, then nothing
   if [ -n "${CAGE_REFRESH:-}" ] && [ "$1" -le 2 ]; then echo --refresh; fi
 }
+
+# One try at provisioning, with a time limit: a step that hangs is started over, never waited on forever. The limit
+# grows with each try (up to 8 times), as do those of the steps inside (provision.sh), so on a slow connection a
+# download that can't resume (a vendor's installer) still gets there. A failure is logged as "provisioning failed",
+# which `cage status` shows as a network hiccup.
+provision_try() { # provision_try <attempt> <seconds until the next one>
+  local refresh rc=0 max=$(( PROVISION_LIMIT * ($1 < 8 ? $1 : 8) ))
+  refresh="$(refresh_arg "$1")"
+  CAGE_PROVISION_ATTEMPT="$1" timeout -k 60 "$max" bash "$PROVISION" "$KIND" ${refresh:+"$refresh"} </dev/null || rc=$?
+  [ "$rc" != 0 ] || return 0
+  if [ -n "$refresh" ] && [ -z "$(refresh_arg $(( $1 + 1 )))" ]; then
+    log "couldn't get the newest versions (offline?); starting with the ones you had"
+  fi
+  case $rc in
+    124|137) log "provisioning failed: it took more than ${max}s; trying again in ${2}s" ;;
+    *) log "provisioning failed; retrying in ${2}s (network down? see output above)" ;;
+  esac
+  return 1
+}
+
 # cc-connect's restarts: after 5s, then twice as long after each quick exit, up to a minute; 5s again after a good run
 restart_wait() { # restart_wait <previous wait> <seconds it ran>
   if [ "$2" -ge 300 ] || [ "$1" -lt 5 ]; then echo 5; elif [ "$1" -ge 30 ]; then echo 60; else echo $(( $1 * 2 )); fi
@@ -48,17 +69,7 @@ chmod 750 "$H"
 
 attempt=1
 delay=15
-while true; do
-  refresh="$(refresh_arg "$attempt")"
-  # Each try has a time limit: a step that hangs is started over, never waited on forever
-  timeout -k 60 "$PROVISION_LIMIT" bash /cage/provision.sh "$KIND" ${refresh:+"$refresh"} </dev/null && break
-  case $? in
-    124|137) log "provisioning took too long; trying again in ${delay}s" ;;
-    *) log "provisioning failed; retrying in ${delay}s (network down? see output above)" ;;
-  esac
-  if [ -n "$refresh" ] && [ -z "$(refresh_arg $((attempt + 1)))" ]; then
-    log "couldn't get the newest versions (offline?); starting with the ones you had"
-  fi
+until provision_try "$attempt" "$delay"; do
   sleep "$delay"
   delay=$(( delay < 240 ? delay * 2 : 240 ))
   attempt=$((attempt + 1))

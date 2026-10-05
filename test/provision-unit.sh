@@ -88,8 +88,31 @@ grep -q 'IF-BRANCH' "$T/out" && fail "apt_install worked although the downloads 
 [ "$(sed -n 's/^took \([0-9]*\)s$/\1/p' "$T/out")" -lt 15 ] || fail "apt_install didn't stop at its 2s limit: $(shown)"
 grep -q -- '--no-download' "$T/calls" && fail "apt_install installed after the downloads ran out of time: $(shown)"
 grep -q "downloads didn't finish within 2s (what arrived is kept for the next try)" "$T/out" || fail "no plain message: $(shown)"
+CAGE_PROVISION_ATTEMPT=2 lib slow_apt update || fail "slow update, second try: $(shown)"
+grep -q "package lists didn't arrive within 4s" "$T/out" && [ "$(sed -n 's/^took \([0-9]*\)s$/\1/p' "$T/out")" -ge 4 ] \
+  || fail "the second try didn't get twice the time: $(shown)"
 unset CAGE_APT_UPDATE_LIMIT CAGE_APT_FETCH_LIMIT
-ok "apt_install gives up within its limits even as an if condition, and installs nothing then"
+ok "apt_install gives up within its limits even as an if condition, and installs nothing then; the next try waits longer"
+
+# Every download's limit grows with the try (CAGE_PROVISION_ATTEMPT, from entry.sh), up to 8 times: a vendor's
+# installer or npm starts over each time, so on a slow connection only a longer try ever finishes
+grown() {
+  timeout() { echo "timeout $*" >> "$T/calls"; }   # what each step's limit is, without running it
+  printf 'exit 0\n' > "$T/www/install.sh"
+  TOOLS="$T/tools"
+  apt_install vim
+  npm_install some-package
+  vendor_install https://vendor.example/install.sh
+}
+export -f grown
+for t in 1:1 3:3 8:8 20:8 0:1 x:1; do
+  n="${t#*:}"
+  CAGE_PROVISION_ATTEMPT="${t%:*}" lib grown || fail "limits on try ${t%:*}: $(shown)"
+  for want in "$((120 * n)) apt-get .* update" "$((300 * n)) apt-get .* --download-only" "$((600 * n)) npm install -g" "$((900 * n)) bash /"; do
+    grep -q "^timeout -k 30 $want" "$T/calls" || fail "try ${t%:*} should allow $want: $(shown)"
+  done
+done
+ok "each try allows the downloads more time than the one before (8 times the first one's at most)"
 
 lib apt_install vim || fail "apt_install: $(shown)"
 [ "$(grep -c '^apt-get' "$T/calls")" = 3 ] && tail -n 1 "$T/calls" | grep -q -- 'install -y -qq --no-install-recommends --no-download vim' \
@@ -215,11 +238,47 @@ lib beat 10 || fail "heartbeat: $(shown)"
 grep -q 'still on' "$T/out" && fail "a step that just started was reported: $(shown)"
 ok "while a step runs, a line every minute says which one (from its first minute on); stopping it stops its sleep too"
 
-# --- entry.sh: `cage update` falls back to the cache; cc-connect's restarts slow down, and recover ----------------------
-entry() { ( CAGE_ENTRY_LIB=1 . "$ROOT/guest/entry.sh" claude; "$@" ); }
+# --- browser.sh: each try allows more time for Chromium, which downloads from the start every time ---------------------
+browser() { ( CAGE_BROWSER_LIB=1 . "$ROOT/guest/browser.sh" codex
+  PROVISION="$T/provision.sh"
+  timeout() { echo "timeout $* (try ${CAGE_PROVISION_ATTEMPT:-none})" >> "$T/calls"; }
+  trust_cas() { echo 0; }
+  "$@" ) > "$T/out" 2>&1; }
+: > "$T/calls"
+browser browser_try 3 || fail "browser.sh: $(shown)"
+grep -q "^timeout -k 30 2700 bash $T/provision.sh codex --browser (try 3)" "$T/calls" && grep -q '^timeout -k 30 2700 runuser ' "$T/calls" \
+  || fail "browser.sh's third try should allow 3 times as long: $(shown)"
+: > "$T/calls"
+browser browser_try 1 || fail "browser.sh: $(shown)"
+grep -q "^timeout -k 30 900 bash $T/provision.sh codex --browser (try 1)" "$T/calls" && grep -q '^timeout -k 30 900 runuser ' "$T/calls" \
+  || fail "browser.sh's first try: $(shown)"
+ok "the browser: each try allows Chromium and the browser's part of the system more time"
+
+# --- entry.sh: each try has a time limit that grows; `cage update` falls back to the cache; cc-connect's restarts -------
+entry() { ( CAGE_ENTRY_LIB=1 . "$ROOT/guest/entry.sh" claude; PROVISION="$T/provision.sh"; "$@" ); }
 [ "$(CAGE_REFRESH=1 entry refresh_arg 1)$(CAGE_REFRESH=1 entry refresh_arg 2)" = --refresh--refresh ] || fail "refresh on the first tries"
 [ -z "$(CAGE_REFRESH=1 entry refresh_arg 3)" ] && [ -z "$(CAGE_REFRESH='' entry refresh_arg 1)" ] || fail "--refresh after 2 tries, or without cage update"
-ok "cage update: the newest versions on the first 2 tries, then what the agent had (from its cache)"
+# A stand-in provision.sh: it says how it was called, and then hangs (slow), fails or works (STUB_PROVISION)
+printf '#!/bin/sh\necho "provision $* (try $CAGE_PROVISION_ATTEMPT)" >> "$T/calls"\ncase "$STUB_PROVISION" in slow) exec sleep 60 ;; fail) exit 1 ;; esac\n' > "$T/provision.sh"
+try() { : > "$T/calls"; entry provision_try "$@" > "$T/out" 2>&1; }
+export CAGE_PROVISION_LIMIT=1 STUB_PROVISION=slow
+if try 1 15; then fail "a try that hung counted as done: $(shown)"; fi
+[ "$(cat "$T/out")" = 'cage-entry[claude]: provisioning failed: it took more than 1s; trying again in 15s' ] || fail "a try that hung: $(shown)"
+start=$SECONDS
+if try 3 60; then fail "a try that hung counted as done: $(shown)"; fi
+grep -q 'it took more than 3s' "$T/out" && [ $((SECONDS - start)) -ge 3 ] || fail "the third try should allow 3 times as long: $(shown)"
+STUB_PROVISION=fail
+if CAGE_REFRESH=1 try 2 30; then fail "a failed try counted as done: $(shown)"; fi
+grep -qx 'provision claude --refresh (try 2)' "$T/calls" && grep -q "couldn't get the newest versions (offline?); starting with the ones you had" "$T/out" \
+  || fail "cage update's last try with --refresh: $(shown)"
+# `cage status` reads the last line: "provisioning failed" is a network hiccup, anything else would be "waking up"
+tail -n 1 "$T/out" | grep -q 'provisioning failed; retrying in 30s' || fail "the last line isn't the failure: $(shown)"
+CAGE_REFRESH=1 try 3 60 || true
+grep -qx 'provision claude (try 3)' "$T/calls" || fail "the third try of cage update should use the cache: $(shown)"
+STUB_PROVISION=ok
+try 1 15 && [ ! -s "$T/out" ] || fail "a try that worked: $(shown)"
+unset CAGE_PROVISION_LIMIT STUB_PROVISION
+ok "provisioning: each try has a time limit, longer each time; cage update uses the cache after 2 tries; cage status sees each failure"
 waits=""; p=0
 for ran in 1 1 1 1 1 1 400 1; do p="$(entry restart_wait "$p" "$ran")"; waits="$waits $p"; done
 [ "$waits" = " 5 10 20 40 60 60 5 10" ] || fail "cc-connect's restart waits:$waits"
