@@ -6,10 +6,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-SERVER="" SERVER2="" SERVER3="" SERVER4="" VM="" OTHER=""
+SERVER="" SERVER2="" SERVER3="" SERVER4="" SERVER5="" VM="" OTHER="" OLD=""
 cleanup() { # whatever the tests started, also when one fails halfway
   local p h
-  for p in $SERVER $SERVER2 $SERVER3 $SERVER4 $VM $OTHER; do kill "$p" 2>/dev/null || true; done
+  [ -z "$OLD" ] || pkill -P "$OLD" 2>/dev/null || true   # what the older web app below runs
+  for p in $SERVER $SERVER2 $SERVER3 $SERVER4 $SERVER5 $VM $OTHER $OLD; do kill "$p" 2>/dev/null || true; done
   pkill -f "$T/bin/msb" 2>/dev/null || true   # the stub msb, in a job a failed test left behind
   # the background helper some settings start: by its pid file, or by the CAGE_HOME it runs with (these tests' only)
   for h in "$T"/*/refresh.pid; do if [ -s "$h" ]; then kill "$(cat "$h")" 2>/dev/null || true; fi; done
@@ -323,7 +324,33 @@ echo 'ok' > "$T/other.says"   # what an older cage web app says (and anything co
 if CAGE_UI_PORT="$OPORT" "$ROOT/cage" ui 2>"$T/ui.err"; then fail "cage ui trusted what an older web app says"; fi
 grep -q "an older version of cage's web app is still running" "$T/ui.err" && [ ! -s "$OPENED" ] || fail "an older web app on the port: $(cat "$T/ui.err")"
 kill "$OTHER"; OTHER=""
-ok "cage ui: checks it's cage on the port (an older one or another program isn't trusted), opens a one-time code (never the token), and over SSH says how to connect"
+# This cage's own web app from before an update (an older one, which says only "ok") that never restarted itself:
+# cage ui stops it and starts the new one, unless it's busy with something real
+U="$(mkdir -p "$T/upd" && cd "$T/upd" && pwd -P)"
+tar --exclude=.git --exclude=node_modules -C "$ROOT" -cf - . | tar -C "$U" -xf -
+cp "$U/host/ui/server.py" "$T/new-server.py"
+cat > "$U/host/ui/server.py" <<'PY'
+import http.server, os, subprocess, threading
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+    def log_message(self, *a): pass
+threading.Thread(target=subprocess.call, args=(["sleep", "300"],), daemon=True).start()   # a job that isn't a log
+http.server.HTTPServer(("127.0.0.1", int(os.environ["CAGE_UI_PORT"])), H).serve_forever()
+PY
+OPORT="$(free_port)"
+CAGE_HOME="$T/upd-home" CAGE_UI_PORT="$OPORT" python3 "$U/host/ui/server.py" "$U/cage" & OLD=$!
+for _ in $(seq 50); do [ "$(code "http://127.0.0.1:$OPORT/healthz")" = 200 ] && break; sleep 0.1; done
+cp "$T/new-server.py" "$U/host/ui/server.py"   # the update: new code on disk, the old still running
+if CAGE_HOME="$T/upd-home" CAGE_UI_PORT="$OPORT" "$U/cage" ui --no-open 2>"$T/ui.err"; then fail "cage ui stopped an older web app that was busy"; fi
+grep -q "an older version of cage's web app is still running" "$T/ui.err" && kill -0 "$OLD" || fail "a busy older web app: $(cat "$T/ui.err")"
+pkill -P "$OLD" sleep
+CAGE_HOME="$T/upd-home" CAGE_UI_PORT="$OPORT" "$U/cage" ui --no-open 2>"$T/ui.err" || fail "cage ui didn't replace its own older web app: $(cat "$T/ui.err")"
+SERVER5="$(up_pid "$T/upd-home")"
+for _ in $(seq 20); do kill -0 "$OLD" 2>/dev/null || break; sleep 0.1; done
+! kill -0 "$OLD" 2>/dev/null && grep -q "$U/host/ui/server.py" "/proc/$SERVER5/cmdline" || fail "the older web app is still there, or the new one isn't"
+kill "$SERVER5"; SERVER5="" OLD=""
+ok "cage ui: checks it's cage on the port (an older one or another program isn't trusted, its own older one is replaced once it's idle), opens a one-time code (never the token), and over SSH says how to connect"
 
 # Start at login also starts the web app, so the installed app opens after a restart
 PORT4="$(free_port)"

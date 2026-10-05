@@ -139,7 +139,10 @@ function hostOf (url) { try { return new URL(url).hostname } catch (e) { return 
 
 // --- talking to the server ---------------------------------------------------------------------------------------
 const NOT_ANSWERING = 'cage isn’t answering. Open the cage shortcut, or run cage ui.'
+const OLD_APP = 'cage was updated, but its web app is still the old one. Run cage ui (or open the cage shortcut) to restart it.'
+let OLD = false   // the web app answering is older than this page: it would drop a question sent the new way ("text")
 async function api (path, opts = {}) {
+  if (OLD && opts.body && opts.body.text !== undefined) throw new Error(OLD_APP)
   let res
   try {
     res = await fetch(path, {
@@ -154,7 +157,11 @@ async function api (path, opts = {}) {
   }
   if (res.status === 401) { locked(); throw new Error('locked') }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || res.statusText)
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText)
+    err.status = res.status
+    throw err
+  }
   return data
 }
 let BOOTED = ''   // the cage version this page came with; after an update, the page reloads to get the new one
@@ -173,7 +180,8 @@ async function refresh () {
   try {
     STATE = await api('/api/state')
     FAILS = 0
-    notice(STATE.stale ? 'slow' : '')
+    notice(OLD ? 'old' : STATE.stale ? 'slow' : '')
+    if (OLD) reattach()   // restarted yet?
     BOOTED = BOOTED || STATE.version
     if (STATE.version !== BOOTED && !running() && !typing(document.activeElement) && !unsaved()) {
       BOOTED = STATE.version   // once: the server restarts itself within seconds of an update (host/ui/server.py)
@@ -204,9 +212,10 @@ function notice (kind) {
   if (!kind || el.dataset.kind === kind) return
   el.dataset.kind = kind
   el.className = 'notice ' + (down ? 'bad' : 'warn')
-  el.replaceChildren(icon(down ? 'circle-alert' : 'loader-circle'), h('span', { class: 'grow' }, down
+  el.replaceChildren(icon(down ? 'circle-alert' : kind === 'old' ? 'refresh-cw' : 'loader-circle'), h('span', { class: 'grow' }, down
     ? [h('b', {}, 'cage isn’t answering.'), ' Open the cage shortcut, or run ', h('code', {}, 'cage ui'), '. Trying again…']
-    : 'cage is slow to answer, so what you see may be a little out of date.'))
+    : kind === 'old' ? [h('b', {}, 'cage was updated, but its web app is still the old one.'), ' Run ', h('code', {}, 'cage ui'), ' (or open the cage shortcut) to restart it.']
+      : 'cage is slow to answer, so what you see may be a little out of date.'))
 }
 function locked (text) {
   document.body.classList.add('is-locked')
@@ -1863,9 +1872,12 @@ function start () {
 async function reattach () { // after a reload: a job this page started is still going; it comes back as the pill
   try {
     const list = (await api('/api/jobs')).jobs || []
+    if (OLD) { OLD = false; notice('') }
     const j = list[list.length - 1]
     if (j && !job) openJob(j.id, j.args, j.title, false)
-  } catch (e) {}
+  } catch (e) { // a web app without that list predates this page (it went on through an update): see OLD
+    if (e.status === 404) { OLD = true; notice('old') }
+  }
 }
 
 document.querySelectorAll('[data-icon]').forEach((el) => el.append(icon(el.dataset.icon)))

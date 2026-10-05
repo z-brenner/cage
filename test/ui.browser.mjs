@@ -65,6 +65,29 @@ await page.locator('.answer-card', { hasText: 'Claude Code' }).getByText('Paris'
 if (!(await page.locator('.answer-card strong', { hasText: 'the stub' }).count())) fail('the answer is not formatted')
 ok('ask your agents: the awake ones answer side by side, formatted')
 
+// a web app from before an update (it has no list of jobs) would drop a question sent the new way: the page says to
+// restart it and sends nothing, until it has been
+await page.evaluate(() => {
+  const real = window.fetch
+  window.__sent = 0
+  window.fetch = (url, o) => {
+    if (String(url) === '/api/jobs' && !(o && o.method === 'POST')) return Promise.resolve(new Response('{"error":"no such endpoint"}', { status: 404 }))
+    if (String(url) === '/api/jobs') window.__sent++
+    return real(url, o)
+  }
+  window.__fetch = real
+})
+await page.evaluate(() => reattach())
+await page.locator('#notice', { hasText: 'its web app is still the old one' }).waitFor({ timeout: 5000 })
+await page.getByLabel('Question for your agents').fill('capital of Italy?')
+await page.getByLabel('Question for your agents').press('Enter')
+await page.locator('.round .note.bad', { hasText: 'Run cage ui' }).waitFor({ timeout: 5000 })
+if (await page.evaluate(() => window.__sent)) fail('a question went to an older web app')
+await page.evaluate(async () => { window.fetch = window.__fetch; await refresh(); await reattach() })
+await page.locator('#notice').waitFor({ state: 'hidden', timeout: 5000 })
+await page.getByRole('button', { name: 'Clear' }).click()
+ok('an older web app (from before an update) gets no questions, and the page says how to restart it')
+
 // ask v2: with two awake, where they disagree; a follow-up that sees the answers; earlier questions are kept
 fs.writeFileSync(process.env.STUB_AWAKE, '')
 await page.reload()

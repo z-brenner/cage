@@ -3297,14 +3297,44 @@ sys.exit(0 if hmac.compare_digest(hmac.new(key, sys.argv[2].encode(), hashlib.sh
   return 1
 }
 
+# ui_stop_old: stops this cage's own web app when it's one from before an update (it answered as an older one does)
+# that isn't busy with anything but a log or a terminal. One that started before a release whose files all had the
+# same date never saw its file change, so it would never restart itself, and its page would send the new page's
+# requests to the old code. Only a program of this user's running this cage's server.py on this port is stopped:
+# anything else that answers like that is left alone (and isn't trusted).
+ui_stop_old() {
+  local p k port old="" i st
+  for p in $(pgrep -u "$(id -u)" -f -- "$CAGE_ROOT/host/ui/server.py" 2>/dev/null); do
+    case "$(ps -o args= -p "$p" 2>/dev/null)" in *[Pp]ython*" $CAGE_ROOT/host/ui/server.py $CAGE_ROOT/cage") ;; *) continue ;; esac
+    if [ -r "/proc/$p/environ" ]; then   # (Linux) the one on this port
+      port="$(tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^CAGE_UI_PORT=//p')"
+      [ "${port:-7771}" = "$UI_PORT" ] || continue
+    fi
+    for k in $(pgrep -P "$p" 2>/dev/null); do   # what it's running: anything but a log or a terminal is real work
+      case "$(ps -o stat= -p "$k" 2>/dev/null)" in Z*) continue ;; esac   # (one that has just ended)
+      case "$(ps -o args= -p "$k" 2>/dev/null) " in *"/cage logs "*|*"/cage shell "*) ;; *) return 1 ;; esac
+    done
+    old="$old $p"
+  done
+  [ -n "$old" ] || return 1
+  # shellcheck disable=SC2086 # one pid each
+  kill $old 2>/dev/null || true
+  for i in $(seq 25); do st=0; ui_answer || st=$?; [ "$st" != 2 ] || return 0; sleep 0.2; done
+  return 1
+}
+
 cmd_ui() { # cage ui [--no-open]: the web app
   command -v python3 >/dev/null 2>&1 || die "the web app needs python3: sudo apt-get install python3"
   mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
   local tok="$CAGE_HOME/ui.token" pair="$CAGE_HOME/ui.pair" url code pid i st=0
   [ -s "$tok" ] || ( umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$tok" )
   ui_answer || st=$?
-  # something else, or an older web app: maybe the one from before an update, which restarts itself within seconds
-  for i in 1 2 3 4 5 6; do case "$st" in 1|3) sleep 1; st=0; ui_answer || st=$? ;; *) break ;; esac; done
+  # something else, or an older web app: maybe the one from before an update, which restarts itself within seconds,
+  # or this cage's own that never will (see ui_stop_old)
+  for i in 1 2 3 4 5 6; do
+    if [ "$st" = 3 ] && ui_stop_old; then st=2; break; fi
+    case "$st" in 1|3) sleep 1; st=0; ui_answer || st=$? ;; *) break ;; esac
+  done
   if [ "$st" = 2 ]; then
     if command -v setsid >/dev/null 2>&1; then
       CAGE_UI_PORT="$UI_PORT" setsid nohup python3 "$CAGE_ROOT/host/ui/server.py" "$CAGE_ROOT/cage" >>"$CAGE_HOME/ui.log" 2>&1 < /dev/null &
