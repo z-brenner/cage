@@ -2354,7 +2354,10 @@ msb_private() { # microsandbox keeps each agent's home volume (its logins, its w
   done
 }
 
-cmd_up() {
+# cage up [agents]: wakes them (each in a fresh VM). One that can't start doesn't stop the others; it ends in exit 1.
+cmd_up() { up_agents "$@"; [ -z "$UP_FAILED" ]; }
+UP_FAILED=""
+up_agents() { # up_agents [agents]: what cage up does, leaving the agents that didn't start in UP_FAILED (" a b ")
   load_env
   resolve_agents "$@"
   find_msb || die "microsandbox isn't installed; run: cage fix"
@@ -2395,7 +2398,21 @@ cmd_up() {
       say "they're installing in the background (about a minute) · cage status"
     fi
   fi
-  [ ${#failed[@]} -eq 0 ]
+  UP_FAILED=""
+  if [ ${#failed[@]} -gt 0 ]; then UP_FAILED=" ${failed[*]} "; fi
+}
+up_and_sign_in() { # up_and_sign_in <agents>: wakes them, then signs in each one that started; false if one didn't start
+  local a
+  up_agents "$@"
+  if interactive; then
+    for a in "$@"; do
+      case "$UP_FAILED" in *" $a "*) continue ;; esac   # (cage said why, and what to do)
+      refresh_running
+      [ "$(probe "$a")" = ready ] && continue
+      ( cmd_login "$a" ) || warn "no problem: sign $a in later (cage login $a)"
+    done
+  fi
+  [ -z "$UP_FAILED" ]
 }
 
 cmd_login() {
@@ -2855,14 +2872,8 @@ cmd_add() { # cage add <agents>: your agents, to talk to in the app (chat apps a
   CAGE_AGENTS="${keep[*]}"
   for a in "$@"; do app_dirs "$a"; ok "$(agent_name "$a") is one of your agents"; done
   find_msb || { hint "next: cage up"; return 0; }
-  if [ $login = 1 ]; then cmd_up "$@"; else NO_WAIT=1 cmd_up "$@"; fi   # the setup screen shows them getting ready
-  if [ $login = 1 ] && interactive; then
-    for a in "$@"; do
-      refresh_running
-      [ "$(probe "$a")" = ready ] && continue
-      ( cmd_login "$a" ) || warn "no problem: sign $a in later (cage login $a)"
-    done
-  fi
+  if [ $login = 1 ]; then up_and_sign_in "$@"
+  else NO_WAIT=1 cmd_up "$@"; fi   # the setup screen shows them getting ready
 }
 
 cmd_approve() { # cage approve <agent> [on|off]: ask you before it acts in your apps
@@ -3669,15 +3680,7 @@ cmd_onboard() {
   step "$n of $n" "Wake up and sign in"
   set +e
   if [ "$where" = app ]; then ( set -e; cmd_add "${picked[@]}" )   # your agents in the app: wakes and signs them in
-  else
-    ( set -e
-      cmd_up "${picked[@]}"
-      for a in "${picked[@]}"; do
-        refresh_running
-        [ "$(probe "$a")" = ready ] && continue
-        ( cmd_login "$a" ) || warn "no problem, sign $a in later: cage login $a"
-      done )
-  fi
+  else ( set -e; up_and_sign_in "${picked[@]}" ); fi
   rc=$?
   set -e
   load_env

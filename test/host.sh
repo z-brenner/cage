@@ -487,6 +487,15 @@ ok "asking first: Claude asks before using your apps only, the others before eve
 assert d["codex"]["reachable"] and not d["codex"]["chat_apps"] and not d["antigravity"]["enabled"], d' || fail "state: reachable in the app" )
 ok "cage add: agents you chat with in the app, no bot needed; agents added before are kept"
 
+# cage add, with one agent that can't start: the others are still woken and signed in, and cage add ends in exit 1
+( block_watch; export CAGE_HOME="$T/added2" MSB_EXISTING="$T/added2.vms"
+  echo cage-codex > "$MSB_EXISTING"; : > "$MSB_LOG"; rc=0
+  printf '\n\n\n\n' | MSB_FAIL_RUN=cage-claude CAGE_PROTO=1 "$ROOT/cage" add claude codex >/dev/null 2>"$T/add2.err" || rc=$?
+  [ $rc = 1 ] && grep -q "couldn't start claude" "$T/add2.err" || fail "cage add with one that can't start: exit $rc, $(cat "$T/add2.err")"
+  grep -q '^exec .*| cage-codex |' "$MSB_LOG" || fail "codex started, but wasn't checked for a sign-in: $(cat "$T/add2.err")"
+  if grep -q '^exec .*| cage-claude |' "$MSB_LOG"; then fail "claude, which didn't start, was asked to sign in"; fi )
+ok "cage add: when one agent can't start, the others are still signed in"
+
 cage _check 2>/dev/null | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
 assert {"msb", "disk", "network"} <= set(c), c
 assert all(x["status"] in ("ok", "warn", "bad") and x["title"] for x in c.values()), c
