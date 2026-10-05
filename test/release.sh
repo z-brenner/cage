@@ -138,6 +138,22 @@ grep -q "isn't on main" <<<"$out" || fail "doesn't say why: $out"
 out="$(check v0.9.0 "$two")" && fail "released over an existing tag at another commit"
 grep -q "already exists, at another commit ($one)" <<<"$out" || fail "doesn't say why: $out"
 out="$(check 1.0 "$two")" && fail "released a tag that isn't a version"
+# The build step, run as written there in a snapshot of this tree: it builds twice, the second time under umask 077,
+# and stops if the two differ. So the file modes in the tarball mustn't follow the builder's umask (on GitHub's
+# runners, which aren't root, tar applies it to every file it unpacks), and they're the usual 0644 and 0755.
+step="$(run_of 'build (twice')"
+[ -n "$step" ] || fail "can't find the build step in release.yml"
+mkdir -p "$T/src" "$T/runner"
+(cd "$ROOT" && tar --exclude=.git --exclude=./out -cf - .) | tar -xf - -C "$T/src"
+git -C "$T/src" init -q
+g2() { git -C "$T/src" -c user.name=t -c user.email=t@t.invalid -c commit.gpgsign=false "$@"; }
+g2 add -A; g2 commit -qm snapshot
+out="$(cd "$T/src" && umask 022 && TAG=v1.0.0 RUNNER_TEMP="$T/runner" bash --noprofile --norc -eo pipefail -c "$step" 2>&1)" \
+  || fail "release.yml's build step failed: $out"
+modes="$(tar -tvzf "$T/src/out/dist/cage-v1.0.0.tar.gz" | awk '{ print $1 }' | sort -u | tr '\n' ' ')"
+[ "$modes" = "-rw-r--r-- -rwxr-xr-x drwxr-xr-x " ] || fail "the release's file modes depend on who builds it: $modes"
+ok "release.yml builds each release twice and gets the same files, with the same modes whoever builds it"
+
 # The publish step, run as written there against a stub gh: by then someone may have pushed the tag at another commit
 step="$(run_of publish)"
 [ -n "$step" ] || fail "can't find the publish step in release.yml"
