@@ -689,7 +689,22 @@ dialog#palette::backdrop { background: color-mix(in srgb, var(--bg) 55%, transpa
 .choices.approval { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 5%, var(--card)); }
 .approval-head { display: flex; align-items: center; gap: 8px; color: var(--ink); }
 .approval-head .i { color: var(--warn-fg); }
-.approval-what { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--hover); font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.approval-what { margin: 0; color: var(--ink); font-size: 14.5px; overflow-wrap: anywhere; }
+.approval-what b { font-weight: 600; }
+.approval-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 13.5px; }
+.approval-fields > div { display: contents; }
+.approval-fields dt { color: var(--muted); }
+.approval-fields dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
+.approval-body { padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--card) 70%, transparent); border: 1px solid var(--line-soft);
+  font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
+.approval-body.open { display: block; -webkit-line-clamp: none; line-clamp: none; }
+.approval-more { align-self: flex-start; margin-top: -4px; color: var(--link); }
+.approval-raw summary { width: fit-content; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.approval-raw summary:hover { color: var(--ink); }
+.approval-raw pre, .approval-text { margin: 6px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--hover); font: 12px/1.5 var(--mono);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.approval-text { margin: 0; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .chosen { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
 .chosen .i { color: var(--ok-fg); }

@@ -1114,17 +1114,121 @@ function fileChip (a, f) {
   return h('a', { class: 'file-chip', href: f.path ? fileUrl(a, f.path, true) : null, download: name }, h('span', { class: 'file-ic' }, icon('file-text')),
     h('span', { class: 'grow' }, h('b', {}, name), f.size ? h('span', { class: 'sub' }, size(f.size)) : null), f.path ? icon('download') : null)
 }
+// Asking before acting, in words. cc-connect (v1.5.0) asks "⚠️ **Permission Request**\n\nAgent wants to use **<tool>**:
+// \n\n```\n<input>\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session)." (or the
+// same in one of its other languages), with the buttons perm:allow, perm:deny and perm:allow_all. <input> is the
+// command for Bash, the file for Read, Edit and Write, the address for Cursor's WebFetch, and otherwise the tool's
+// input as one line of JSON, cut at 800 characters with "...". The card says what the agent would do, shows the
+// details that matter first, and keeps exactly what it asked one click away.
+const PERM_LABEL = { 'perm:allow': 'Allow', 'perm:deny': 'Deny', 'perm:allow_all': 'Allow for the rest of this conversation' }
+// Zapier's tools are named after the app first: gmail_send_email, google_calendar_find_event…
+const ZAPIER_APPS = [['google_calendar', 'Google Calendar'], ['google_sheets', 'Google Sheets'], ['google_docs', 'Google Docs'],
+  ['google_drive', 'Google Drive'], ['google_contacts', 'Google Contacts'], ['microsoft_outlook', 'Outlook'], ['microsoft_teams', 'Microsoft Teams'],
+  ['microsoft_excel', 'Excel'], ['microsoft_onedrive', 'OneDrive'], ['jira_software_cloud', 'Jira'], ['gmail', 'Gmail'], ['slack', 'Slack'],
+  ['notion', 'Notion'], ['hubspot', 'HubSpot'], ['salesforce', 'Salesforce'], ['trello', 'Trello'], ['asana', 'Asana'], ['airtable', 'Airtable'],
+  ['dropbox', 'Dropbox'], ['zoom', 'Zoom'], ['calendly', 'Calendly'], ['linkedin', 'LinkedIn'], ['todoist', 'Todoist'], ['docusign', 'DocuSign']]
+// The details shown first, with their names in words; then everything else it would send, and the text (a message's
+// body, say) last, cut to a few lines
+const APPROVAL_FIELDS = [['to', 'To'], ['cc', 'Cc'], ['bcc', 'Bcc'], ['subject', 'Subject'], ['title', 'Title'], ['file_path', 'File'],
+  ['notebook_path', 'File'], ['path', 'File'], ['url', 'Address'], ['query', 'Search for'], ['command', 'Command']]
+const APPROVAL_BODY = ['body', 'text', 'message', 'content', 'instructions']
+function words (name) { return String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[\s_.-]+/g, ' ').trim().toLowerCase() }
+function capital (s) { return s ? s[0].toUpperCase() + s.slice(1) : s }
+function toolWords (tool, path) { // what a tool does: {what: 'Gmail: send email', via: 'Zapier'}
+  const parts = tool.split('__')
+  if (parts[0] === 'mcp' && parts.length >= 3) { // an app you connected: mcp__<server>__<action>
+    const server = parts[1]
+    const action = parts.slice(2).join(' ')
+    const app = server === 'zapier' && ZAPIER_APPS.find(([p]) => action === p || action.startsWith(p + '_'))
+    if (app) return { what: `${app[1]}: ${words(action.slice(app[0].length)) || 'use it'}`, via: 'Zapier' }
+    return { what: `${pretty(server)}: ${words(action) || 'use it'}` }
+  }
+  const file = path ? ': ' + path : ''
+  if (/^(Bash|Shell)$/i.test(tool)) return { what: 'Run a command on its own computer' }
+  if (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(tool)) return { what: 'Change a file' + file }
+  if (/^(Read|NotebookRead)$/.test(tool)) return { what: 'Read a file' + file }
+  if (/^Web(Fetch|Search)$/.test(tool)) return { what: 'Look something up online' }
+  return { what: capital(words(tool)) || tool }
+}
+function looseJSON (text) { // the tool's input as {args, cut}: JSON, or JSON that cc-connect cut short ("..."); else null
+  const t = text.trim()
+  if (!t.startsWith('{')) return null
+  const obj = (s) => { try { const o = JSON.parse(s); return o && typeof o === 'object' && !Array.isArray(o) ? o : null } catch (e) { return null } }
+  const whole = obj(t)
+  if (whole) return { args: whole, cut: false }
+  if (!t.endsWith('...')) return null
+  // closed off where it was cut (half an escape and a dangling comma dropped first), as far as it goes
+  const cut = t.slice(0, -3).replace(/\\+$/, (s) => s.length % 2 ? s.slice(1) : s).replace(/,\s*$/, '')
+  for (const end of ['"}', '}', '":null}', 'null}', '"]}', ']}', '"}}', '}}', '"}]}']) { const o = obj(cut + end); if (o) return { args: o, cut: true } }
+  return null
+}
+function shown (v) { // a value as text: a list as "a, b", anything else as JSON; long ones cut (all of it is under "Exactly what it asked")
+  const s = typeof v === 'string' ? v : Array.isArray(v) && v.every((x) => typeof x !== 'object') ? v.join(', ') : JSON.stringify(v)
+  return s.length > 400 ? s.slice(0, 400) + '…' : s
+}
+const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
+function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut}; what is '' if it isn't cc-connect's prompt
+  const raw = String(text || '')
+  const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
+  const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '' }
+  const tool = bold[1].trim()
+  const input = fence[1].replace(/\n$/, '')
+  const parsed = looseJSON(input)
+  const args = parsed ? parsed.args : {}
+  if (!parsed && input) { // not JSON: a command, a file or an address
+    if (/^(Bash|Shell)$/i.test(tool)) args.command = input
+    else if (/^Web(Fetch|Search)$/.test(tool)) args[/^https?:\/\//.test(input) ? 'url' : 'query'] = input
+    else if (/^(Write|Edit|MultiEdit|Read|NotebookEdit|NotebookRead)$/.test(tool)) args.path = input
+    else args.input = input
+  }
+  const path = ['file_path', 'notebook_path', 'path'].map((k) => args[k]).find((v) => typeof v === 'string') || ''
+  const { what, via } = toolWords(tool, path)
+  const bodyKey = APPROVAL_BODY.find((k) => typeof args[k] === 'string' && args[k].trim())
+  const fields = []
+  let file = /^(Change|Read) a file:/.test(what)   // its file is in what it does already
+  for (const [k, label] of APPROVAL_FIELDS) {
+    if (blank(args[k]) || (label === 'File' && file)) continue
+    if (label === 'File') file = true
+    fields.push([label, shown(args[k]), k])
+  }
+  for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
+    if (k !== bodyKey && !APPROVAL_FIELDS.some(([f]) => f === k) && !blank(v)) fields.push([capital(words(k)) || k, shown(v), k])
+  }
+  return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut: !!(parsed && parsed.cut) }
+}
+function approvalLine (ap) { // in one line, for Home and notifications: "Gmail: send email to bob@acme.com"
+  if (!ap.what) return ap.raw.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)
+  const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
+  const more = f.to ? ' to ' + f.to : f.command ? ': ' + f.command : f.url ? ': ' + f.url : f.query ? ': ' + f.query : f.subject ? ': ' + f.subject : f.title ? ': ' + f.title : ''
+  const line = (ap.what + more).replace(/\s+/g, ' ')
+  return line.length > 160 ? line.slice(0, 159) + '…' : line
+}
+function approvalView (ap) { // what the card shows above its buttons
+  if (!ap.what) return [h('pre', { class: 'approval-text' }, ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim())]
+  const body = ap.body ? h('div', { class: 'approval-body' }, ap.body) : null
+  const long = ap.body && (ap.body.split('\n').length > 6 || ap.body.length > 420)
+  return [
+    h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
+    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v]) => h('div', {}, h('dt', {}, label), h('dd', {}, v)))) : null,
+    body,
+    long ? h('button', { type: 'button', class: 'linkish small approval-more', 'aria-expanded': 'false', onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all') : null,
+    ap.cut ? h('p', { class: 'small muted' }, 'Only the start of this was shown here. Allow lets it do all of it.') : null,
+    h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', {}, ap.raw))
+  ]
+}
 // Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons).
 function buttonsMsg (C, e) {
   const all = (e.buttons || []).flat()
   const perm = all.some((b) => /^perm:/.test(b.data))
   const box = h('div', { class: 'choices' + (perm ? ' approval' : '') })
   box.dataset.values = all.map((b) => b.data).join('\n')
-  const body = perm
-    ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants to go ahead')), h('pre', { class: 'approval-what' }, (e.text || '').trim())]
+  const body = perm ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants your OK')), approvalView(approvalOf(e.text))]
     : [md(e.text || '')]
-  box.append(...body, h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) =>
-    h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, b.text) }, b.text)))))
+  box.append(...body.flat(), h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) => {
+    const label = (perm && PERM_LABEL[b.data]) || b.text
+    return h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, label) }, label)
+  }))))
   return agentMsg(C, box, '', e.at)
 }
 function choose (C, box, value, label) {
@@ -1719,7 +1823,7 @@ function heard (agent, e) {
   if (page !== 'agent/' + agent) { NOTES.unread[agent] = (NOTES.unread[agent] || 0) + 1; drawNav() }
   if (!notifyOn()) return
   const perm = e.t === 'buttons' && (e.buttons || []).flat().some((b) => /^perm:/.test(b.data))
-  const text = perm ? 'wants to go ahead: ' + (e.text || '') : e.t === 'file' ? 'sent you ' + (e.name || 'a file') : (e.text || (e.card && e.card.header && e.card.header.title) || '')
+  const text = perm ? 'wants your OK: ' + approvalLine(approvalOf(e.text)) : e.t === 'file' ? 'sent you ' + (e.name || 'a file') : (e.text || (e.card && e.card.header && e.card.header.title) || '')
   const opts = { body: text.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180), icon: 'icon-192.png', badge: 'icon-192.png', tag: 'cage-' + agent, data: { url: '/#agent/' + agent }, requireInteraction: perm }
   const title = nameOf(agent)
   const fallback = () => { const n = new Notification(title, opts); n.onclick = () => { window.focus(); go('agent/' + agent); n.close() } }

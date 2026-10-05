@@ -11,6 +11,13 @@ fs.mkdirSync(work, { recursive: true })
 const log = (e) => fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), ...e }) + '\n')
 const out = (id, d) => fs.writeFileSync(path.join(dir, 'out', id + '.json'), JSON.stringify(d))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// cc-connect v1.5.0's own words when it asks before acting (core/i18n.go, MsgPermissionPrompt), word for word, and its
+// buttons (engine.go, sendPermissionPrompt). An app's tool input comes as one line of JSON, its keys in order (Go's).
+const permission = (tool, input) => `⚠️ **Permission Request**\n\nAgent wants to use **${tool}**:\n\n\`\`\`\n${input}\n\`\`\`\n\n` +
+  'Reply **allow** / **deny** / **allow all** (skip all future prompts this session).'
+const PERM_BUTTONS = [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }], [{ text: 'Allow All (this session)', data: 'perm:allow_all' }]]
+const EMAIL = JSON.stringify({ body: 'Hi Bob,\n\nThe brief is ready. It covers:\n\n1. Scope\n2. Timeline\n3. Budget\n\nTell me if anything is missing.\n\nBest,\nSam',
+  subject: 'The brief is ready', to: 'bob@acme.com' })
 log({ t: 'status', connected: true })
 async function handle (r) {
   const session = r.session || 'you'
@@ -20,7 +27,7 @@ async function handle (r) {
     log({ t: 'typing', session, on: true })
     if (/email/i.test(r.text)) {
       await sleep(300)
-      return log({ t: 'buttons', session, ctx: r.id, text: 'Allow tool execution: mcp__zapier__gmail_send_email(to: bob@acme.com)?', buttons: [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }], [{ text: 'Allow all', data: 'perm:allow_all' }]] })
+      return log({ t: 'buttons', session, ctx: r.id, text: permission('mcp__zapier__gmail_send_email', EMAIL), buttons: PERM_BUTTONS })
     }
     const handle = 'p-' + r.id
     log({ t: 'preview', session, ctx: r.id, handle, text: 'Working on it' })

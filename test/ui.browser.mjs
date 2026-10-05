@@ -138,13 +138,39 @@ const [download] = await Promise.all([page.waitForEvent('download'), back.click(
 if (fs.readFileSync(await download.path(), 'utf8') !== '%PDF-1.4 brief') fail('the file the agent sent back')
 await chat.locator('textarea').fill('Email Bob that the brief is ready')
 await chat.locator('textarea').press('Enter')
+// (the fake VM asks in cc-connect v1.5.0's own words: markdown, a code block, the email as one line of JSON)
 const approval = chat.locator('.choices.approval')
-await approval.getByText('mcp__zapier__gmail_send_email').waitFor({ timeout: 10000 })
+await approval.getByText('Gmail: send email').waitFor({ timeout: 10000 })
+const inWords = await approval.innerText()
+if (/```|\*\*|Reply allow|\{"/.test(inWords) || !/To\s*bob@acme\.com/.test(inWords) || !/Subject\s*The brief is ready/.test(inWords)) fail('the approval card is not in words: ' + inWords)
+if (!(await approval.getByRole('button', { name: 'Allow for the rest of this conversation' }).count())) fail('"Allow All (this session)" is not said in words')
+const body = approval.locator('.approval-body')
+const clamped = () => body.evaluate((el) => el.scrollHeight > el.clientHeight + 2)
+if (!(await clamped())) fail('the email body is not cut to a few lines')
+await approval.getByRole('button', { name: 'Show all' }).click()
+if (await clamped()) fail('Show all does not show all of the body')
+const raw = approval.locator('details.approval-raw pre')
+if (await raw.isVisible()) fail('what it asked, word for word, shows before you ask for it')
+await approval.getByText('Exactly what it asked').click()
+if (!(await raw.innerText()).startsWith('⚠️ **Permission Request**\n\nAgent wants to use **mcp__zapier__gmail_send_email**:\n\n```\n{"body":')) fail('the raw question: ' + await raw.innerText())
+// other tools, other inputs (a command, a file, an address, JSON cut short), another language, and anything else
+const said = await page.evaluate(() => {
+  const p = (tool, input) => `⚠️ **Permission Request**\n\nAgent wants to use **${tool}**:\n\n\`\`\`\n${input}\n\`\`\`\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).`
+  const cut = approvalOf(p('mcp__zapier__gmail_send_email', '{"body":"' + 'Dear Bob, '.repeat(80).slice(0, 790) + '...'))
+  return [approvalLine(approvalOf(p('Bash', 'rm -rf ~/work/old'))), approvalLine(approvalOf(p('Write', '/home/agent/work/notes.md'))),
+    approvalLine(approvalOf(p('WebFetch', 'https://example.com/a'))), approvalLine(approvalOf(p('mcp__github__create_issue', '{"body":"It fails","title":"Login is broken"}'))),
+    approvalLine(approvalOf(p('mcp__zapier__google_calendar_find_event', '{"instructions":"lunch"}'))), approvalLine(cut), String(cut.cut),
+    approvalLine(approvalOf('⚠️ **权限请求**\n\nAgent 想要使用 **Bash**:\n\n```\nls -la\n```\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。')),
+    approvalLine(approvalOf('May I **delete** it?'))]
+})
+const want = ['Run a command on its own computer: rm -rf ~/work/old', 'Change a file: /home/agent/work/notes.md', 'Look something up online: https://example.com/a',
+  'GitHub: create issue: Login is broken', 'Google Calendar: find event', 'Gmail: send email', 'true', 'Run a command on its own computer: ls -la', 'May I delete it?']
+if (JSON.stringify(said) !== JSON.stringify(want)) fail('approvals in words: ' + JSON.stringify(said))
 await approval.getByRole('button', { name: 'Allow', exact: true }).click()
 await chat.getByText('Sent the email to bob@acme.com.').waitFor({ timeout: 10000 })
 if (!(await approval.getByText('You chose:').count())) fail('the choice is not shown')
 if (!fs.readFileSync(path.join(home, 'app', 'claude', 'log.jsonl'), 'utf8').includes('"action":"perm:allow"')) fail('the approval did not reach the agent')
-ok('chat: starters, a file each way, a streamed answer, and asking before acting (Allow reaches the agent)')
+ok('chat: starters, a file each way, a streamed answer, and asking before acting in words, with what it asked one click away (Allow reaches the agent)')
 
 // the VM starts a new chat log now and then (at 8 MB): what was said before stays on the screen, and after a reload
 const dir = path.join(home, 'app', 'claude')
@@ -535,7 +561,7 @@ const badge = page.locator('#nav-agents a', { hasText: 'Claude Code' }).locator(
 await badge.getByText('1').waitFor({ timeout: 10000 })
 if (!(await page.title()).startsWith('(')) fail('the tab title does not count the unread message')
 await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).click()
-await page.locator('.chat .msg-agent', { hasText: 'is ready' }).waitFor({ timeout: 10000 })
+await page.locator('.chat .msg-agent', { hasText: 'Your report is ready' }).waitFor({ timeout: 10000 })
 if (await badge.count()) fail('the unread mark stayed after opening the chat')
 ok('desktop notifications: turned on in Settings; a reply elsewhere notifies and marks the agent unread until opened')
 
