@@ -2,12 +2,14 @@
 // open-source client) and relays one person's messages to cc-connect's bridge inside the same VM.
 // Started by guest/whatsapp.sh as the agent user, with its settings in the environment:
 //   WA_DIR           state: the WhatsApp session (auth/), status.json for `cage chat link whatsapp`, and
-//                    state.json (when it was last connected, so messages sent while it was away still count)
+//                    state.json (when it was last connected, so messages sent while it was away still count).
+//                    `cage chat link whatsapp` writes a phone number to pair there to link with a code, not a QR.
 //   WA_MODE          "spare": a number of its own; people in WA_ALLOW message it like anyone else
 //                    "own":   linked to its owner's own number; it answers only in their "Message yourself" chat
 //   WA_ALLOW         phone numbers (digits) that may talk to it in spare mode
 //   WA_BRIDGE_URL    ws://127.0.0.1:<port>/bridge/ws ; WA_BRIDGE_TOKEN its token
 //   WA_NAME          how replies are signed in own mode (they come from the owner's own account there)
+//   WA_ALIVE_MS      how often state.json is saved while connected (60000; the tests make it shorter)
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -65,22 +67,35 @@ export function sinceOf(state, now = Date.now()) {
   return Math.floor((last ? Math.max(Math.min(last, now), now - 24 * 3600 * 1000) : now - 30 * 1000) / 1000)
 }
 
-// Messages that can't go anywhere yet (cc-connect or WhatsApp is reconnecting) wait here: at most 50, and none for
-// longer than 10 minutes, so a long outage doesn't end in a flood of stale messages.
+// Messages that can't go anywhere yet (cc-connect or WhatsApp is reconnecting) wait here: at most 50, none for
+// longer than 10 minutes, so a long outage doesn't end in a flood of stale messages, and at most 50 MB in all (voice
+// notes wait with their audio), the oldest going first.
 export class Backlog {
-  constructor(max = 50, ttl = 10 * 60 * 1000) { this.max = max; this.ttl = ttl; this.items = []; this.dropped = 0 }
+  constructor(max = 50, ttl = 10 * 60 * 1000, maxBytes = 50 * 1024 * 1024) {
+    Object.assign(this, { max, ttl, maxBytes, items: [], bytes: 0, dropped: 0 })
+  }
   get size() { return this.items.length }
-  push(item, now = Date.now()) {
-    this.items.push({ item, at: now })
-    while (this.items.length > this.max) { this.items.shift(); this.dropped++ }
+  push(item, now = Date.now(), bytes = 0) {
+    if (bytes > this.maxBytes) return void this.dropped++   // bigger than all the room there is: only it goes
+    this.items.push({ item, at: now, bytes })
+    this.bytes += bytes
+    while (this.items.length > this.max || this.bytes > this.maxBytes) { this.bytes -= this.items.shift().bytes; this.dropped++ }
   }
   take(now = Date.now()) { // everything still fresh, oldest first; the queue is then empty
     const fresh = this.items.filter((x) => now - x.at <= this.ttl)
     this.dropped += this.items.length - fresh.length
     this.items = []
+    this.bytes = 0
     return fresh.map((x) => x.item)
   }
 }
+
+// Linking with a code instead of a QR. A code works only as long as the connection that asked for it (about 3
+// minutes, then WhatsApp closes it), so each new connection asks again, for the same code: the one on the screen
+// keeps working. Every request makes WhatsApp prompt the phone, so that's only while someone is linking: for 10
+// minutes after `cage chat link whatsapp` wrote the number to pair (it has stopped waiting by then). After that, or
+// if pair seems to be from the future (the clock moved), it's the QR again.
+export const linking = (written, now = Date.now()) => now - written < 10 * 60 * 1000 && now - written > -60 * 1000
 
 async function main() {
   const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, jidNormalizedUser, downloadMediaMessage } =
@@ -112,7 +127,7 @@ async function main() {
   let me = {}
   let pairRequested = false
   let retry = 2000
-  const dropped = (q, what) => { if (q.dropped) { log(`${q.dropped} ${what} waited too long and were dropped`); q.dropped = 0 } }
+  const dropped = (q, what) => { if (q.dropped) { log(`${q.dropped} ${what} were dropped (too many or too big to keep, or waited too long)`); q.dropped = 0 } }
 
   // --- cc-connect's bridge ------------------------------------------------------------------------------------
   let bridge = null
@@ -122,7 +137,7 @@ async function main() {
   const toBridge = (o) => { if (bridge?.readyState === WebSocket.OPEN) bridge.send(JSON.stringify(o)) }
   // A message from WhatsApp goes to the agent, and only then is it marked read: blue ticks mean it got there.
   const handOff = (msg, key) => {
-    if (!registered || bridge?.readyState !== WebSocket.OPEN) return inbox.push({ msg, key })
+    if (!registered || bridge?.readyState !== WebSocket.OPEN) return inbox.push({ msg, key }, Date.now(), msg.audio?.data?.length || 0)
     bridge.send(JSON.stringify(msg))
     sock?.readMessages([key]).catch(() => {})
   }
@@ -182,9 +197,17 @@ async function main() {
     ws.on('error', () => {})
   }
   setInterval(() => toBridge({ type: 'ping', ts: Date.now() }), 30000)
-  setInterval(() => { if (open) alive() }, 60000)
+  setInterval(() => { if (open) alive() }, Number(process.env.WA_ALIVE_MS) || 60000)
 
   // --- WhatsApp -----------------------------------------------------------------------------------------------
+  let linkCode = null   // the last linking code, and which writing of pair it was for: {written, code}
+  const pairFile = () => { // the number to link with a code, and when it was written, or null
+    try {
+      const f = path.join(DIR, 'pair')
+      const number = digits(fs.readFileSync(f, 'utf8'))
+      return number ? { number, written: fs.statSync(f).mtimeMs } : null
+    } catch { return null }
+  }
   async function connect() {
     const { state, saveCreds } = await useMultiFileAuthState(path.join(DIR, 'auth'))
     // A pairing code that was never entered leaves a half-made link (an account number, nothing else) that WhatsApp
@@ -203,12 +226,16 @@ async function main() {
     })
     sock.ev.on('creds.update', saveCreds)
     sock.ev.on('connection.update', async (u) => {
-      if (u.qr) {
-        const pair = fs.existsSync(path.join(DIR, 'pair')) ? digits(fs.readFileSync(path.join(DIR, 'pair'), 'utf8')) : ''
-        if (pair && !pairRequested && !state.creds.registered) {
+      if (u.qr && !pairRequested) {
+        const pair = state.creds.registered ? null : pairFile()
+        if (pair && linking(pair.written)) {
           pairRequested = true
-          try { status({ state: 'code', code: await sock.requestPairingCode(pair) }) } catch (e) { log('pairing code failed:', e?.message) }
-        } else if (!pairRequested) {
+          const same = linkCode?.written === pair.written ? linkCode.code : undefined
+          try {
+            linkCode = { written: pair.written, code: await sock.requestPairingCode(pair.number, same) }
+            status({ state: 'code', code: linkCode.code })
+          } catch (e) { log('pairing code failed:', e?.message) }
+        } else {
           status({ state: 'qr', qr: u.qr })
         }
       }
@@ -225,7 +252,7 @@ async function main() {
       if (u.connection === 'close') {
         if (open) alive()
         open = false
-        // Not linked yet: the code (or QR) has run out. The next connection asks WhatsApp for a new one.
+        // Not linked yet: the code (or QR) has run out. The next connection asks WhatsApp again (see linking).
         if (!state.creds.registered) pairRequested = false
         const code = u.lastDisconnect?.error?.output?.statusCode
         if (code === DisconnectReason.loggedOut) {

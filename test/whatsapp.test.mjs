@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { accept, textOf, audioOf, digits, toWhatsApp, sinceOf, Backlog } from '../guest/whatsapp.mjs'
+import { accept, textOf, audioOf, digits, toWhatsApp, sinceOf, Backlog, linking } from '../guest/whatsapp.mjs'
 import { fakeBridge, nodeFlags, until } from './fixtures/fake-bridge.mjs'
 
 const me = { pn: '15550001111@s.whatsapp.net', lid: '987654321@lid' }
@@ -86,6 +86,26 @@ test('messages waiting for a connection: at most 50, none older than 10 minutes,
   assert.equal(q.size, 0)
 })
 
+test('messages waiting for a connection: at most 50 MB in all, the oldest going first', () => {
+  const q = new Backlog(50, 600e3, 100)
+  for (const x of ['a', 'b', 'c']) q.push(x, 0, 40)
+  q.push('huge', 0, 500)   // bigger than all the room there is: only it goes
+  assert.deepEqual(q.take(0), ['b', 'c'])
+  assert.equal(q.dropped, 2)
+  q.push('d', 0, 90)
+  assert.deepEqual(q.take(0), ['d'], 'the room is all free again once the queue is emptied')
+  assert.equal(new Backlog().maxBytes, 50 * 1024 * 1024)
+})
+
+test('linking codes are asked for only in the 10 minutes after `cage chat link` wrote the number', () => {
+  const now = 1_800_000_000_000
+  assert.ok(linking(now - 9 * 60e3, now))
+  assert.ok(!linking(now - 10 * 60e3, now))
+  assert.ok(!linking(now - 3 * 86400e3, now))
+  assert.ok(linking(now + 30e3, now), 'a clock a little off')
+  assert.ok(!linking(now + 3600e3, now), 'a file from the future: the clock moved')
+})
+
 // --- the adapter itself, against a stand-in for cc-connect's bridge and a stub Baileys ----------------------------
 // It runs as whatsapp.sh runs it: a copy of guest/whatsapp.mjs next to node_modules (here the stubs in
 // test/fixtures/whatsapp-modules). The test plays WhatsApp's side through the stub, over the fork's IPC channel.
@@ -93,7 +113,7 @@ const SPARE = '15552223333@s.whatsapp.net'
 const nowS = () => Math.floor(Date.now() / 1000)
 const wamsg = (id, text, ts = nowS(), jid = SPARE) => ({ key: { id, remoteJid: jid }, message: { conversation: text }, messageTimestamp: ts })
 
-async function adapter (t, { ack = true, state, pair } = {}) {
+async function adapter (t, { ack = true, state, pair, pairAge = 0, env = {} } = {}) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cage-wa-')))
   const app = path.join(tmp, 'app')
   const dir = path.join(tmp, 'wa')
@@ -102,12 +122,16 @@ async function adapter (t, { ack = true, state, pair } = {}) {
   fs.copyFileSync(fileURLToPath(new URL('../guest/whatsapp.mjs', import.meta.url)), path.join(app, 'adapter.mjs'))
   fs.symlinkSync(fileURLToPath(new URL('./fixtures/whatsapp-modules', import.meta.url)), path.join(app, 'node_modules'))
   if (state) fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state))
-  if (pair) fs.writeFileSync(path.join(dir, 'pair'), pair)
+  if (pair) {
+    fs.writeFileSync(path.join(dir, 'pair'), pair)
+    const at = new Date(Date.now() - pairAge)
+    fs.utimesSync(path.join(dir, 'pair'), at, at)
+  }
   const bridge = await fakeBridge({ ack })
   const child = fork(path.join(app, 'adapter.mjs'), [], {
     execArgv: nodeFlags,
     env: { PATH: process.env.PATH, WA_DIR: dir, WA_MODE: 'spare', WA_ALLOW: '15552223333', WA_NAME: 'Claude',
-      WA_BRIDGE_URL: bridge.url, WA_BRIDGE_TOKEN: 'tok123' },
+      WA_BRIDGE_URL: bridge.url, WA_BRIDGE_TOKEN: 'tok123', ...env },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc']
   })
   let output = ''
@@ -127,13 +151,16 @@ async function adapter (t, { ack = true, state, pair } = {}) {
     called: (name) => calls.filter((c) => c.call === name).map((c) => c.args),
     call: (name, pred = () => true, ms = 5000) => until(() => calls.find((c) => c.call === name && pred(c.args))?.args, ms, `a call to ${name}`),
     wa: (cmd) => child.send(cmd),   // WhatsApp's side
-    open: async () => {
-      await a.call('socket')
+    open: async (n = 1) => { // the nth connection to WhatsApp opens, linked
+      await until(() => a.called('socket')[n - 1], 6000, `connection ${n} to WhatsApp`)
       a.wa({ user: { id: '15550001111:7@s.whatsapp.net' } })
       a.wa({ emit: 'connection.update', data: { connection: 'open' } })
-      await until(() => /linked as/.test(output), 5000, 'the link')
+      await until(() => (output.match(/linked as/g) || []).length >= n, 5000, 'the link')
     },
+    close: (statusCode = 408, message = 'Connection lost') =>
+      a.wa({ emit: 'connection.update', data: { connection: 'close', lastDisconnect: { error: { message, output: { statusCode } } } } }),
     upsert: (messages, type = 'notify') => a.wa({ emit: 'messages.upsert', data: { type, messages } }),
+    saved: () => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).lastAlive } catch { return 0 } },
     status: () => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8')) } catch { return null } }
   }
   return a
@@ -221,27 +248,96 @@ test('replies wait while WhatsApp reconnects, then go out in order', async (t) =
   c.send({ type: 'reply', session_key: 'whatsapp:15552223333:15552223333', reply_ctx: SPARE, content: 'two' })
   await new Promise((resolve) => setTimeout(resolve, 400))
   assert.deepEqual(a.called('sendMessage'), [], 'nothing is sent before WhatsApp is connected')
+  assert.deepEqual(a.called('presence'), [], 'not even "typing…"')
   await a.open()
   await until(() => a.called('sendMessage').length === 2, 3000, 'the replies')
   assert.deepEqual(a.called('sendMessage'), [{ jid: SPARE, text: '*one*' }, { jid: SPARE, text: 'two' }])
+  c.send({ type: 'typing_start', session_key: 'whatsapp:15552223333:15552223333', reply_ctx: SPARE })
+  assert.deepEqual(await a.call('presence'), { state: 'composing', jid: SPARE })
 })
 
-test('a linking code that ran out is replaced with a fresh one, and status.json is replaced whole', async (t) => {
+test('a reply the connection drops under is sent again once WhatsApp is back', async (t) => {
+  const a = await adapter(t)
+  await a.open()
+  await until(() => /bridge connected/.test(a.output()), 5000, 'the bridge')
+  a.wa({ holdSends: true })
+  await a.call('holding')   // the stub has it (the reply comes another way, over the bridge)
+  a.bridge.last().send({ type: 'reply', session_key: 'whatsapp:15552223333:15552223333', reply_ctx: SPARE, content: 'one' })
+  await a.call('sendHeld')
+  a.close()
+  a.wa({ failSends: 'Connection Closed' })
+  await a.open(2)
+  assert.deepEqual(await a.call('sendMessage'), { jid: SPARE, text: 'one' })
+  assert.doesNotMatch(a.output(), /send failed/)
+})
+
+test('while someone is linking, a code that ran out is asked for again: the same code, so the one shown still works', async (t) => {
   const a = await adapter(t, { pair: '15550001111' })
   await a.call('socket')
   a.wa({ emit: 'connection.update', data: { qr: 'ref-1' } })
-  await until(() => a.status()?.code === 'CODE1', 3000, 'the first code')
+  await until(() => a.status()?.code === 'C0DE0001', 3000, 'the first code')
   const first = fs.statSync(path.join(a.dir, 'status.json')).ino
   // WhatsApp gives up on the code: the connection closes and the adapter connects again
-  a.wa({ emit: 'connection.update', data: { connection: 'close', lastDisconnect: { error: { message: 'QR refs attempts ended', output: { statusCode: 408 } } } } })
-  const again = await a.call('socket', () => a.called('socket').length >= 2, 6000)
-  assert.equal(again.creds.me, undefined, 'the half-made link is dropped, so WhatsApp is asked for a new code')
+  a.close(408, 'QR refs attempts ended')
+  const again = await until(() => a.called('socket')[1], 6000, 'a second connection')
+  assert.equal(again.creds.me, undefined, 'the half-made link is dropped, so WhatsApp lets it link again')
   a.wa({ emit: 'connection.update', data: { qr: 'ref-2' } })
-  await until(() => a.status()?.code === 'CODE2', 3000, 'a fresh code')
-  await a.call('requestPairingCode', (x) => x.code === 'CODE2')   // the stub's report can come after the file
-  assert.deepEqual(a.called('requestPairingCode').map((c) => c.phone), ['15550001111', '15550001111'])
-  assert.notEqual(fs.statSync(path.join(a.dir, 'status.json')).ino, first, 'written to a new file and renamed into place')
-  assert.ok(!fs.existsSync(path.join(a.dir, 'status.json.tmp')))
+  await until(() => a.called('requestPairingCode').length === 2, 3000, 'the code asked for again')
+  assert.deepEqual(a.called('requestPairingCode'), [{ phone: '15550001111', code: 'C0DE0001' },
+    { phone: '15550001111', custom: 'C0DE0001', code: 'C0DE0001' }])
+  await until(() => fs.statSync(path.join(a.dir, 'status.json')).ino !== first, 3000, 'status.json written again')
+  assert.deepEqual(a.status().code, 'C0DE0001')
+  assert.ok(!fs.existsSync(path.join(a.dir, 'status.json.tmp')), 'written to a new file and renamed into place')
+})
+
+test('ten minutes after `cage chat link` wrote the number, no more codes (each one prompts the phone): the QR instead', async (t) => {
+  const a = await adapter(t, { pair: '15550001111', pairAge: 9 * 60e3 })
+  await a.call('socket')
+  a.wa({ emit: 'connection.update', data: { qr: 'ref-1' } })
+  await until(() => a.status()?.code === 'C0DE0001', 3000, 'the code')
+  const old = new Date(Date.now() - 11 * 60e3)   // a minute or two later
+  fs.utimesSync(path.join(a.dir, 'pair'), old, old)
+  for (let n = 2; n <= 3; n++) {   // nobody linked: the connection closes and comes back, again and again
+    a.close(408, 'QR refs attempts ended')
+    await until(() => a.called('socket')[n - 1], 10000, `connection ${n}`)
+    a.wa({ emit: 'connection.update', data: { qr: `ref-${n}` } })
+    await until(() => a.status()?.qr === `ref-${n}`, 3000, `the QR, ref-${n}`)
+  }
+  assert.equal(a.called('requestPairingCode').length, 1)
+  assert.deepEqual(a.called('noQr'), [])
+})
+
+test('an old pair file from an earlier try leaves the QR alone', async (t) => {
+  const a = await adapter(t, { pair: '15550001111', pairAge: 3 * 86400e3 })
+  await a.call('socket')
+  a.wa({ emit: 'connection.update', data: { qr: 'ref-1' } })
+  await until(() => a.status()?.qr === 'ref-1', 3000, 'the QR')
+  assert.deepEqual(a.called('requestPairingCode'), [])
+})
+
+test('when it was last connected is saved every minute while connected, and when the connection drops', async (t) => {
+  const a = await adapter(t, { env: { WA_ALIVE_MS: '200' } })
+  await a.open()
+  const opened = a.saved()
+  assert.ok(opened, 'saved when it connects')
+  await until(() => a.saved() > opened, 3000, 'state.json saved again while connected')
+  const b = await adapter(t)   // the usual minute: only the drop saves it again here
+  await b.open()
+  const before = b.saved()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  b.close()
+  await until(() => b.saved() > before, 3000, 'state.json saved when the connection drops')
+})
+
+test('logged out from the phone: it forgets the link and stops', async (t) => {
+  const a = await adapter(t, { pair: '15550001111' })
+  await a.open()
+  fs.writeFileSync(path.join(a.dir, 'auth', 'creds.json'), '{}')
+  a.close(401, 'Intentional Logout')
+  await until(() => !a.alive(), 5000, 'the adapter to stop')
+  assert.equal(a.child.exitCode, 3)
+  assert.deepEqual(a.status().state, 'logged-out')
+  for (const f of ['auth', 'pair', 'state.json']) assert.ok(!fs.existsSync(path.join(a.dir, f)), `${f} removed`)
 })
 
 test('a frame from the bridge that is not a message object does not stop it', async (t) => {
