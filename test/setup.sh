@@ -200,7 +200,7 @@ ok "autostart on/off installs and removes a valid macOS LaunchAgent, which wakes
 
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart on 2>/dev/null
 unit="$HOME/.config/systemd/user/cage-up.service"
-grep -qx "ExecStart=\"$ROOT/cage\" up" "$unit" || fail "unit ExecStart: $(cat "$unit")"
+grep -qx "ExecStart=\"$ROOT/cage\" _autostart" "$unit" || fail "unit ExecStart: $(cat "$unit")"   # never restarts an awake agent
 grep -qx 'WantedBy=default.target' "$unit" || fail "unit WantedBy"
 grep -q 'systemctl --user enable cage-up.service' "$T/os.log" || fail "unit not enabled"
 PATH="$T/bin:$PATH" FAKE_UNAME=Linux cage autostart off 2>/dev/null

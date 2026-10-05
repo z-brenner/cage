@@ -2210,8 +2210,8 @@ cmd_autostart() {
   mkdir -p "$CAGE_HOME"
   if [ "$1" = on ]; then : > "$CAGE_HOME/autostart"; else rm -f "$CAGE_HOME/autostart"; fi   # for the web app
 }
-# `cage _autostart`, what macOS and Windows run at login: wakes the agents that aren't awake, and never restarts one
-# that is (logging in again, or turning autostart on, mustn't interrupt them).
+# `cage _autostart`, what runs at login (on macOS, Linux and Windows): wakes the agents that aren't awake, and never
+# restarts one that is (logging in again, or turning autostart on, mustn't interrupt them).
 autostart_up() {
   local a wake=()
   load_env
@@ -2284,7 +2284,7 @@ Wants=network-online.target
 Type=oneshot
 Environment="PATH=$path_env"
 Environment="CAGE_HOME=$CAGE_HOME"
-ExecStart="$CAGE_ROOT/cage" up
+ExecStart="$CAGE_ROOT/cage" _autostart
 
 [Install]
 WantedBy=default.target
@@ -2292,6 +2292,7 @@ UNIT
       systemctl --user daemon-reload
       systemctl --user enable cage-up.service
       ok "autostart on: your agents wake up when you log in"
+      hint "log: $CAGE_HOME/autostart.log"
       hint "to start them at boot without logging in: sudo loginctl enable-linger $(id -un)"
       ;;
     *) die "autostart supports Linux and Windows (WSL)" ;;
