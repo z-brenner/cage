@@ -224,6 +224,8 @@ async function refresh () {
     if (CHAT) drawChatState(CHAT)
     liveConnect()
     loadActivity()
+    // plan usage, wherever it's shown: asked for when a page is drawn, and again while it sits there unchanged
+    document.querySelectorAll('[data-usage]').forEach((el) => { const a = agentOf(el.dataset.usage); if (a) wantUsage(a) })
   } catch (e) {
     if (e.message === 'locked') return
     if (!e.down) { FAILS = 0; notice('slow') }   // the web app answers, but cage behind it was too slow (or failed)
@@ -1791,6 +1793,17 @@ function usageOf (u) { // [{label, left, reset}]: what's left in each window; []
   return [...text.matchAll(/(\S+) limit\s*\n\s*Remaining:\s*(\d+)%[\s\S]*?Resets:\s*([^\n]+)/g)]
     .map(([, w, left, reset]) => ({ label: WINDOWS[w] || w + ' limit', left: Math.min(100, +left), reset: reset.trim() }))
 }
+// When a window starts afresh, from what cc-connect said when it was asked ("2h 13m", "3d 4h 0m"): as a time, which
+// stays true while the page sits there (and the answer may be minutes old: the web app keeps one for 10 minutes)
+function resetsAt (reset, asked) {
+  const m = /^(?:(\d+)d\s*)?(?:(\d+)h\s*)?(\d+)m$/.exec(reset)
+  if (!m || !asked) return 'resets in ' + reset
+  const at = asked * 1000 + ((+(m[1] || 0) * 24 + +(m[2] || 0)) * 60 + +m[3]) * 60000
+  if (at <= Date.now()) return 'has reset since it was checked'
+  const days = (new Date(at).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5
+  return 'resets ' + (days < 1 ? 'at ' + clock(at) : days < 2 ? 'tomorrow at ' + clock(at)
+    : days < 7 ? new Date(at).toLocaleDateString([], { weekday: 'long' }) + ' at ' + clock(at) : 'on ' + new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }))
+}
 function wantUsage (a) { // ask again if it's been a minute (the web app answers from what it has)
   const u = USAGE[a.name]
   if (a.state === 'ready' && TELLS_USAGE.includes(a.name) && !USAGE_ASKING[a.name] && (!u || Date.now() - u.got > 60000)) loadUsage(a.name)
@@ -1818,7 +1831,7 @@ function usageView (a, offer) { // bars, or why there are none; offer: a stand-i
   const others = agentsOn().filter((b) => b.name !== a.name)
   return [
     h('div', { class: 'usage-bars' }, windows.map((w) => h('div', { class: 'usage-bar ' + (w.left <= 0 ? 'bad' : w.left < 20 ? 'warn' : 'ok') },
-      h('span', { class: 'usage-label' }, h('b', {}, w.label + ': '), `${w.left}% left` + (w.reset && w.reset !== '-' ? `, resets in ${w.reset}` : '')),
+      h('span', { class: 'usage-label' }, h('b', {}, w.label + ': '), `${w.left}% left` + (w.reset && w.reset !== '-' ? ', ' + resetsAt(w.reset, u.asked) : '')),
       h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { style: { width: w.left + '%' } }))))),
     u.stale ? say('It didn’t answer the last time; this is from ' + when(u.asked * 1000) + '.') : null,
     offer && windows.some((w) => w.left <= 0) && !a.fallback && others.length
