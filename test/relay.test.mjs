@@ -155,7 +155,7 @@ test("a frame that isn't a message object, or that breaks the handler, doesn't s
   c.send({ type: 'reply', session_key: 'app:you:you', reply_ctx: 'c9', content: 'still here' })
   await r.logged((e) => e.t === 'reply' && e.text === 'still here')
   assert.ok(r.alive(), 'still running')
-  assert.match(r.output(), /bad frame from cc-connect/)
+  await until(() => /bad frame from cc-connect/.test(r.output()), 3000, 'the bad frame to be logged')
   assert.equal(r.bridge.conns.length, 1, 'no reconnect: it never went down')
 })
 
@@ -239,7 +239,7 @@ test('old files nothing mentions any more are tidied away at start', async (t) =
       old(path.join(dir, 'out', 'late.json'))
     }
   })
-  await until(() => !fs.existsSync(path.join(r.dir, 'files', '1-aaaa-gone.pdf')), 3000, 'the old file to go')
+  await until(() => !fs.existsSync(path.join(r.dir, 'files', '1-aaaa-gone.pdf')) && !fs.existsSync(path.join(r.dir, 'out', 'late.json')),
+    3000, 'the old file and the old answer to go')
   assert.ok(fs.existsSync(path.join(r.dir, 'files', '2-bbbb-kept.pdf')))
-  assert.ok(!fs.existsSync(path.join(r.dir, 'out', 'late.json')))
 })
