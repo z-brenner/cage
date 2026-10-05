@@ -348,9 +348,18 @@ class Activity(unittest.TestCase):
         self.assertEqual(a["today"], {"asked": 1, "answers": 0, "files": 0})
 
     def test_answered(self):
-        for after in ({"t": "action", "action": "perm:deny", "at": 8}, {"t": "you", "text": "no, wait", "at": 8}):
-            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, after)
+        """As cc-connect reads it: a perm: button, a message with "yes", "no" or "allow all" in it (or their Chinese),
+        or a command that ends the turn; anything else, and the approval still waits."""
+        for after in ({"t": "action", "action": "perm:deny"}, {"t": "you", "text": "no, wait"}, {"t": "you", "text": "OK, send it."},
+                      {"t": "you", "text": "@bot allow all"}, {"t": "you", "text": "好的"}, {"t": "you", "text": "/stop"},
+                      {"t": "you", "text": "/new client call"}, {"t": "action", "action": "act:/stop"}):
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
             self.assertIsNone(server.activity(self.chat, 0)["pending"], after)
+        for after in ({"t": "you", "text": "What's in the email?"}, {"t": "you", "text": "know what? not now", "files": [{"name": "a.pdf"}]},
+                      {"t": "you", "text": "/help"}, {"t": "you", "text": "/reset"}, {"t": "action", "action": "nav:/help"},
+                      {"t": "you", "text": ["no"]}, {"t": "you"}, {"t": "reply", "text": "⚠️ Waiting for permission response."}):
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
+            self.assertEqual(server.activity(self.chat, 0)["pending"], {"text": "May I?", "at": 7}, after)
 
     def test_working_and_last(self):
         self.write({"t": "you", "text": "hi", "at": 1}, {"t": "reply", "text": "hello", "at": 2},

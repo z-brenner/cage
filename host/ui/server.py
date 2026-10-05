@@ -520,11 +520,37 @@ class Chat:
 
 TAIL = 512 << 10   # how much of the end of a chat log Home reads
 WORKING = 15 * 60   # "working…" for longer than this without a word is stale (it was stopped, or its VM restarted)
+# How cc-connect (v1.5.0, core/engine.go) reads what you send while it waits for your OK: a message with any of these
+# words in it is the answer (allow, deny or allow all, in English or Chinese), and so is a perm: button; anything else
+# gets "Waiting for permission response", and the approval still waits. A command that ends the turn ends the wait too.
+ANSWER_WORDS = {"allow", "yes", "y", "ok", "approve", "deny", "no", "n", "reject", "cancel", "allowall", "允许", "同意",
+                "可以", "好", "好的", "是", "确认", "拒绝", "不允许", "不行", "不", "否", "取消", "允许所有", "允许全部",
+                "全部允许", "所有允许", "都允许", "全部同意"}
+ANSWER_SPLIT = re.compile(r"[\s@＠,，.。!！?？:：;；()（）\[\]【】\"'“”‘’、·]+")
+ENDS_TURN = ("/stop", "/new", "/cancel")
+
+
+def answers(e):
+    """Does this line of the chat log answer an approval cc-connect waits for (or end the turn it waits in)?"""
+    t = e.get("t")
+    said = e.get("text") if t == "you" else e.get("action") if t == "action" else None
+    if not isinstance(said, str):
+        return False
+    if t == "action":
+        if said.startswith("perm:"):
+            return True
+        said = re.sub(r"^(cmd|act):", "", said)   # a card's other buttons: a command ("act:/stop"), or something to show
+        if not said.startswith("/"):
+            return False
+    said = said.strip().lower()
+    if said.startswith("/"):
+        return said.split()[0] in ENDS_TURN
+    return any(w in ANSWER_WORDS for w in ANSWER_SPLIT.split(said))
 
 
 def activity(c, since):
     """What an agent is doing, from the end of its chat log (read like the chat: no links followed): an approval
-    waiting for you (cc-connect's "perm:" buttons with nothing you sent after them, no answer and no new message),
+    waiting for you (cc-connect's "perm:" buttons, until something answers them, see answers()),
     since when it's been working (typing on, until it answers), what it said last, and how many questions, answers
     and files there were from `since` on (ms: the page's midnight). The log is the VM's, so every value is checked."""
     size, _ = c.size()
@@ -540,7 +566,7 @@ def activity(c, since):
         if t == "buttons" and any(isinstance(b, dict) and str(b.get("data", "")).startswith("perm:")
                                   for row in rows if isinstance(row, list) for b in row):
             pending = {"text": str(e.get("text") or "")[:4000], "at": at}
-        elif t in ("action", "you"):
+        elif answers(e):
             pending = None
         if t == "typing":
             typing = at if e.get("on") is True else None
