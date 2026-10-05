@@ -866,7 +866,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             job = Job(args, cols, title, text_file, shown)
         except BaseException:   # cage never started, so nothing else will remove the question
             if text_file:
-                os.unlink(text_file)
+                try:
+                    os.unlink(text_file)
+                except OSError:
+                    pass
             raise
         return self.send(200, {"id": job.id})
 

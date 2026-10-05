@@ -3304,7 +3304,7 @@ sys.exit(0 if hmac.compare_digest(hmac.new(key, sys.argv[2].encode(), hashlib.sh
 # anything else that answers like that is left alone (and isn't trusted).
 ui_stop_old() {
   local p k port old="" i st
-  for p in $(pgrep -u "$(id -u)" -f -- "$CAGE_ROOT/host/ui/server.py" 2>/dev/null); do
+  for p in $(pgrep -u "$(id -u)" -f -- 'host/ui/server\.py' 2>/dev/null); do   # (the path, exactly: not as a pattern)
     case "$(ps -o args= -p "$p" 2>/dev/null)" in *[Pp]ython*" $CAGE_ROOT/host/ui/server.py $CAGE_ROOT/cage") ;; *) continue ;; esac
     if [ -r "/proc/$p/environ" ]; then   # (Linux) the one on this port
       port="$(tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^CAGE_UI_PORT=//p')"

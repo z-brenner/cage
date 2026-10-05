@@ -326,7 +326,7 @@ grep -q "an older version of cage's web app is still running" "$T/ui.err" && [ !
 kill "$OTHER"; OTHER=""
 # This cage's own web app from before an update (an older one, which says only "ok") that never restarted itself:
 # cage ui stops it and starts the new one, unless it's busy with something real
-U="$(mkdir -p "$T/upd" && cd "$T/upd" && pwd -P)"
+U="$(mkdir -p "$T/old (v0.3)" && cd "$T/old (v0.3)" && pwd -P)"   # (a folder name that isn't a safe pattern)
 tar --exclude=.git --exclude=node_modules -C "$ROOT" -cf - . | tar -C "$U" -xf -
 cp "$U/host/ui/server.py" "$T/new-server.py"
 cat > "$U/host/ui/server.py" <<'PY'
