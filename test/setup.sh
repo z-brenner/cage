@@ -110,6 +110,9 @@ unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
 unset WSL_DISTRO_NAME WSL_INTEROP   # never touch a real Windows host when the tests run inside WSL
 mkdir -p "$HOME"
 cage() { "$ROOT/cage" "$@"; }
+# the internet, as cage's network checks see it (test/fake-curl.sh); the mock APIs above are reached for real
+mkdir -p "$T/net" && ln -s "$ROOT/test/fake-curl.sh" "$T/net/curl"
+REAL_CURL="$(command -v curl)"; export REAL_CURL FAKE_CURL_LOG="$T/probes.log" PATH="$T/net:$PATH"
 
 # --- setup: rejects a malformed token and a revoked one, accepts good ones, learns the user id
 printf '%s\n' 'not-a-token' '999:REVOKED' '100:GOODclaude' '200:GOODcodex' 'y' | cage setup claude codex 2>"$T/setup.err" || fail "setup failed: $(cat "$T/setup.err")"
@@ -210,6 +213,41 @@ out="$(PATH="$T/bin:$PATH" FAKE_UNAME=Linux WSL_DISTRO_NAME=Ubuntu-24.04 cage do
 grep -q '✓ WSL distro Ubuntu-24.04 with Windows interop' <<<"$out" || fail "doctor WSL line: $out"
 grep -qE 'KVM is ready|no /dev/kvm in WSL: cage needs WSL 2 on Windows 11|wsl --terminate Ubuntu-24.04' <<<"$out" || fail "doctor WSL KVM hint: $out"
 ok "on WSL, autostart uses the per-user Run key and doctor gives WSL-specific hints"
+
+# --- the computer check inside a virtual machine that can't start its own: nested virtualization, not the BIOS
+printf 'processor\t: 0\nflags\t\t: fpu vme de pse tsc msr pae cx8 sse sse2 hypervisor lahf_lm\n' > "$T/cpuinfo-vm"
+printf 'processor\t: 0\nflags\t\t: fpu vme de pse tsc msr pae cx8 sse sse2 lahf_lm\n' > "$T/cpuinfo-metal"
+here() { PATH="$T/bin:$PATH" FAKE_UNAME=Linux CAGE_KVM="$T/no-kvm" "$@"; }   # Linux, and no /dev/kvm
+out="$(here env CAGE_CPUINFO="$T/cpuinfo-vm" "$ROOT/cage" doctor 2>&1 || true)"
+grep -q 'this computer is itself a virtual machine' <<<"$out" || fail "doctor inside a VM: $out"
+for want in 'VirtualBox: Settings > System > Processor > Enable Nested VT-x/AMD-V' 'VMware: ' 'Parallels: ' \
+            'Set-VMProcessor -VMName <name> -ExposeVirtualizationExtensions $true' 'a cloud server: '; do
+  grep -qF "$want" <<<"$out" || fail "no nested-virtualization step '$want': $out"
+done
+grep -q 'BIOS' <<<"$out" && fail "BIOS advice inside a VM: $out"
+here env CAGE_CPUINFO="$T/cpuinfo-vm" "$ROOT/cage" _check | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+k = c["kvm"]; assert k["status"] == "bad" and "virtual machine" in k["title"] and "nested virtualization" in k["it"] and "BIOS" not in k["detail"], k' \
+  || fail "the app's check inside a VM"
+out="$(here env CAGE_CPUINFO="$T/cpuinfo-metal" "$ROOT/cage" doctor 2>&1 || true)"
+grep -q 'BIOS or UEFI' <<<"$out" && ! grep -q 'virtual machine' <<<"$out" || fail "doctor on a real computer without VT-x: $out"
+ok "inside a VM without nested virtualization, the check explains it (VirtualBox, VMware, Parallels, Hyper-V, cloud) instead of the BIOS"
+
+# --- the network check: each download the agents need, on its own; it names only what failed
+: > "$FAKE_CURL_LOG"
+out="$(NET_DOWN=archive.ubuntu.com cage doctor 2>&1 || true)"
+grep -q "✗ archive.ubuntu.com didn't answer" <<<"$out" || fail "doctor's network line: $out"
+grep "didn't answer\|blocks" <<<"$out" | grep -q 'registry.npmjs.org\|github.com' && fail "doctor named hosts that answered: $out"
+v="$(sed -n 's/.*CAGE_CC_CONNECT_VERSION:-\(v[^}]*\)}.*/\1/p' "$ROOT/cage")"   # load_env's default (no backreferences: BusyBox grep)
+grep -q '^https://registry.npmjs.org/$' "$FAKE_CURL_LOG" && grep -q '^http://archive.ubuntu.com/ubuntu/$' "$FAKE_CURL_LOG" &&
+  grep -qE "^https://github.com/chenhg5/cc-connect/releases/download/$v/cc-connect-$v-linux-(amd64|arm64)\.tar\.gz\$" "$FAKE_CURL_LOG" \
+  || fail "not every download was probed: $(cat "$FAKE_CURL_LOG")"
+NET_DOWN=archive.ubuntu.com NET_BLOCKED=github.com cage _check | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
+n = c["network"]; assert n["status"] == "bad", n
+assert n["detail"].startswith("archive.ubuntu.com didn'"'"'t answer. A proxy or firewall blocks github.com."), n
+assert "registry.npmjs.org" not in n["detail"], n' || fail "the app's network check: $(NET_DOWN=archive.ubuntu.com NET_BLOCKED=github.com cage _check)"
+cage _check | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}; assert c["network"]["status"] == "ok", c' \
+  || fail "the network check failed with everything answering"
+ok "the network check probes npm, cc-connect's download and Ubuntu separately, and names only the one that failed"
 
 # --- managed bots: one manager bot, one tap per agent; the creator becomes the allowlist and each bot is locked
 rm -f "$env_file"; : > "$T/requests.log"

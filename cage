@@ -26,6 +26,10 @@ find_msb() {
   return 1
 }
 find_msb || true
+# The microsandbox release cage is tested with (CI's microVM tests run it, scripts/install-msb.sh installs it), and the
+# oldest one cage works with. Move them only together with green microVM tests on the new version.
+CAGE_MSB_VERSION=v0.7.5
+MSB_MIN=0.7.5
 KINDS="claude codex cursor antigravity"
 
 # --- look and feel ---------------------------------------------------------------------------------------------
@@ -1709,30 +1713,121 @@ cmd_init() {
   [ "${ONBOARDING:-0}" = 1 ] || ok "wrote $CAGE_ENV"
 }
 
+# --- checking this computer -------------------------------------------------------------------------------------
+ver_lt() { # ver_lt <a> <b>: version a (like 0.7.4, numbers and dots) comes before b
+  local a="$1." b="$2." x y
+  while [ -n "$a$b" ]; do
+    x="${a%%.*}" y="${b%%.*}"
+    a="${a#*.}" b="${b#*.}"
+    [ "${x:-0}" = "${y:-0}" ] && continue
+    if [ "${x:-0}" -lt "${y:-0}" ] 2>/dev/null; then return 0; fi
+    return 1
+  done
+  return 1
+}
+
+MSB_HAVE=""
+msb_version_ok() { # false when the installed microsandbox is older than cage works with; sets MSB_HAVE (empty: it didn't say)
+  MSB_HAVE="$("$MSB" --version 2>/dev/null | sed -n 's/^msb v\{0,1\}\([0-9][0-9.]*\).*/\1/p' | head -n 1)" || MSB_HAVE=""
+  MSB_HAVE="${MSB_HAVE%.}"
+  [ -z "$MSB_HAVE" ] || ! ver_lt "$MSB_HAVE" "$MSB_MIN"
+}
+msb_tested() { [ -z "$MSB_HAVE" ] || [ "$MSB_HAVE" = "${CAGE_MSB_VERSION#v}" ]; }   # after msb_version_ok
+
+nested_vm() { # this computer is itself a virtual machine, one that doesn't pass virtualization on to cage's VMs
+  local f="${CAGE_CPUINFO:-/proc/cpuinfo}"
+  grep -qw hypervisor "$f" 2>/dev/null && ! grep -qwE 'vmx|svm' "$f" 2>/dev/null
+}
+
+cc_connect_url() { # the cc-connect download the VMs fetch (cage.env's version, or this cage's), for the network checks
+  local v arch=amd64
+  # load_env without a config: its defaults only (its "no config yet" is no problem here)
+  v="$( die() { :; }; [ -f "$CAGE_ENV" ] || CAGE_ENV=/dev/null; load_env 2>/dev/null; printf '%s' "${CAGE_CC_CONNECT_VERSION:-}" )"
+  case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; esac
+  printf 'https://github.com/chenhg5/cc-connect/releases/download/%s/cc-connect-%s-linux-%s.tar.gz' "$v" "$v" "$arch"
+}
+
+reach() { # reach <url>: ok (it answered), blocked (a proxy or firewall said no) or down (no answer at all)
+  local r
+  r="$(curl -sS -o /dev/null -I --max-time 8 -w '%{http_code} %{http_connect}' "$1" 2>/dev/null)" || true
+  case "$r" in
+    403\ *|407\ *|*\ 4[0-9][0-9]) echo blocked ;;   # these addresses answer 200 or 302; a 403 is something in between
+    [1-9]*) echo ok ;;
+    *) echo down ;;
+  esac
+}
+
+and_list() { # and_list <word>...: "a", "a and b", "a, b and c"
+  local out="" i=0 w
+  for w in "$@"; do
+    i=$((i + 1))
+    if [ $i = 1 ]; then out="$w"; elif [ $i = $# ]; then out="$out and $w"; else out="$out, $w"; fi
+  done
+  printf '%s' "$out"
+}
+
+NET_PROBLEM=""
+net_check() { # can this computer reach what the VMs download from? npm, cc-connect's releases on GitHub, Ubuntu's
+  # packages, each on its own (in parallel), so the answer names only the ones that failed. Sets NET_PROBLEM (in words).
+  local urls=(https://registry.npmjs.org/ "$(cc_connect_url)" http://archive.ubuntu.com/ubuntu/) d i h down=() blocked=() pids=""
+  d="$(mktemp -d)"
+  for i in 0 1 2; do reach "${urls[$i]}" > "$d/$i" & pids="$pids $!"; done
+  # shellcheck disable=SC2086
+  wait $pids
+  for i in 0 1 2; do
+    h="${urls[$i]#*://}" h="${h%%/*}"
+    case "$(cat "$d/$i")" in ok) ;; blocked) blocked+=("$h") ;; *) down+=("$h") ;; esac
+  done
+  rm -rf "$d"
+  NET_PROBLEM=""
+  [ ${#down[@]} = 0 ] || NET_PROBLEM="$(and_list "${down[@]}") didn't answer."
+  [ ${#blocked[@]} = 0 ] || NET_PROBLEM="${NET_PROBLEM:+$NET_PROBLEM }A proxy or firewall blocks $(and_list "${blocked[@]}")."
+  [ -z "$NET_PROBLEM" ]
+}
+
+need_hint() { if command -v apt-get >/dev/null 2>&1; then echo "sudo apt-get install $1"; else echo "install $1"; fi; }
+
 # Checks this computer. Prints one line per check (and a fix under each problem); fails if anything is missing.
+# CAGE_KVM and CAGE_CPUINFO stand in for /dev/kvm and /proc/cpuinfo (for the tests).
 check_host() {
-  local good=0
+  local good=0 kvm="${CAGE_KVM:-/dev/kvm}"
   if find_msb && command -v "$MSB" >/dev/null 2>&1; then
-    echo "  ${C_OK}✓${C_0} microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //' || true)"
+    if ! msb_version_ok; then
+      echo "  ${C_ERR}✗${C_0} microsandbox $MSB_HAVE is too old for cage"
+      echo "    ${C_DIM}→ run: cage fix${C_0}"; good=1
+    elif ! msb_tested; then
+      echo "  ${C_AMBER}!${C_0} microsandbox $MSB_HAVE (cage is tested with ${CAGE_MSB_VERSION#v})"
+    else
+      echo "  ${C_OK}✓${C_0} microsandbox $MSB_HAVE"
+    fi
   else
     echo "  ${C_ERR}✗${C_0} microsandbox isn't installed"
-    echo "    ${C_DIM}→ cage offers to install it, or: curl -fsSL https://install.microsandbox.dev | sh${C_0}"
+    echo "    ${C_DIM}→ run: cage fix${C_0}"
     good=1
   fi
   case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) echo "  ${C_OK}✓${C_0} macOS on Apple Silicon (untested)" ;;
     Darwin/*) echo "  ${C_ERR}✗${C_0} microsandbox needs Apple Silicon on macOS"; good=1 ;;
     Linux/*)
-      if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "  ${C_OK}✓${C_0} KVM is ready (/dev/kvm accessible)"
-      elif is_wsl && [ ! -e /dev/kvm ]; then
+      if [ -r "$kvm" ] && [ -w "$kvm" ]; then echo "  ${C_OK}✓${C_0} KVM is ready (/dev/kvm accessible)"
+      elif is_wsl && [ ! -e "$kvm" ]; then
         echo "  ${C_ERR}✗${C_0} no /dev/kvm in WSL: cage needs WSL 2 on Windows 11 with nested virtualization"
-        echo "    ${C_DIM}→ it's on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run wsl --shutdown${C_0}"; good=1
+        echo "    ${C_DIM}→ it's on by default; check nestedVirtualization in %UserProfile%\\.wslconfig, then run: wsl --shutdown${C_0}"; good=1
       elif is_wsl; then
         echo "  ${C_ERR}✗${C_0} /dev/kvm isn't accessible to you"
-        echo "    ${C_DIM}→ sudo usermod -aG kvm \$USER, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen${C_0}"; good=1
-      elif [ -e /dev/kvm ]; then
+        echo "    ${C_DIM}→ run: cage fix, then in Windows: wsl --terminate $WSL_DISTRO_NAME, and reopen${C_0}"; good=1
+      elif [ -e "$kvm" ]; then
         echo "  ${C_ERR}✗${C_0} /dev/kvm isn't accessible to you"
-        echo "    ${C_DIM}→ sudo usermod -aG kvm \$USER, then log out and back in${C_0}"; good=1
+        echo "    ${C_DIM}→ run: cage fix (it adds you to the kvm group), then log out and back in${C_0}"; good=1
+      elif nested_vm; then
+        # Inside a VM, the BIOS isn't the problem: the program running this VM has to pass virtualization on.
+        echo "  ${C_ERR}✗${C_0} no /dev/kvm: this computer is itself a virtual machine, and it doesn't let cage start VMs inside it"
+        echo "    ${C_DIM}→ turn on nested virtualization for it, then restart it:${C_0}"
+        echo "      ${C_DIM}VirtualBox: Settings > System > Processor > Enable Nested VT-x/AMD-V${C_0}"
+        echo "      ${C_DIM}VMware: Processors > Virtualize Intel VT-x/EPT or AMD-V/RVI${C_0}"
+        echo "      ${C_DIM}Parallels: Hardware > CPU & Memory > Advanced > Enable nested virtualization (a Mac needs an M3 or newer)${C_0}"
+        echo "      ${C_DIM}Hyper-V, on the Windows host: Set-VMProcessor -VMName <name> -ExposeVirtualizationExtensions \$true${C_0}"
+        echo "      ${C_DIM}a cloud server: an instance type with nested virtualization turned on, or a bare-metal one${C_0}"; good=1
       else
         echo "  ${C_ERR}✗${C_0} no /dev/kvm: this machine can't run VMs yet"
         echo "    ${C_DIM}→ turn on virtualization (Intel VT-x / AMD-V) in your BIOS or UEFI settings${C_0}"; good=1
@@ -1742,28 +1837,46 @@ check_host() {
           echo "  ${C_OK}✓${C_0} WSL distro $WSL_DISTRO_NAME with Windows interop"
         else
           echo "  ${C_ERR}✗${C_0} Windows interop is off, so cage can't keep WSL running after you close its window"
-          echo "    ${C_DIM}→ set enabled=true under [interop] in /etc/wsl.conf, then wsl --shutdown${C_0}"; good=1
+          echo "    ${C_DIM}→ set enabled=true under [interop] in /etc/wsl.conf, then run: wsl --shutdown${C_0}"; good=1
         fi
       fi
       ;;
   esac
+  # Not needed for the agents themselves, so only a warning: the web app and app sign-ins, and backups.
+  if command -v python3 >/dev/null 2>&1; then echo "  ${C_OK}✓${C_0} python3, for the web app (cage ui)"
+  else
+    echo "  ${C_AMBER}!${C_0} no python3: the web app (cage ui) and signing in to apps need it"
+    echo "    ${C_DIM}→ run: $(need_hint python3)${C_0}"
+  fi
+  if command -v openssl >/dev/null 2>&1; then echo "  ${C_OK}✓${C_0} openssl, for encrypted backups"
+  else
+    echo "  ${C_AMBER}!${C_0} no openssl: backups need it"
+    echo "    ${C_DIM}→ run: $(need_hint openssl)${C_0}"
+  fi
   return $good
 }
 
 # The setup screen's check of this computer, as JSON: [{id, status: ok|warn|bad, title, detail, fix, it}]. "fix": cage
 # can fix it itself (cage fix); "it": what to ask your IT department for, on a computer they manage.
 check_json() {
-  local out="" gb
+  local out="" gb kvm="${CAGE_KVM:-/dev/kvm}"
   item() {
     out="$out${out:+,}{\"id\":$(jstr "$1"),\"status\":$(jstr "$2"),\"title\":$(jstr "$3"),\"detail\":$(jstr "$4"),\"fix\":$(jbool test -n "$5"),\"it\":$(jstr "$6")}"
   }
-  if find_msb && command -v "$MSB" >/dev/null 2>&1; then item msb ok "microsandbox is installed" "It runs your agents' private computers." "" ""
-  else item msb bad "microsandbox isn't installed yet" "It runs your agents' private computers. cage installs it for you, without admin rights." fix ""; fi
+  if ! find_msb || ! command -v "$MSB" >/dev/null 2>&1; then
+    item msb bad "microsandbox isn't installed yet" "It runs your agents' private computers. cage installs it for you, without admin rights." fix ""
+  elif ! msb_version_ok; then
+    item msb bad "microsandbox $MSB_HAVE is too old for cage" "cage needs $MSB_MIN or newer, and installs the version it's tested with (${CAGE_MSB_VERSION#v}) for you." fix ""
+  elif ! msb_tested; then
+    item msb warn "microsandbox $MSB_HAVE is installed" "It runs your agents' private computers. cage is tested with ${CAGE_MSB_VERSION#v}; this one will most likely work too." "" ""
+  else item msb ok "microsandbox is installed" "It runs your agents' private computers." "" ""; fi
   if [ "$(uname -s)" = Linux ]; then
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then item kvm ok "This computer can run virtual machines" "Each agent gets one of its own." "" ""
-    elif [ -e /dev/kvm ]; then item kvm bad "You can't use virtual machines yet" "cage adds you to the kvm group; it may ask for your password." fix ""
+    if [ -r "$kvm" ] && [ -w "$kvm" ]; then item kvm ok "This computer can run virtual machines" "Each agent gets one of its own." "" ""
+    elif [ -e "$kvm" ]; then item kvm bad "You can't use virtual machines yet" "cage adds you to the kvm group; it may ask for your password." fix ""
     elif is_wsl; then item kvm bad "Virtual machines are turned off inside WSL" "cage runs each agent in a small virtual machine inside WSL 2, which needs nested virtualization. Windows 11 allows it unless it's turned off." "" \
       "nested virtualization for WSL 2 (Intune: WSL settings > Allow nested virtualization, or nestedVirtualization=true in .wslconfig)"
+    elif nested_vm; then item kvm bad "This computer is a virtual machine that can't start its own" "cage runs each agent in a small virtual machine of its own, so the program running this one (VirtualBox, VMware, Parallels, Hyper-V or a cloud provider) has to allow nested virtualization. Turn it on in this virtual machine's settings, then restart it." "" \
+      "nested virtualization turned on for this virtual machine (VirtualBox: Enable Nested VT-x/AMD-V; VMware: Virtualize Intel VT-x/EPT; Hyper-V: Set-VMProcessor -ExposeVirtualizationExtensions \$true; cloud: an instance type with nested virtualization)"
     else item kvm bad "Virtualization is turned off" "Turn on Intel VT-x or AMD-V (SVM) in this computer's BIOS or UEFI settings, then restart." "" \
       "hardware virtualization (Intel VT-x or AMD-V) turned on in the firmware settings"; fi
     if is_wsl; then
@@ -1780,15 +1893,18 @@ check_json() {
     if [ "$gb" -ge 8 ]; then item memory ok "$gb GB of memory" "Each awake agent uses up to ${CAGE_MEMORY:-4G}B." "" ""
     else item memory warn "$gb GB of memory" "Each awake agent uses up to ${CAGE_MEMORY:-4G}B, so keep one or two awake at a time." "" ""; fi
   fi
-  if curl -fsS -o /dev/null --max-time 8 https://registry.npmjs.org/ 2>/dev/null && curl -fsS -o /dev/null --max-time 8 https://github.com/ 2>/dev/null; then
+  if net_check; then
     item network ok "This computer reaches the internet" "Agents download their tools once, then talk to their AI service." "" ""
-  else item network bad "This computer can't reach what the agents need" "github.com and registry.npmjs.org didn't answer. A company firewall or proxy may be in the way." "" \
+  else item network bad "This computer can't reach everything the agents need" "$NET_PROBLEM Your agents download their tools from there." "" \
     "access to github.com, registry.npmjs.org, deb.nodesource.com, archive.ubuntu.com and each AI service (claude.ai, anthropic.com, chatgpt.com, openai.com, cursor.com, google.com)"; fi
+  command -v openssl >/dev/null 2>&1 || item openssl warn "Backups need openssl" "Everything else works without it. To make backups: $(need_hint openssl)." "" ""
   printf '{"checks":[%s]}\n' "$out"
 }
 
 cmd_fix() { # cage fix: what cage can fix on this computer itself (microsandbox, access to KVM)
-  if ! find_msb; then install_msb; fi
+  if ! find_msb; then install_msb
+  elif ! msb_version_ok; then install_msb "microsandbox $MSB_HAVE is too old for cage."
+  fi
   if [ "$(uname -s)" = Linux ] && [ -e /dev/kvm ] && { [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
     fix_kvm || die "couldn't give you access to /dev/kvm; on a work computer, IT may need to"
   fi
@@ -1797,7 +1913,13 @@ cmd_fix() { # cage fix: what cage can fix on this computer itself (microsandbox,
 
 cmd_doctor() {
   local good=1 t u any
+  echo "  ${C_OK}✓${C_0} cage $(cage_version)"
   check_host || good=0
+  if net_check; then echo "  ${C_OK}✓${C_0} the internet: npm, GitHub and Ubuntu's packages answer (your agents download from them)"
+  else
+    echo "  ${C_ERR}✗${C_0} $NET_PROBLEM Your agents download their tools from there."
+    echo "    ${C_DIM}→ check your internet connection; on a work network, ask IT to allow them${C_0}"; good=0
+  fi
   if [ -f "$CAGE_ENV" ]; then
     load_env
     echo "  ${C_OK}✓${C_0} config $CAGE_ENV (agents: $CAGE_AGENTS)"
@@ -1807,7 +1929,7 @@ cmd_doctor() {
       :   # no Telegram bots, so no Telegram allowlist needed
     else
       echo "  ${C_ERR}✗${C_0} no Telegram allowlist yet"
-      echo "    ${C_DIM}→ cage setup${C_0}"; good=0
+      echo "    ${C_DIM}→ run: cage setup${C_0}"; good=0
     fi
     for a in $CAGE_AGENTS; do
       t="$(token_for "$a")" any=0
@@ -1815,7 +1937,7 @@ cmd_doctor() {
         if u="$(bot_username "$t")"; then echo "  ${C_OK}✓${C_0} $a bot: @$u"; any=1
         else
           echo "  ${C_ERR}✗${C_0} Telegram rejected (or could not be reached for) CAGE_TELEGRAM_TOKEN_$a"
-          echo "    ${C_DIM}→ check the token in @BotFather, then cage setup $a${C_0}"; good=0
+          echo "    ${C_DIM}→ check the token in @BotFather, then run: cage setup $a${C_0}"; good=0
         fi
       fi
       t="$(cvar SLACK_BOT_TOKEN "$a")"
@@ -1824,7 +1946,7 @@ cmd_doctor() {
           echo "  ${C_OK}✓${C_0} $a in Slack ($(cvar SLACK_TEAM "$a"))"; any=1
         else
           echo "  ${C_ERR}✗${C_0} Slack rejected (or could not be reached for) $a's bot token"
-          echo "    ${C_DIM}→ cage chat add slack $a${C_0}"; good=0
+          echo "    ${C_DIM}→ run: cage chat add slack $a${C_0}"; good=0
         fi
       fi
       t="$(cvar DISCORD_TOKEN "$a")"
@@ -1833,7 +1955,7 @@ cmd_doctor() {
           echo "  ${C_OK}✓${C_0} $a in Discord"; any=1
         else
           echo "  ${C_ERR}✗${C_0} Discord rejected (or could not be reached for) $a's bot token"
-          echo "    ${C_DIM}→ cage chat add discord $a${C_0}"; good=0
+          echo "    ${C_DIM}→ run: cage chat add discord $a${C_0}"; good=0
         fi
       fi
       if [ $any = 0 ] && ! valid_token "$(token_for "$a")"; then
@@ -1844,7 +1966,7 @@ cmd_doctor() {
     else echo "  ${C_DIM}· no QR codes for your phone; to get them: sudo apt-get install qrencode${C_0}"; fi
   else
     echo "  ${C_ERR}✗${C_0} no config at $CAGE_ENV yet"
-    echo "    ${C_DIM}→ cage${C_0}"; good=0
+    echo "    ${C_DIM}→ run: cage, to set things up${C_0}"; good=0
   fi
   [ $good = 1 ] || exit 1
 }
@@ -2027,6 +2149,7 @@ cmd_up() {
   load_env
   resolve_agents "$@"
   find_msb || die "microsandbox isn't installed; run cage to set it up"
+  msb_version_ok || die "microsandbox $MSB_HAVE is too old for cage; run: cage fix"
   brain_init "${AGENTS[@]}"
   if oauth_any; then oauth_refresh_all 1800; fi
   local quiet=()
@@ -2158,25 +2281,249 @@ cage_version() {
   else echo dev; fi
 }
 
-# cage update [agents]: the newest cage first (the latest release, checked against its checksums; or the branch a
-# git install follows), then the agents rebuilt with the newest CLIs. A development checkout is left to git.
+# cage update [--to vX.Y.Z] [agents]: the newest cage first (the latest release, checked against its checksums; or the
+# branch a git install follows; --to: that release, older ones too), then microsandbox if it's older than the one cage
+# is tested with, then the agents rebuilt with the newest CLIs. A development checkout is left to git. Offline it
+# changes nothing: a VM rebuilt without the internet would have nothing to install, and your agents would be down.
+SHIPPED_CC_CONNECT="v1.5.0"   # the cc-connect versions earlier cages wrote into cage.env (cmd_init copied them)
 cmd_update() {
-  if [ -z "${CAGE_NO_SELF_UPDATE:-}" ] && { [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; }; then
+  local want="" v agents=()
+  while [ $# -gt 0 ]; do   # agents are checked before anything changes, and --to can come anywhere
+    case "$1" in
+      --to)
+        want="${2:-}"
+        [[ "$want" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "usage: cage update [--to <a release, like v0.3.0>] [agents]"
+        shift 2 ;;
+      *) check_agent "$1"; agents+=("$1"); shift ;;
+    esac
+  done
+  if [ -z "${CAGE_ONLINE:-}" ]; then online; fi
+  if [ -n "${CAGE_NO_SELF_UPDATE:-}" ]; then :
+  elif [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; then
     local before tmp rc=0 ref=""
     before="$(cage_version)"
-    [ ! -f "$CAGE_ROOT/.git/cage-ref" ] || ref="$(cat "$CAGE_ROOT/.git/cage-ref")"
+    [ -n "$want" ] || [ ! -f "$CAGE_ROOT/.git/cage-ref" ] || ref="$(cat "$CAGE_ROOT/.git/cage-ref")"
     tmp="$(mktemp -d)"
     cp "$CAGE_ROOT/install.sh" "$tmp/install.sh"   # it replaces itself
-    CAGE_DIR="$CAGE_ROOT" CAGE_REF="$ref" CAGE_NO_START=1 bash "$tmp/install.sh" >/dev/null 2>"$tmp/log" || rc=$?
-    grep -E '^  (✓|✗|!) ' "$tmp/log" | grep -v 'type .*cage.* in any new terminal' >&2 || true
+    CAGE_DIR="$CAGE_ROOT" CAGE_HOME="$CAGE_HOME" CAGE_REF="$ref" CAGE_VERSION="$want" CAGE_FROM="" CAGE_NO_START=1 \
+      bash "$tmp/install.sh" >/dev/null 2>"$tmp/log" || rc=$?
+    installer_says "$tmp/log"
     rm -rf "$tmp"
-    if [ "$rc" != 0 ]; then
-      warn "couldn't update cage itself (still $before); updating the agents anyway"
-    elif [ "$(cage_version)" != "$before" ]; then
-      exec env CAGE_NO_SELF_UPDATE=1 "$CAGE_ROOT/cage" update "$@"   # the rest with the new cage
+    case "$rc" in
+      0) if [ "$(cage_version)" != "$before" ]; then   # the rest with the new cage
+           exec env CAGE_NO_SELF_UPDATE=1 CAGE_ONLINE=1 "$CAGE_ROOT/cage" update ${agents[@]+"${agents[@]}"}
+         fi ;;
+      3) say "your agents keep running as they are"; exit 1 ;;   # GitHub didn't answer: the installer changed nothing
+      4) # some of cage's files are the new release's already: agents rebuilt from that would be half one, half the other
+        hint "to finish the update: cage update"
+        say "your agents keep running as they are"; exit 1 ;;
+      *) if [ -n "$want" ]; then die "couldn't install cage $want; cage $before stays as it is"; fi
+        warn "couldn't update cage itself (still $before); updating the agents anyway" ;;   # it changed nothing
+    esac
+  elif [ -n "$want" ]; then
+    die "this cage is a development checkout ($(cage_version)): pick its version with git"
+  fi
+  # microsandbox older than the one this cage is tested with: that one goes in first (VMs and volumes are kept)
+  if find_msb; then
+    msb_version_ok || true
+    if [ -n "$MSB_HAVE" ] && ver_lt "$MSB_HAVE" "${CAGE_MSB_VERSION#v}"; then
+      install_msb "microsandbox $MSB_HAVE is older than the one cage is tested with."
     fi
   fi
-  CAGE_REFRESH=1 cmd_up "$@"   # the VMs download the newest of everything, instead of waking from their cache
+  # Earlier cages wrote the cc-connect version they were tested with into cage.env, where it stayed even after an
+  # update. Without it, the version this cage is tested with applies. One you picked yourself stays.
+  if [ -f "$CAGE_ENV" ]; then
+    v="$(conf_get "$CAGE_ENV" CAGE_CC_CONNECT_VERSION)" v="${v//\"/}"
+    if [ -n "$v" ] && [[ " $SHIPPED_CC_CONNECT " == *" $v "* ]]; then unset_env CAGE_CC_CONNECT_VERSION; fi
+  fi
+  CAGE_REFRESH=1 cmd_up ${agents[@]+"${agents[@]}"}   # the VMs download the newest of everything, instead of waking from their cache
+}
+
+online() { # what a rebuilt VM downloads first has to answer: npm, and cc-connect's release on GitHub. Stops if not.
+  local u r v
+  u="$(cc_connect_url)"
+  r="$(curl -sS -o /dev/null -I --max-time 8 -w '%{http_code} %{http_connect}' "$u" 2>/dev/null)" || true
+  case "$r" in
+    404\ *)   # GitHub answered: there's no such cc-connect (a version named in cage.env that doesn't exist)
+      v="${u%/*}" v="${v##*/}"
+      die "there's no cc-connect $v to download (CAGE_CC_CONNECT_VERSION in $CAGE_ENV): fix or remove that line; nothing was changed, your agents keep running" ;;
+    2??\ *|3??\ *) ;;
+    *) die "you're offline (or a firewall is in the way); nothing was changed, your agents keep running" ;;
+  esac
+  curl -fsS -o /dev/null -I --max-time 8 https://registry.npmjs.org/ >/dev/null 2>&1 ||
+    die "you're offline (or a firewall is in the way); nothing was changed, your agents keep running"
+}
+
+installer_says() { # installer_says <log>: install.sh's ✓ ! ✗ lines, as cage's own (so the web app shows them too)
+  local l
+  while IFS= read -r l; do
+    case "$l" in
+      "  ✓ type "*) ;;   # "type cage in any new terminal": no news to someone who just did
+      "  ✓ "*) ok "${l#  ✓ }" ;;
+      "  ! "*) warn "${l#  ! }" ;;
+      "  ✗ "*) bad "${l#  ✗ }" ;;
+    esac
+  done < "$1"
+}
+
+# cage rollback: back to the release you had before, from the copy cage kept when it installed that one (checked
+# against its checksums again, no download), then your agents wake up with it.
+cmd_rollback() {
+  local now prev="" t tmp rc=0
+  [ -f "$CAGE_ROOT/VERSION" ] || die "cage rollback goes back to an earlier release, and this cage is a development checkout ($(cage_version))"
+  now="$(cat "$CAGE_ROOT/VERSION")"
+  while IFS= read -r t; do   # newest first
+    if [ "$t" != "$now" ] && [ -f "$CAGE_HOME/releases/$t/cage-$t.tar.gz" ]; then prev="$t"; break; fi
+  done < <(ls -1t "$CAGE_HOME/releases" 2>/dev/null)
+  if [ -z "$prev" ]; then
+    bad "there's no earlier release on this computer to go back to (cage keeps the last two it installed)"
+    hint "to download one: cage update --to <a release, like v0.3.0>"
+    exit 1
+  fi
+  say "going back from cage $now to $prev…"
+  tmp="$(mktemp -d)"
+  cp "$CAGE_ROOT/install.sh" "$tmp/install.sh"
+  t="$CAGE_HOME/releases/$prev"
+  CAGE_DIR="$CAGE_ROOT" CAGE_HOME="$CAGE_HOME" CAGE_VERSION="$prev" CAGE_FROM="$t" CAGE_REF="" CAGE_NO_START=1 \
+    bash "$tmp/install.sh" >/dev/null 2>"$tmp/log" || rc=$?
+  installer_says "$tmp/log"
+  rm -rf "$tmp"
+  [ "$rc" != 4 ] || die "cage stopped halfway back to $prev; run cage rollback again to finish (your agents keep running as they are)"
+  [ "$rc" = 0 ] || die "couldn't go back to $prev; cage $now stays as it is"
+  hint "to go forward again: cage update"
+  [ -f "$CAGE_ENV" ] || return 0
+  exec "$CAGE_ROOT/cage" up   # your agents, with the cage you went back to
+}
+
+# cage uninstall [--yes] [--everything]: takes cage off this computer: its VMs and background helpers, start at login,
+# the cage command and cage's folder. Your agents' logins and files and cage's settings stay, unless you ask for
+# everything (and type it, or say --yes). Backups always stay. So does microsandbox: it's a program of its own.
+cmd_uninstall() {
+  local yes="" all="" a v f answer bdir root home ch bd removable="" keep_home="" failed="" left=() checked=1
+  local bin="$HOME/.local/bin/cage"
+  for a in "$@"; do
+    case "$a" in --yes|-y) yes=1 ;; --everything) all=1 ;; *) die "usage: cage uninstall [--yes] [--everything]" ;; esac
+  done
+  # Where cage backup puts them: cage.env can say (CAGE_BACKUP_DIR). The folders compared as what they really are, so
+  # a trailing slash, a .. or a link doesn't get a backup (or your home folder) deleted.
+  bdir="$( if [ -f "$CAGE_ENV" ]; then load_env >/dev/null; fi; backup_dir )" ||
+    die "couldn't read $CAGE_ENV, so cage can't tell where your backups are; nothing was removed"
+  root="$(canon "$CAGE_ROOT")" home="$(canon "$HOME")" ch="$(canon "$CAGE_HOME")" bd="$(canon "$bdir")"
+  if inside "$bd" "$root"; then die "your backups are in $bdir, inside cage's own folder; move them elsewhere first (nothing was removed)"; fi
+  if [ -f "$CAGE_ROOT/VERSION" ] || [ -f "$CAGE_ROOT/.git/shallow" ]; then removable=1; fi   # installed by install.sh
+  if inside "$home" "$root"; then removable=""; fi   # never your home folder, or one it's in
+  # cage's settings folder goes only with --everything, and only if it is just that
+  if inside "$home" "$ch"; then keep_home="won't delete $CAGE_HOME: your home folder is in it"
+  elif inside "$bd" "$ch"; then keep_home="your backups are in $bdir, inside $CAGE_HOME; move them elsewhere first"
+  elif [ -e "$CAGE_HOME" ] && [ ! -f "$CAGE_HOME/cage.env" ] && [ "${ch##*/}" != .cage ]; then
+    keep_home="won't delete $CAGE_HOME: it doesn't look like cage's settings folder (there's no cage.env in it)"
+  fi
+  if [ -n "$all" ] && [ -n "$keep_home" ]; then die "$keep_home (nothing was removed)"; fi
+  if [ -z "$yes" ]; then
+    say "This takes cage off this computer: your agents' VMs, start at login, the cage command and $CAGE_ROOT."
+    if [ -n "$all" ]; then say "It also deletes your agents' logins and files, and cage's settings ($CAGE_HOME)."
+    else say "Your agents' logins and files, and cage's settings ($CAGE_HOME), stay unless you say so below."; fi
+    say "Your backups in $bdir stay either way."
+    yes_no "Take cage off this computer?" n || { say "nothing was removed"; return 0; }
+    if [ -f "$CAGE_ENV" ] && yes_no "Make a backup first (your settings, and each agent's login and files)?" y; then
+      ( cmd_backup ) || die "no backup was made, so nothing was removed"
+    fi
+    if [ -n "$all" ]; then
+      prompt "To delete your agents' logins and files and cage's settings for good, type delete: " answer
+      [ "$answer" = delete ] || die "nothing was removed"
+    else
+      prompt "To delete your agents' logins and files and cage's settings too, type delete (Enter keeps them): " answer
+      if [ "$answer" = delete ]; then
+        [ -z "$keep_home" ] || die "$keep_home (nothing was removed)"
+        all=1
+      fi
+    fi
+  fi
+
+  # What runs: the agents (stopped properly, so their files are saved), the background helpers, the web app
+  if [ -f "$CAGE_ENV" ]; then ( cmd_down ) || true; fi
+  refresher_stop
+  wsl_keepalive_stop
+  pkill -f -- "$CAGE_ROOT/host/ui/server.py" 2>/dev/null || true
+  ( autostart_apply off ) >/dev/null 2>&1 || true
+  rm -f "$CAGE_HOME/autostart"
+  if find_msb; then
+    for a in $KINDS; do
+      if exists "$a"; then
+        if "$MSB" rm --force "$(vm "$a")" >/dev/null 2>&1; then ok "removed $a's VM"; else warn "couldn't remove $a's VM ($(vm "$a"))"; fi
+      fi
+      [ -n "$all" ] || continue
+      for v in "$(vm "$a")-home" "$(vm "$a")-cache"; do
+        "$MSB" volume inspect "$v" >/dev/null 2>&1 || continue   # this agent never had one
+        "$MSB" volume rm "$v" >/dev/null 2>&1 || left+=("$v")
+      done
+    done
+  elif [ -n "$all" ]; then checked=""
+  fi
+
+  # The cage command, the lines the installer added to your shell's settings, the app menu entry, and cage itself
+  if [ -L "$bin" ] && [ "$(readlink -f "$bin")" = "$CAGE_ROOT/cage" ]; then rm -f "$bin"; fi
+  for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.zprofile" "$HOME/.config/fish/conf.d/cage.fish"; do unmark "$f"; done
+  f="$HOME/.local/share/applications/cage.desktop"
+  if grep -qF "$CAGE_ROOT/" "$f" 2>/dev/null; then rm -f "$f"; fi
+  if [ -n "$all" ]; then
+    rm -rf "$CAGE_HOME"
+    # only what really went: a volume msb couldn't delete still holds that agent's login and files
+    if [ -n "$checked" ] && [ ${#left[@]} = 0 ]; then ok "deleted your agents' logins and files, and cage's settings"
+    else ok "deleted cage's settings ($CAGE_HOME)"; fi
+  fi
+  if [ -n "$removable" ]; then rm -rf "$CAGE_ROOT"; ok "removed cage ($CAGE_ROOT)"
+  else warn "$CAGE_ROOT is a development checkout, so it stays; delete it yourself when you like"; fi
+
+  ok "cage is off this computer"
+  if [ -z "$all" ]; then
+    hint "kept: cage's settings in $CAGE_HOME, and your agents' logins and files (in microsandbox, as volumes cage-<agent>-home)"
+    hint "to delete those too: rm -rf $(printf '%q' "$CAGE_HOME"), and for each agent: msb volume rm cage-<agent>-home cage-<agent>-cache"
+  fi
+  if ls -d "$CAGE_HOME".before-restore-* >/dev/null 2>&1; then hint "older settings from restores are kept too: $CAGE_HOME.before-restore-*"; fi
+  if [ -d "$bdir" ]; then say "your backups are still in $bdir"; fi
+  f="$(printf '%q %q %q' "${MSB_HOME:-$HOME/.microsandbox}" "$HOME/.local/bin/msb" "$HOME/.local/bin/microsandbox")"
+  if [ -n "$all" ] && [ -n "$checked" ] && [ ${#left[@]} = 0 ]; then
+    say "microsandbox stays installed (it's a program of its own). To remove it too: rm -rf $f"
+  else
+    say "microsandbox stays installed (it's a program of its own). It also holds your agents' logins and files, so removing it (rm -rf $f) deletes those too."
+  fi
+  if [ -z "$checked" ]; then
+    warn "microsandbox wasn't found, so your agents' logins and files weren't checked; if they're still there: msb volume rm cage-<agent>-home cage-<agent>-cache"
+  elif [ ${#left[@]} -gt 0 ]; then
+    bad "couldn't delete these, which hold your agents' logins and files: ${left[*]}"
+    hint "run: msb volume rm ${left[*]}"
+    failed=1
+  fi
+  [ -z "$failed" ] || exit 1
+}
+
+canon() { # canon <path>: the folder it really is (links, . and .. and trailing slashes resolved), also when it doesn't exist yet
+  local p="$1" rest=""
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ "$p" != / ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  while [ ! -d "$p" ]; do
+    rest="/${p##*/}$rest" p="${p%/*}"
+    [ -n "$p" ] || p=/
+  done
+  p="$(cd "$p" && pwd -P)" || return 1
+  p="${p%/}$rest"
+  printf '%s' "${p:-/}"
+}
+inside() { case "$1/" in "${2%/}"/*) return 0 ;; esac; return 1; }   # inside <path> <folder>: it, or something in it
+
+unmark() { # unmark <file>: takes out the lines the installer added (each with the empty line it put before it)
+  local f="$1" tmp
+  grep -qF '# added by the cage installer' "$f" 2>/dev/null || return 0
+  tmp="$f.cage-uninstall.$$"
+  awk -v m='# added by the cage installer' '
+    index($0, m) { blank = 0; next }
+    { if (blank) print ""; blank = 0 }
+    /^$/ { blank = 1; next }
+    { print }
+    END { if (blank) print "" }' "$f" > "$tmp" || { rm -f "$tmp"; warn "couldn't take cage's line out of $f"; return 0; }
+  if grep -q '[^[:space:]]' "$tmp"; then cat "$tmp" > "$f"; else rm -f "$f"; fi   # in place: keeps its mode and links
+  rm -f "$tmp"
 }
 
 cmd_down() {
@@ -3053,15 +3400,31 @@ configured() {
     exit 1 )
 }
 
-install_msb() {
-  yes_no "microsandbox runs the VMs and isn't installed yet. Install it now (its official installer, no sudo)?" y \
-    || die "cage needs microsandbox: curl -fsSL https://install.microsandbox.dev | sh"
-  if ! curl -fsSL https://install.microsandbox.dev | sh >/dev/null 2>&1; then
-    warn "the installer couldn't look up the latest release (GitHub rate limit?); installing v0.7.5 instead"
-    MSB_VERSION=v0.7.5 "$CAGE_ROOT/test/install-msb-pinned.sh" >/dev/null 2>&1 || die "couldn't install microsandbox; see https://docs.microsandbox.dev"
+install_msb() { # install_msb [why]: the microsandbox release cage is tested with, through its official installer (no sudo)
+  local log="$CAGE_HOME/msb-install.log" err esc=$'\033' why="${1:-}"
+  [ -n "$why" ] || why="microsandbox runs the VMs and isn't installed yet."
+  yes_no "$why Install microsandbox ${CAGE_MSB_VERSION#v} now (its official installer, no sudo)?" y \
+    || die "cage needs microsandbox ${CAGE_MSB_VERSION#v}: run cage fix when you're ready"
+  mkdir -p "$CAGE_HOME" && chmod 700 "$CAGE_HOME"
+  say "installing microsandbox ${CAGE_MSB_VERSION#v}…"
+  # CAGE_MSB_INSTALLER (a local copy of the official installer) is passed on to the script, for the tests
+  if ! MSB_VERSION="$CAGE_MSB_VERSION" "$CAGE_ROOT/scripts/install-msb.sh" >"$log" 2>&1; then
+    err="$(sed "s/$esc\[[0-9;]*m//g" "$log" | grep -iE 'error|fail|not supported|requires|denied' | tail -n 1 || true)"
+    [ -n "$err" ] || err="$(grep . "$log" | tail -n 1 || true)"
+    bad "couldn't install microsandbox: $(printf '%s' "${err:-the installer gave no reason}" | safe_text | sed 's/^[[:space:]]*//')"
+    hint "everything the installer said: $log"
+    exit 1
   fi
   find_msb || die "microsandbox installed, but msb isn't where expected; open a new terminal and run cage again"
-  ok "microsandbox $("$MSB" --version 2>/dev/null | sed 's/^msb //')"
+  msb_version_ok || true
+  if [ -n "$MSB_HAVE" ] && ver_lt "$MSB_HAVE" "${CAGE_MSB_VERSION#v}"; then
+    # The installer puts msb in ~/.microsandbox/bin and ~/.local/bin; an older one from another install, earlier on
+    # PATH, is still the one that runs.
+    bad "microsandbox ${CAGE_MSB_VERSION#v} is installed, but an older one ($MSB_HAVE) comes first on your PATH: $(command -v "$MSB")"
+    hint "remove that one (or put ~/.local/bin first on your PATH), then run: cage doctor"
+    exit 1
+  fi
+  ok "microsandbox ${MSB_HAVE:-${CAGE_MSB_VERSION#v}}"
 }
 
 fix_kvm() {
@@ -3185,11 +3548,13 @@ usage() {
   row "  fix" "install what this computer is missing"
   row "  ui" "all of this in your browser"
   row "  autostart on|off" "wake agents when you log in"
-  row "  update [agents]" "newest cage and agent CLIs"
+  row "  update [agents]" "newest cage and agent CLIs (--to vX.Y.Z: that release)"
+  row "  rollback" "back to the cage release you had before"
   row "  backup [file]" "everything, in one encrypted file"
   row "  restore [file]" "put a backup back, here or on a new computer"
   row "  destroy <agent>" "--keep-login keeps its login, --yes deletes all"
   row "  init" "just write the config file, to edit by hand"
+  row "  uninstall" "take cage off this computer (backups stay)"
   printf '\n  %sagents%s  claude · codex · cursor · antigravity\n' "$C_DIM" "$C_0"
   printf '  %sconfig%s  %s\n\n' "$C_DIM" "$C_0" "$CAGE_ENV"
 }
@@ -3209,6 +3574,8 @@ main() {
     logs) cmd_logs "$@" ;;
     shell) cmd_shell "$@" ;;
     update) cmd_update "$@" ;;
+    rollback) cmd_rollback ;;
+    uninstall) cmd_uninstall "$@" ;;
     down) cmd_down "$@" ;;
     destroy) cmd_destroy "$@" ;;
     memory) cmd_memory "$@" ;;

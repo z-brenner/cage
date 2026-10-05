@@ -81,6 +81,14 @@ jobs:
           $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
           Write-Output $out
           if ($out -notmatch 'check only: would set up WSL 2|virtualization is turned off|needs Windows 11|GB free on|turned off part of WSL') { throw 'unexpected installer output' }
+      - name: the uninstall mode (check only)
+        shell: powershell
+        run: |
+          $env:CAGE_CHECK_ONLY = '1'
+          $env:CAGE_UNINSTALL = '1'
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 *>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch 'check only: would ask, offer a backup, then remove all of that') { throw 'unexpected uninstall output' }
       - name: PowerShell 7, the way `irm | iex` runs it (must not close the session)
         shell: pwsh
         run: |
@@ -142,11 +150,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: install microsandbox (pinned; avoids the installer's anonymous GitHub API lookup)
-        env:
-          MSB_VERSION: v0.7.5
+      - name: install microsandbox (the version cage pins; avoids the installer's anonymous GitHub API lookup)
         run: |
-          test/install-msb-pinned.sh
+          MSB_VERSION="$(grep -oP '^CAGE_MSB_VERSION=\K\S+' cage)" test/install-msb-pinned.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/microvm-e2e.sh ${{ matrix.agent }}
       - name: what the VM was doing
