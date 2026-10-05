@@ -903,6 +903,12 @@ ok "backup: without GNU tar it says so; one that doesn't open again isn't kept, 
   [ $rc = 1 ] && grep -q 'needs about 9 MB free on this disk' "$T/p.err" || fail "no room, found before unpacking: exit $rc, $(cat "$T/p.err")"
   if CAGE_BACKUP_PASSPHRASE=wrong-passphrase "$ROOT/cage" restore "$f" --yes 2>"$T/p.err"; then fail "restored with a wrong passphrase"; fi
   grep -q 'passphrase is wrong' "$T/p.err" || fail "a wrong passphrase: $(cat "$T/p.err")"
+  # about 1 wrong passphrase in 256 gets past openssl (the padding happens to come out right): still called wrong
+  mkdir -p "$T/posl"
+  printf '#!/usr/bin/env bash\ncase " $* " in *" -d "*) p="$(cat <&3)"\n  [ "$p" != lucky-wrong ] || { echo "not what a backup holds"; exit 0; }\n  exec %s "$@" 3< <(printf %%s "$p") ;; esac\nexec %s "$@"\n' \
+    "$(command -v openssl)" "$(command -v openssl)" > "$T/posl/openssl" && chmod +x "$T/posl/openssl"
+  if CAGE_BACKUP_PASSPHRASE=lucky-wrong PATH="$T/posl:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err"; then fail "restored with a wrong passphrase"; fi
+  grep -q 'passphrase is wrong' "$T/p.err" || fail "a wrong passphrase openssl let through: $(cat "$T/p.err")"
   echo token-of-the-open-page > "$CAGE_HOME/ui.token"; : > "$CAGE_HOME/autostart"
   for t in systemctl uname; do printf '#!/bin/sh\n[ "%s" != uname ] || { echo Linux; exit 0; }\necho "%s $*" >> "%s/p.os"\n' "$t" "$t" "$T" > "$T/pbin/$t"; chmod +x "$T/pbin/$t"; done
   PATH="$T/pbin:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err" || fail "restore: $(cat "$T/p.err")"

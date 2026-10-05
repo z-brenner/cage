@@ -3501,9 +3501,10 @@ cmd_restore() {
   gnu_tar
   if ! find_msb; then if interactive; then install_msb; else die "microsandbox isn't installed: run: cage fix"; fi; fi
   backup_passphrase open pass
-  # The passphrase first, on its own: openssl checks it as it finishes, so a wrong one is never mistaken for a
-  # backup that didn't unpack (a full disk, say).
-  if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter "$BACKUP_ITER" -in "$file" -pass fd:3 -out /dev/null 3< <(printf '%s' "$pass") 2>/dev/null; then
+  # The passphrase first, on its own, so a wrong one is never mistaken for a backup that didn't unpack (a full disk,
+  # say). openssl alone lets about 1 wrong passphrase in 256 through, so what it decrypts must also be whole gzip.
+  if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter "$BACKUP_ITER" -in "$file" -pass fd:3 3< <(printf '%s' "$pass") 2>/dev/null |
+       gzip -t 2>/dev/null; then
     die "couldn't open that backup: the passphrase is wrong (or the file is damaged)"
   fi
   # Unpacked next to ~/.cage, while what's here now is kept aside: room for about three times the file.
