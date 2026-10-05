@@ -422,16 +422,24 @@ grep -q "won't delete $HOME/: your home folder is in it (nothing was removed)" "
 ok "cage uninstall never deletes backups (where cage.env puts them too, through a link too) or your home folder (however it's spelled)"
 
 : > "$MSB_LOG"
-# the background helper (cage _refresh, found by its pid file) stops with cage, not after its folder is gone
-CAGE_MSB="$T/stub/msb" nohup "$HOME/cage/cage" _refresh "$CAGE_HOME" </dev/null >/dev/null 2>&1 &
-for _ in $(seq 50); do [ -s "$CAGE_HOME/refresh.pid" ] && break; sleep 0.1; done
-HELPER="$(cat "$CAGE_HOME/refresh.pid" 2>/dev/null || true)"
-[ -n "$HELPER" ] && kill -0 "$HELPER" 2>/dev/null || fail "the background helper didn't start"
+# the background helper (cage _refresh, found by its pid file) stops with cage, not after its folder is gone; so do
+# those of your other CAGE_HOMEs, which run from that folder too
+mkdir -p "$HOME/other" && cp "$CAGE_HOME/cage.env" "$HOME/other/"
+for h in "$CAGE_HOME" "$HOME/other"; do
+  CAGE_HOME="$h" CAGE_MSB="$T/stub/msb" nohup "$HOME/cage/cage" _refresh "$h" </dev/null >/dev/null 2>&1 &
+done
+for _ in $(seq 50); do [ -s "$CAGE_HOME/refresh.pid" ] && [ -s "$HOME/other/refresh.pid" ] && break; sleep 0.1; done
+HELPER="$(cat "$CAGE_HOME/refresh.pid" "$HOME/other/refresh.pid" 2>/dev/null | tr '\n' ' ' || true)"
+up=0; for p in $HELPER; do if kill -0 "$p" 2>/dev/null; then up=$((up + 1)); fi; done
+[ $up = 2 ] || fail "the background helpers didn't start: $HELPER"
 CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fail "uninstall: $(cat "$T/err")"
-for _ in $(seq 20); do kill -0 "$HELPER" 2>/dev/null || break; sleep 0.1; done
-if kill -0 "$HELPER" 2>/dev/null; then fail "the background helper outlived cage uninstall"; fi
+for p in $HELPER; do
+  for _ in $(seq 20); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$p" 2>/dev/null; then fail "a background helper outlived cage uninstall: $(ps -o args= -p "$p")"; fi
+done
 [ ! -e "$CAGE_HOME/refresh.pid" ] || fail "uninstall left the helper's pid file"
 HELPER=""
+rm -rf "$HOME/other"
 [ ! -e "$HOME/cage" ] && [ ! -e "$HOME/.local/bin/cage" ] && [ ! -e "$HOME/.local/share/applications/cage.desktop" ] || fail "cage is still here"
 [ -f "$CAGE_HOME/cage.env" ] || fail "uninstall without --everything deleted the settings"
 grep -q '^rm --force cage-claude$' "$MSB_LOG" && ! grep -q 'volume rm' "$MSB_LOG" || fail "VMs and volumes: $(cat "$MSB_LOG")"

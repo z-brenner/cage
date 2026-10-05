@@ -2920,7 +2920,12 @@ cmd_uninstall() {
   if [ -f "$CAGE_ENV" ]; then ( cmd_down ) || true; fi
   refresher_stop
   wsl_keepalive_stop
-  # (its path as text in the pattern: brackets or dots in it mean only themselves, as for the helpers)
+  # cage's folder goes, so the helpers your other CAGE_HOMEs run from it go too: they'd carry on with the code they
+  # had read, without the files it calls (each one's sign-ins would be marked broken). (Its path as text in the
+  # pattern: brackets or dots in it mean only themselves.)
+  if [ -n "$removable" ]; then
+    pkill -f -- "$(printf '%s' "$CAGE_ROOT/cage" | sed 's/[][\.*^$?+(){}|]/\\&/g') _(refresh|keepalive)( |\$)" 2>/dev/null || true
+  fi
   pkill -f -- "$(printf '%s' "$CAGE_ROOT/host/ui/server.py" | sed 's/[][\.*^$?+(){}|]/\\&/g')" 2>/dev/null || true
   ( autostart_apply off ) >/dev/null 2>&1 || true
   rm -f "$CAGE_HOME/autostart"
