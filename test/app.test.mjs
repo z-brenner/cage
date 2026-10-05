@@ -2,7 +2,10 @@
 //   node --test test/app.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionKey, sessionOf, safeName, sharedName, buttonsOf, entryOf, inWork, apiAllowed, CAPABILITIES, handles } from '../guest/app.mjs'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { sessionKey, sessionOf, safeName, sharedName, buttonsOf, entryOf, inWork, apiAllowed, CAPABILITIES, handles, tidy } from '../guest/app.mjs'
 
 test('sessions: the chat, or a named side conversation; nothing else gets in', () => {
   assert.equal(sessionKey('you'), 'app:you:you')
@@ -76,4 +79,62 @@ test('shared file names: the app strips exactly the <ms>-<rand>- prefix and gets
   assert.equal(rel.slice(6).replace(/^\d+-[0-9a-z]{1,8}-/, ''), 'q3-results.txt')       // host/ui/server.py today
   assert.equal(rel.slice(6).replace(/^\d{10,}-[0-9a-z]{2,8}-/, ''), 'q3-results.txt')   // and its stricter form
   assert.match(sharedName('../../etc/passwd'), /-passwd$/)
+})
+
+function folder () { // a chat folder with in/, out/ and files/
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cage-tidy-'))
+  for (const d of ['in', 'out', 'files']) fs.mkdirSync(path.join(dir, d))
+  return dir
+}
+const put = (dir, rel, data, ageMs) => {
+  fs.writeFileSync(path.join(dir, rel), data)
+  const d = new Date(NOW - ageMs)
+  fs.utimesSync(path.join(dir, rel), d, d)
+}
+const NOW = Date.now()
+const DAY = 24 * 3600e3
+const left = (dir, sub = 'files') => fs.readdirSync(path.join(dir, sub)).sort()
+
+test('tidy: old files no log mentions go; anything a log or a waiting request mentions stays', (t) => {
+  const dir = folder()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  for (const n of ['1-aaaa-gone.pdf', '2-bbbb-in-log.pdf', '3-cccc-in-old-log.pdf', '4-dddd-waiting.pdf', '5-eeee-отчёт.pdf', '7-abcd-счёт.pdf']) {
+    put(dir, `files/${n}`, 'x', 8 * DAY)
+  }
+  put(dir, 'files/6-ffff-recent.pdf', 'x', 6 * DAY)
+  fs.writeFileSync(path.join(dir, 'log.jsonl'), [
+    JSON.stringify({ t: 'file', path: 'files/2-bbbb-in-log.pdf' }),
+    JSON.stringify({ t: 'you', files: [{ path: 'files/5-eeee-отчёт.pdf' }] })].join('\n') + '\n')
+  fs.writeFileSync(path.join(dir, 'log.1.jsonl'), JSON.stringify({ t: 'file', path: 'files/3-cccc-in-old-log.pdf' }) + '\n')
+  // the app writes requests with Python's json.dumps, which escapes non-ASCII; here an escaped slash too
+  fs.writeFileSync(path.join(dir, 'in', '0001-x.json'), '{"type": "message", "files": [{"path": "files\\/4-dddd-waiting.pdf"}, ' +
+    '{"path": "files/7-abcd-\\u0441\\u0447\\u0451\\u0442.pdf"}]}')
+  assert.deepEqual(tidy(dir, { now: NOW }), { removed: 1, freed: 1 })
+  assert.deepEqual(left(dir), ['2-bbbb-in-log.pdf', '3-cccc-in-old-log.pdf', '4-dddd-waiting.pdf', '5-eeee-отчёт.pdf', '6-ffff-recent.pdf', '7-abcd-счёт.pdf'])
+})
+
+test('tidy: over the size limit, the oldest unmentioned files go first, but never one from the last hour', (t) => {
+  const dir = folder()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const kb = 'x'.repeat(1000)
+  put(dir, 'files/1-aaaa-oldest.bin', kb, 5 * DAY)
+  put(dir, 'files/2-bbbb-older.bin', kb, 4 * DAY)
+  put(dir, 'files/3-cccc-in-log.bin', kb, 6 * DAY)
+  put(dir, 'files/4-dddd-newer.bin', kb, 2 * DAY)
+  put(dir, 'files/5-eeee-just-now.bin', kb, 60e3)
+  fs.writeFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ t: 'file', path: 'files/3-cccc-in-log.bin' }) + '\n')
+  tidy(dir, { now: NOW, max: 3000 })
+  assert.deepEqual(left(dir), ['3-cccc-in-log.bin', '4-dddd-newer.bin', '5-eeee-just-now.bin'])
+  tidy(dir, { now: NOW, max: 1000 })   // still over, but what's left is mentioned or new
+  assert.deepEqual(left(dir), ['3-cccc-in-log.bin', '5-eeee-just-now.bin'])
+})
+
+test("tidy: answers the app never picked up go after 10 minutes", (t) => {
+  const dir = folder()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  put(dir, 'out/old.json', '{}', 11 * 60e3)
+  put(dir, 'out/old.json.tmp', '{', 11 * 60e3)
+  put(dir, 'out/new.json', '{}', 60e3)
+  tidy(dir, { now: NOW })
+  assert.deepEqual(left(dir, 'out'), ['new.json'])
 })

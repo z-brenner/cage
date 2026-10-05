@@ -216,3 +216,18 @@ test('pictures, files and videos from the agent land in files/', async (t) => {
   assert.equal(e.name, 'video.mp4')
   assert.equal(fs.readFileSync(path.join(r.dir, e.path), 'utf8'), 'mp4')
 })
+
+test('old files nothing mentions any more are tidied away at start', async (t) => {
+  const old = (p) => { const d = new Date(Date.now() - 8 * 24 * 3600e3); fs.utimesSync(p, d, d) }
+  const r = await relay(t, {
+    before: (dir) => {
+      for (const n of ['1-aaaa-gone.pdf', '2-bbbb-kept.pdf']) { fs.writeFileSync(path.join(dir, 'files', n), 'x'); old(path.join(dir, 'files', n)) }
+      fs.writeFileSync(path.join(dir, 'log.1.jsonl'), JSON.stringify({ t: 'file', path: 'files/2-bbbb-kept.pdf' }) + '\n')
+      fs.writeFileSync(path.join(dir, 'out', 'late.json'), '{}')
+      old(path.join(dir, 'out', 'late.json'))
+    }
+  })
+  await until(() => !fs.existsSync(path.join(r.dir, 'files', '1-aaaa-gone.pdf')), 3000, 'the old file to go')
+  assert.ok(fs.existsSync(path.join(r.dir, 'files', '2-bbbb-kept.pdf')))
+  assert.ok(!fs.existsSync(path.join(r.dir, 'out', 'late.json')))
+})

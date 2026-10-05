@@ -14,6 +14,7 @@ import path from 'node:path'
 
 export const MAX_FILE = 25 * 1024 * 1024
 const MAX_LOG = 8 * 1024 * 1024
+const HOUR = 3600 * 1000
 
 // What the relay tells cc-connect it takes. cc-connect sends a kind of message only if it's listed here (a video
 // fails instead of arriving), so every kind the relay handles must be in it (test/app.test.mjs checks).
@@ -71,6 +72,48 @@ export function inWork (work, rel) {
 export const apiAllowed = (method, p) => /^\/api\/v1\/(cron(\/[\w-]+(\/exec)?)?|status)(\?[\w=&%.-]*)?$/.test(String(p || '')) &&
   ['GET', 'POST', 'DELETE', 'PATCH'].includes(method)
 
+// Keeps the chat folder from growing forever on your computer's disk. A file in files/ that log.jsonl, log.1.jsonl
+// or a request still waiting in in/ mentions is always kept. Any other goes once it's older than 7 days, or, while
+// files/ holds more than 2 GB, oldest first (but not in its first hour: it may be an upload about to be sent, or a
+// download the app is about to fetch). Answers in out/ that the app never picked up go after 10 minutes.
+export function tidy (dir, { now = Date.now(), keep = 7 * 24 * HOUR, max = 2 * 1024 ** 3, fresh = HOUR, answers = 10 * 60 * 1000 } = {}) {
+  const used = new Set()
+  const waiting = (() => { try { return fs.readdirSync(path.join(dir, 'in')).map((n) => path.join('in', n)) } catch { return [] } })()
+  for (const rel of ['log.jsonl', 'log.1.jsonl', ...waiting]) {
+    let text
+    try { text = fs.readFileSync(path.join(dir, rel), 'utf8') } catch { continue }
+    for (const m of text.matchAll(/"(files\\?\/(?:[^"\\]|\\.)*)"/g)) { // as JSON strings, so escaped names count too
+      try { used.add(JSON.parse(`"${m[1]}"`)) } catch {}
+    }
+  }
+  const files = []
+  let total = 0
+  for (const name of (() => { try { return fs.readdirSync(path.join(dir, 'files')) } catch { return [] } })()) {
+    try {
+      const st = fs.lstatSync(path.join(dir, 'files', name))
+      if (st.isDirectory()) continue
+      total += st.size
+      if (!used.has(`files/${name}`)) files.push({ name, size: st.size, at: st.mtimeMs })
+    } catch {}
+  }
+  let removed = 0
+  let freed = 0
+  const drop = (f) => {
+    try { fs.rmSync(path.join(dir, 'files', f.name), { force: true }); removed++; freed += f.size; total -= f.size } catch {}
+  }
+  files.sort((a, b) => a.at - b.at)
+  for (const f of files) if (now - f.at > keep) drop(f)
+  for (const f of files) if (total > max && now - f.at > fresh && now - f.at <= keep) drop(f)
+  for (const name of (() => { try { return fs.readdirSync(path.join(dir, 'out')) } catch { return [] } })()) {
+    const p = path.join(dir, 'out', name)
+    try {
+      const st = fs.lstatSync(p)
+      if (!st.isDirectory() && now - st.mtimeMs > answers) fs.rmSync(p, { force: true })
+    } catch {}
+  }
+  return { removed, freed }
+}
+
 // --- the relay -----------------------------------------------------------------------------------------------------
 async function main () {
   const DIR = process.env.APP_DIR || '/cage-app'
@@ -123,6 +166,14 @@ async function main () {
     if (!st.isFile() || st.size > MAX_FILE) throw new Error('not a file, or too big: ' + rel)
     return fs.readFileSync(p).toString('base64')
   }
+  const tidyUp = () => {
+    try {
+      const { removed, freed } = tidy(DIR)
+      if (removed) say(`tidied the chat folder: removed ${removed} old file(s), ${Math.round(freed / 1e6)} MB`)
+    } catch (e) { say('couldn\'t tidy the chat folder:', e.message) }
+  }
+  tidyUp()
+  setInterval(tidyUp, HOUR)
 
   // streaming previews: write at most every 600 ms per message, and always the last version
   const pending = new Map()
