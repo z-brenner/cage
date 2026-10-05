@@ -279,6 +279,9 @@ ok "privacy mask: the real CLI runs behind it, your terms and emails become toke
 # in here, so the proof is in each VM's map.
 bx() { msb exec --no-tty "cage-$B" -- "$@"; }
 retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A: $(msb logs "cage-$B" 2>&1 | tail -20)"
+# The background helper `cage up` started takes requests too, every 3 s. Had it taken this one, `cage _outbox` would
+# return while $B is still being asked, and the checks below would run too early. So `cage _outbox` is the only one.
+pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
 retry 60 ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 \
   CC_HOOK_CONTENT='/all is carol@example.org still at Acme Corp?' bash /cage/hook.sh ask || fail "the hook failed in the VM"
 cage _outbox 2>/dev/null
