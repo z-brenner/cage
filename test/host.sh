@@ -594,6 +594,7 @@ cage ask-all off </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
 [ -e "$CAGE_HOME/agents/claude/mask.on" ] && [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "mask.on isn't per agent"
 printf 'cage-claude\ncage-codex\n' > "$T/running"
 export MSB_RUNNING="$T/running" MSB_SENT="$T/sent" MSB_PS="$T/ps"
+pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `cage up` started, without these settings, would race `cage _outbox` below)
 : > "$MSB_SENT"; : > "$MSB_PS"; : > "$MSB_LOG"; rm -f "$CAGE_HOME/outbox/.last-claude" "$CAGE_HOME/outbox/.seen"
 marker="IBAN-DE89370400440532013000-$RANDOM$RANDOM"
 d="$CAGE_HOME/outbox/claude/$(date +%s)-1-1"
