@@ -519,7 +519,8 @@ grep -q 'mcp__zapier\|mcp__github' "$c" && fail "an app is pre-approved"
 # Claude Code's own tools, by today's names and by older ones, go ahead without asking; of the MCP tools, only its browser
 tools=" $(sed -n 's/^allowed_tools = \[\(.*\)\]$/\1/p' "$c" | tr -d '"' | tr ',' ' ') "
 for t in Bash Edit Write Read Glob Grep WebFetch WebSearch TodoWrite Skill Agent mcp__browser Monitor EnterWorktree ExitWorktree \
-         TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch Task BashOutput KillShell MultiEdit LS SlashCommand; do
+         TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch CronCreate CronDelete CronList \
+         Task BashOutput KillShell MultiEdit LS SlashCommand; do
   [[ "$tools" == *" $t "* ]] || fail "with approve on, claude would ask before $t, which stays inside its VM: $tools"
 done
 for t in $tools; do case "$t" in mcp__browser) ;; mcp__*) fail "an app's tool is pre-approved: $t" ;; esac; done

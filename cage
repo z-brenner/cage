@@ -228,11 +228,13 @@ vm() { echo "cage-$1"; }
 cc_type() { case "$1" in claude) echo claudecode ;; *) echo "$1" ;; esac; }
 # Asking before acting (cage approve <agent> on): Claude asks only before it uses your apps (its MCP tools), since
 # everything else it can do stays inside its VM; the others ask before every action, which is all they offer.
-# Claude Code's own tools, by their names now (Monitor to ToolSearch) and before (Task, BashOutput, KillShell,
-# MultiEdit, LS, NotebookRead, SlashCommand: an older CLI still has them, and a name it doesn't know does nothing).
+# Claude Code's own tools, by their names now (Monitor to CronList: the Cron ones schedule a prompt in its own
+# session) and before (Task, BashOutput, KillShell, MultiEdit, LS, NotebookRead, SlashCommand: an older CLI still has
+# them, and a name it doesn't know does nothing).
 CLAUDE_INSIDE="Agent Task Bash BashOutput KillShell Edit MultiEdit Write Read Glob Grep LS NotebookEdit NotebookRead
   WebFetch WebSearch TodoWrite ExitPlanMode Skill SlashCommand ListMcpResourcesTool ReadMcpResourceTool mcp__browser
-  Monitor EnterWorktree ExitWorktree TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch"
+  Monitor EnterWorktree ExitWorktree TaskOutput TaskStop TaskCreate TaskUpdate TaskList TaskGet ToolSearch
+  CronCreate CronDelete CronList"
 cc_mode() {
   if [ "$CAGE_MODE" != yolo ] || [ "$(cvar APPROVE "$1")" = on ]; then echo default; return; fi
   case "$1" in claude) echo bypassPermissions ;; cursor) echo force ;; *) echo yolo ;; esac
