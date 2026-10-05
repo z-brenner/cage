@@ -237,8 +237,9 @@ ok "inside a VM without nested virtualization, the check explains it (VirtualBox
 out="$(NET_DOWN=archive.ubuntu.com cage doctor 2>&1 || true)"
 grep -q "✗ archive.ubuntu.com didn't answer" <<<"$out" || fail "doctor's network line: $out"
 grep "didn't answer\|blocks" <<<"$out" | grep -q 'registry.npmjs.org\|github.com' && fail "doctor named hosts that answered: $out"
+v="$(sed -n 's/.*CAGE_CC_CONNECT_VERSION:-\(v[^}]*\)}.*/\1/p' "$ROOT/cage")"   # load_env's default (no backreferences: BusyBox grep)
 grep -q '^https://registry.npmjs.org/$' "$FAKE_CURL_LOG" && grep -q '^http://archive.ubuntu.com/ubuntu/$' "$FAKE_CURL_LOG" &&
-  grep -qE '^https://github.com/chenhg5/cc-connect/releases/download/(v[^/]+)/cc-connect-\1-linux-(amd64|arm64)\.tar\.gz$' "$FAKE_CURL_LOG" \
+  grep -qE "^https://github.com/chenhg5/cc-connect/releases/download/$v/cc-connect-$v-linux-(amd64|arm64)\.tar\.gz\$" "$FAKE_CURL_LOG" \
   || fail "not every download was probed: $(cat "$FAKE_CURL_LOG")"
 NET_DOWN=archive.ubuntu.com NET_BLOCKED=github.com cage _check | python3 -c 'import json,sys; c={x["id"]: x for x in json.load(sys.stdin)["checks"]}
 n = c["network"]; assert n["status"] == "bad", n
