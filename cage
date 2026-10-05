@@ -3182,6 +3182,29 @@ cmd_ui() { # cage ui [--no-open]: the web app
 # (settings, bots, keys, app sign-ins, memory) and each agent's home volume (its login, sessions and work).
 # AES-256 with a passphrase (openssl, PBKDF2), so the file is safe to keep in cloud storage or on a USB stick.
 BACKUP_ITER=600000
+# Backups take GNU tar: its options carry each agent's in-VM file owners (extended attributes) and lay the file out.
+# macOS's own tar (bsdtar) refuses them, and once that went by as "saved" while the file held nothing.
+TAR=""
+gnu_tar() { # sets TAR, or stops
+  local v
+  if command -v gtar >/dev/null 2>&1; then TAR=gtar; return 0; fi
+  v="$(tar --version 2>/dev/null || true)"
+  [[ "$v" == *"GNU tar"* ]] || die "backups need GNU tar$([ "$(uname -s)" = Darwin ] && echo ": brew install gnu-tar")"
+  TAR=tar
+}
+backup_check() { # backup_check <file> <passphrase>: true if it opens again and holds your settings
+  local m st rc=1
+  m="$(mktemp)"
+  set +e
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter "$BACKUP_ITER" -in "$1" -pass fd:3 3< <(printf '%s' "$2") 2>/dev/null |
+    gzip -dc 2>/dev/null | "$TAR" -t > "$m" 2>/dev/null
+  st="${PIPESTATUS[*]}"
+  set -e
+  if [ "$st" = "0 0 0" ] && grep -qx manifest.json "$m" && grep -qx config/cage.env "$m"; then rc=0; fi
+  rm -f "$m"
+  return $rc
+}
+kb_words() { if [ "$1" -ge 1048576 ]; then echo "$(( ($1 + 524288) / 1048576 )) GB"; else echo "$(( ($1 + 1023) / 1024 )) MB"; fi; }
 backup_dir() {
   if [ -n "${CAGE_BACKUP_DIR:-}" ]; then echo "$CAGE_BACKUP_DIR"; return 0; fi
   local w
@@ -3226,7 +3249,8 @@ cmd_backup() {
   load_env
   find_msb || true
   command -v openssl >/dev/null 2>&1 || die "backups need openssl: sudo apt-get install openssl"
-  local out="${1:-}" dir="" pass tmp a v p size rc vols=() names=() st
+  gnu_tar
+  local out="${1:-}" dir="" pass tmp a v p size rc vols=() names=() st why
   if [ -z "$out" ]; then
     dir="$(backup_dir)"
     mkdir -p "$dir" || die "couldn't create $dir; set CAGE_BACKUP_DIR to save backups elsewhere"
@@ -3248,25 +3272,39 @@ cmd_backup() {
   if [ ${#names[@]} -gt 0 ]; then what="your settings and the files of: ${names[*]}"; fi
   say "backing up $what…"
   # Agents can keep running: files they change meanwhile are saved as tar finds them. Each agent's in-VM file
-  # owners and modes live in extended attributes on the volume (user.*), so those come along.
+  # owners and modes live in extended attributes on the volume (user.*), so those come along. Left out: logs,
+  # what cage makes again (msb), and what belongs to this computer only: the web app's key, whether cage starts at
+  # login (a new computer has no login item for it), and the helpers' pids and locks.
   (umask 077; : > "$out.part")
   set +e
-  tar -c --xattrs --xattrs-include='user.*' --warning=no-file-changed --warning=no-file-removed \
+  "$TAR" -c --xattrs --xattrs-include='user.*' \
       --exclude=./refresh.log --exclude=./autostart.log --exclude=./msb \
+      --exclude=./ui.token --exclude=./autostart --exclude=./refresh.pid --exclude=./keepalive.pid \
+      --exclude=./.refresh.lock --exclude=./cage.env.lock \
       --exclude='cage-*-home/.cache/ms-playwright' --exclude='cage-*-home/.npm' --exclude='cage-*-home/.cache/pip' \
       --exclude='cage-*-home/.cache/cage-voice' \
       --transform='s,^\.\(/\|$\),config/,S' --transform='s,^cage-,volumes/cage-,S' \
-      -C "$tmp" manifest.json -C "$CAGE_HOME" . ${vols[@]+"${vols[@]}"} |
+      -C "$tmp" manifest.json -C "$CAGE_HOME" . ${vols[@]+"${vols[@]}"} 2>"$tmp/tar.err" |
       gzip -6 |
       openssl enc -aes-256-cbc -salt -pbkdf2 -iter "$BACKUP_ITER" -pass fd:3 -out "$out.part" 3< <(printf '%s' "$pass")
   st=("${PIPESTATUS[@]}")
   rc="${st[0]}"
   set -e
+  # tar's 1 is fine when all it says is that files changed while it read them (agents at work): they're saved as
+  # they were then. Anything else it says is a real problem.
+  if [ "$rc" = 1 ] && [ -z "$(grep -v -e 'file changed as we read it' -e 'File removed before we read it' -e 'File shrank by' "$tmp/tar.err" || true)" ]; then
+    rc=0
+  fi
+  why="$(grep -v 'Exiting with failure status' "$tmp/tar.err" | tail -n 1 | sed 's/^[a-z]*tar: //' | safe_text || true)"
   rm -rf "$tmp"
-  # tar: 1 means a file changed while it was read (still saved); 2 is a real failure
-  if [ "$rc" -gt 1 ] || [ "${st[1]:-0}" != 0 ] || [ "${st[2]:-0}" != 0 ]; then
+  if [ "$rc" != 0 ] || [ "${st[1]:-0}" != 0 ] || [ "${st[2]:-0}" != 0 ]; then
     rm -f "$out.part"
-    die "the backup failed (tar $rc); nothing was saved"
+    die "the backup failed${why:+ ($why)}; nothing was saved"
+  fi
+  # A backup counts only once it opens again: before cage says it worked, and before older ones are cleared away.
+  if ! backup_check "$out.part" "$pass"; then
+    rm -f "$out.part"
+    die "the backup didn't come out whole (it wouldn't open again), so it wasn't kept; your older backups are untouched"
   fi
   mv "$out.part" "$out"
   chmod 600 "$out"
@@ -3298,19 +3336,40 @@ cmd_restore() {
   if [ -z "$file" ] || [ "$file" = list ]; then backup_list; [ -n "$file" ] || hint "cage restore <file>"; return 0; fi
   [ -f "$file" ] || die "no backup at $file"
   command -v openssl >/dev/null 2>&1 || die "restoring needs openssl: sudo apt-get install openssl"
-  if ! find_msb; then if interactive; then install_msb; else die "microsandbox isn't installed: run cage first"; fi; fi
+  gnu_tar
+  if ! find_msb; then if interactive; then install_msb; else die "microsandbox isn't installed: run: cage fix"; fi; fi
   backup_passphrase open pass
+  # The passphrase first, on its own: openssl checks it as it finishes, so a wrong one is never mistaken for a
+  # backup that didn't unpack (a full disk, say).
+  if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter "$BACKUP_ITER" -in "$file" -pass fd:3 -out /dev/null 3< <(printf '%s' "$pass") 2>/dev/null; then
+    die "couldn't open that backup: the passphrase is wrong (or the file is damaged)"
+  fi
+  # Unpacked next to ~/.cage, while what's here now is kept aside: room for about three times the file.
+  local need free why terr
   stage="$(dirname "$CAGE_HOME")/.cage-restore.$$"
+  need=$(( $(wc -c < "$file" | tr -d ' ') * 3 / 1024 ))
+  free="$(df -Pk "$(dirname "$CAGE_HOME")" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+  if [[ "$free" =~ ^[0-9]+$ ]] && [ "$free" -lt "$need" ]; then
+    die "restoring this backup needs about $(kb_words "$need") free on this disk, and there's $(kb_words "$free"); make room, then try again"
+  fi
   rm -rf "$stage" && mkdir -m 700 "$stage"
+  terr="$(mktemp)"
   set +e
+  trap '' XFSZ   # a limit on file sizes: tar then says so, instead of being stopped without a word
   openssl enc -d -aes-256-cbc -pbkdf2 -iter "$BACKUP_ITER" -in "$file" -pass fd:3 3< <(printf '%s' "$pass") 2>/dev/null |
-    gzip -dc 2>/dev/null | tar -x --xattrs --xattrs-include='user.*' --same-permissions -C "$stage" 2>/dev/null
+    gzip -dc 2>/dev/null | "$TAR" -x --xattrs --xattrs-include='user.*' --same-permissions -C "$stage" 2>"$terr"
   local st=("${PIPESTATUS[@]}")
+  trap - XFSZ
   set -e
   if [ "${st[0]}" != 0 ] || [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ] || [ ! -f "$stage/manifest.json" ] || [ ! -d "$stage/config" ]; then
-    rm -rf "$stage"
-    die "couldn't open that backup: the passphrase is wrong, or it isn't a whole cage backup"
+    why="$(grep -v 'Exiting with failure status' "$terr" | tail -n 1 | sed 's/^[a-z]*tar: //' | safe_text || true)"
+    # a file that could be written only in part: the disk (or a limit on this user) ran out of room
+    if grep -q -e 'No space left' -e 'Wrote only' -e 'File too large' -e 'quota exceeded' "$terr"; then why=full; fi
+    rm -rf "$stage" "$terr"
+    [ "$why" != full ] || die "couldn't unpack that backup: there's no room left on the disk. Make room, then try again (nothing here changed)"
+    die "couldn't unpack that backup${why:+ ($why)}; it may not be a whole cage backup (nothing here changed)"
   fi
+  rm -f "$terr"
   created="$(sed -n 's/.*"created": *"\([^"]*\)".*/\1/p' "$stage/manifest.json")"
   agents="$(sed -n 's/.*"agents": *"\([^"]*\)".*/\1/p' "$stage/manifest.json")"
   local what="your settings"
@@ -3326,6 +3385,10 @@ cmd_restore() {
   refresher_stop
   old="$CAGE_HOME.before-restore-$(date +%Y%m%d-%H%M%S)"
   mkdir -m 700 "$old" && mkdir "$old/volumes"
+  # What belongs to this computer stays as it is: the web app's key (so the open page keeps working) and whether
+  # cage starts at login. Pids and locks were another computer's (or another time's).
+  ( cd "$stage/config" && rm -rf ui.token autostart refresh.pid keepalive.pid .refresh.lock cage.env.lock )
+  for d in ui.token autostart; do if [ -e "$CAGE_HOME/$d" ]; then cp -p "$CAGE_HOME/$d" "$stage/config/$d"; fi; done
   if [ -e "$CAGE_HOME" ]; then mv "$CAGE_HOME" "$old/config"; fi
   mv "$stage/config" "$CAGE_HOME"
   for d in "$stage"/volumes/*; do
@@ -3339,6 +3402,8 @@ cmd_restore() {
   rm -rf "$stage"
   ok "restored from $(basename "$file")"
   hint "what was here before is in $old; delete it once everything works"
+  # start at login, if it was on: made again, so it points at this cage and this computer
+  if [ -e "$CAGE_HOME/autostart" ]; then ( cmd_autostart on ) || warn "couldn't turn start-at-login back on: cage autostart on"; fi
   # wake the agents someone can talk to (the others were never set up)
   local wake=()
   load_env

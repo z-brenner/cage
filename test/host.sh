@@ -543,6 +543,7 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass pass:"correct horse batte
 grep -qx 'manifest.json' "$T/members" && grep -qx 'config/cage.env' "$T/members" && grep -qx 'volumes/cage-claude-home/work/notes.md' "$T/members" \
   || fail "unexpected layout: $(head -20 "$T/members")"
 if grep -q 'ms-playwright\|config/msb/' "$T/members"; then fail "backup has caches or generated files"; fi
+if grep -qx 'config/ui.token\|config/autostart\|config/refresh.pid' "$T/members"; then fail "backup has this computer's own files: $(grep -x 'config/[a-z.]*' "$T/members")"; fi
 ok "backup: one encrypted 0600 file with the settings and each agent's volume (no caches)"
 
 # restore: on top of changed settings and a wiped volume; a wrong passphrase changes nothing
@@ -811,6 +812,51 @@ if script --version 2>&1 | grep -q util-linux; then
       || fail "a VM that stopped isn't explained: $(cat -v "$T/x.out" | tail -5)" )
   ok "a VM that stops while starting is reported in seconds, with the last it said"
 fi
+
+# backups on a computer whose tar isn't GNU tar (macOS's is bsdtar): cage says so and saves nothing, and a backup that
+# doesn't open again is never called saved, nor does it clear older ones away
+( fresh l
+  export CAGE_BACKUP_DIR="$T/lbk" CAGE_BACKUP_PASSPHRASE="correct horse battery" CAGE_BACKUP_KEEP=2
+  mkdir -p "$CAGE_BACKUP_DIR" "$T/lbin" && echo old > "$CAGE_BACKUP_DIR/cage-2026-01-01-000000.cagebackup" && echo old > "$CAGE_BACKUP_DIR/cage-2026-01-02-000000.cagebackup"
+  if command -v bsdtar >/dev/null 2>&1; then printf '#!/bin/sh\nexec bsdtar "$@"\n'; else printf '#!/bin/sh\necho "bsdtar 3.7.2 - libarchive 3.7.2"\n'; fi > "$T/lbin/tar"
+  chmod +x "$T/lbin/tar"   # macOS's tar (a script, never a link: the next shim is written over it)
+  rc=0; PATH="$T/lbin:$PATH" "$ROOT/cage" backup 2>"$T/l.err" || rc=$?
+  [ $rc = 1 ] && grep -q 'backups need GNU tar' "$T/l.err" || fail "backup with bsdtar: exit $rc, $(cat "$T/l.err")"
+  printf '#!/bin/sh\ncase "$1" in --version) echo "tar (GNU tar) 1.35" ;; -c) exit 1 ;; *) exec %s "$@" ;; esac\n' "$(command -v tar)" > "$T/lbin/tar"
+  chmod +x "$T/lbin/tar"   # says it's GNU tar, then writes nothing (exit 1, which also means "a file changed")
+  rc=0; PATH="$T/lbin:$PATH" "$ROOT/cage" backup 2>"$T/l.err" || rc=$?
+  [ $rc = 1 ] && grep -q "didn't come out whole" "$T/l.err" || fail "an empty backup counted as saved: exit $rc, $(cat "$T/l.err")"
+  [ "$(ls "$CAGE_BACKUP_DIR")" = "$(printf 'cage-2026-01-01-000000.cagebackup\ncage-2026-01-02-000000.cagebackup')" ] || fail "older backups were touched: $(ls "$CAGE_BACKUP_DIR")"
+  "$ROOT/cage" backup 2>/dev/null && [ "$(ls "$CAGE_BACKUP_DIR" | wc -l)" = 2 ] || fail "a good backup didn't prune: $(ls "$CAGE_BACKUP_DIR")" )
+ok "backup: without GNU tar it says so; one that doesn't open again isn't kept, and older ones stay"
+
+# restore: a full disk is called that (not a wrong passphrase); not enough room is caught before anything is unpacked;
+# this computer's web app key and start-at-login stay as they are
+( fresh p
+  export CAGE_BACKUP_DIR="$T/pbk" CAGE_BACKUP_PASSPHRASE="correct horse battery" HOME="$T/phome"
+  mkdir -p "$HOME" "$T/pbin" "$MSB_VOLUMES/cage-claude-home/work"
+  head -c 3000000 /dev/urandom > "$MSB_VOLUMES/cage-claude-home/work/big.bin"
+  echo token-at-backup-time > "$CAGE_HOME/ui.token"
+  "$ROOT/cage" backup 2>/dev/null || fail "backup"
+  f="$(ls "$CAGE_BACKUP_DIR"/*.cagebackup)"
+  echo 'CAGE_CPUS=7' >> "$CAGE_HOME/cage.env"
+  rc=0; ( ulimit -f 1024; "$ROOT/cage" restore "$f" --yes ) 2>"$T/p.err" || rc=$?
+  [ $rc = 1 ] && grep -q "no room left on the disk" "$T/p.err" || fail "a full disk while restoring: exit $rc, $(cat "$T/p.err")"
+  if grep -q 'passphrase' "$T/p.err"; then fail "a full disk was blamed on the passphrase: $(cat "$T/p.err")"; fi
+  grep -q 'CAGE_CPUS=7' "$CAGE_HOME/cage.env" && ! compgen -G "$T/.cage-restore.*" >/dev/null || fail "a failed restore changed things"
+  mkdir -p "$T/pdf"
+  printf '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/x 100000 99900 100 100%%%% /\\n"\n' > "$T/pdf/df"; chmod +x "$T/pdf/df"
+  rc=0; PATH="$T/pdf:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err" || rc=$?
+  [ $rc = 1 ] && grep -q 'needs about 9 MB free on this disk' "$T/p.err" || fail "no room, found before unpacking: exit $rc, $(cat "$T/p.err")"
+  if CAGE_BACKUP_PASSPHRASE=wrong-passphrase "$ROOT/cage" restore "$f" --yes 2>"$T/p.err"; then fail "restored with a wrong passphrase"; fi
+  grep -q 'passphrase is wrong' "$T/p.err" || fail "a wrong passphrase: $(cat "$T/p.err")"
+  echo token-of-the-open-page > "$CAGE_HOME/ui.token"; : > "$CAGE_HOME/autostart"
+  for t in systemctl uname; do printf '#!/bin/sh\n[ "%s" != uname ] || { echo Linux; exit 0; }\necho "%s $*" >> "%s/p.os"\n' "$t" "$t" "$T" > "$T/pbin/$t"; chmod +x "$T/pbin/$t"; done
+  PATH="$T/pbin:$PATH" "$ROOT/cage" restore "$f" --yes 2>"$T/p.err" || fail "restore: $(cat "$T/p.err")"
+  [ "$(cat "$CAGE_HOME/ui.token")" = token-of-the-open-page ] || fail "restore replaced the web app's key: $(cat "$CAGE_HOME/ui.token")"
+  [ -e "$CAGE_HOME/autostart" ] && grep -q 'systemctl --user enable cage-up.service' "$T/p.os" || fail "start-at-login wasn't made again: $(cat "$T/p.err")"
+  rm -rf "$CAGE_HOME".before-restore-* )
+ok "restore: a full disk is named, not blamed on the passphrase; room checked first; the web app's key and start-at-login stay"
 
 # down: a VM that doesn't stop in 30 s is stopped at once (and you're told); asleep ones are left alone, and with
 # nobody awake, cage says so
