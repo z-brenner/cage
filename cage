@@ -2435,27 +2435,55 @@ cmd_update() {
   CAGE_REFRESH=1 cmd_up "$@"   # the VMs download the newest of everything, instead of waking from their cache
 }
 
+# Stops an agent's VM, giving what it's doing 30 s to finish: msb waits forever unless told otherwise, so a stuck
+# VM would hold up `cage down` (or a restore) with it. One that's still going after that is stopped at once.
+msb_stop() { # msb_stop <agent>: false if it wasn't running
+  "$MSB" stop -t 30 "$(vm "$1")" >/dev/null 2>&1 && return 0
+  "$MSB" stop --force "$(vm "$1")" >/dev/null 2>&1 || return 1
+  warn "$1 didn't stop within 30 s, so cage stopped it at once (anything it hadn't saved is lost)"
+}
+
 cmd_down() {
   load_env
   resolve_agents "$@"
+  local a n=0
+  refresh_running
   for a in "${AGENTS[@]}"; do
-    if "$MSB" stop "$(vm "$a")" >/dev/null 2>&1; then printf '  %s  %s is asleep\n' "$(face "$a" asleep)" "$a" >&2; fi
+    [ "$RUNNING" = "?" ] || agent_awake "$a" || continue
+    if msb_stop "$a"; then n=$((n + 1)); printf '  %s  %s is asleep\n' "$(face "$a" asleep)" "$a" >&2; fi
   done
+  if [ $n = 0 ]; then
+    if [ $# -eq 0 ]; then say "everyone is already asleep"; else say "$(agents_label "${AGENTS[*]}") $([ $# = 1 ] && echo is || echo are) already asleep"; fi
+  fi
   if [ $# -eq 0 ] && is_wsl; then wsl_keepalive_stop; fi
   if [ $# -eq 0 ]; then refresher_stop; fi
 }
 
-cmd_destroy() {
-  local a="${1:-}" flag="${2:-}"
+cmd_destroy() { # cage destroy <agent> --keep-login|--yes: its VM, and with --yes its login and files (the volumes) too
+  local a="${1:-}" flag="${2:-}" v out
   [ -n "$a" ] || die "usage: cage destroy <agent> [--keep-login|--yes]"
   check_agent "$a"
-  case "$flag" in --keep-login|--yes) load_env 2>/dev/null && events_harvest "$a" 2>/dev/null || true ;; esac
   case "$flag" in
-    --keep-login) "$MSB" rm --force "$(vm "$a")"; ok "removed $a's cage; its login and files are kept" ;;
-    --yes) "$MSB" rm --force "$(vm "$a")"; "$MSB" volume rm "$(vm "$a")-home"; "$MSB" volume rm "$(vm "$a")-cache" >/dev/null 2>&1 || true
-      ok "removed $a's cage, login and files" ;;
+    --keep-login|--yes) ;;
     *) die "this deletes $a's cage. Add --keep-login to keep its login and files, or --yes to delete everything" ;;
   esac
+  find_msb || die "microsandbox isn't installed, so there's nothing of $a's to delete; run: cage fix"
+  # what the VM's network logged goes with it: collect it first (with settings to read; quietly, it's a nicety)
+  if [ -f "$CAGE_ENV" ]; then ( load_env; events_harvest "$a" ) >/dev/null 2>&1 || true; fi
+  v="$(vm "$a")"
+  # each part is removed on its own, so one that's already gone (an earlier --keep-login) doesn't stop the others
+  if exists "$a"; then
+    out="$("$MSB" rm --force "$v" 2>&1 >/dev/null)" || die "couldn't remove $a's cage: ${out#error: }"
+    ok "removed $a's cage"
+  else say "$a had no cage"; fi
+  if [ "$flag" = --keep-login ]; then ok "its login and files are kept: cage up $a gives it a new cage"; return 0; fi
+  if "$MSB" volume inspect "$v-home" >/dev/null 2>&1; then
+    out="$("$MSB" volume rm "$v-home" 2>&1 >/dev/null)" || die "couldn't delete $a's login and files: ${out#error: }"
+    ok "deleted $a's login and files"
+  else say "$a had no login or files saved"; fi
+  if "$MSB" volume inspect "$v-cache" >/dev/null 2>&1; then
+    "$MSB" volume rm "$v-cache" >/dev/null 2>&1 || warn "couldn't delete $a's downloads ($v-cache); they're only a cache"
+  fi
 }
 
 # --- asking several agents, standing in for one that's out of quota, voice notes ---------------------------------
@@ -3293,7 +3321,8 @@ cmd_restore() {
       rm -rf "$stage"; say "nothing changed"; return 0
     fi
   fi
-  for v in $KINDS; do "$MSB" stop "$(vm "$v")" >/dev/null 2>&1 || true; done
+  refresh_running
+  for v in $KINDS; do if [ "$RUNNING" = "?" ] || agent_awake "$v"; then msb_stop "$v" || true; fi; done
   refresher_stop
   old="$CAGE_HOME.before-restore-$(date +%Y%m%d-%H%M%S)"
   mkdir -m 700 "$old" && mkdir "$old/volumes"

@@ -22,6 +22,13 @@ if [ "$cmd" = run ] && [ -n "${MSB_FAIL_RUN:-}" ]; then   # msb refuses to start
   case " $* " in *" --name $MSB_FAIL_RUN "*) echo "error: failed to allocate 4G of memory" >&2; exit 1 ;; esac
 fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
+if [ "$cmd" = stop ] && [ "$1" = -t ] && [ -n "${MSB_STOP_STUCK:-}" ]; then   # that VM doesn't stop within the time given
+  case " $* " in *" $MSB_STOP_STUCK "*) echo "error: timed out waiting for $MSB_STOP_STUCK to stop" >&2; exit 1 ;; esac
+fi
+if [ "$cmd" = rm ]; then   # like msb: removing a sandbox that isn't there is an error
+  n="${!#}"; grep -qx "$n" "$MSB_EXISTING" 2>/dev/null || { echo "error: sandbox not found: $n" >&2; exit 1; }
+  { grep -vx "$n" "$MSB_EXISTING" || true; } > "$MSB_EXISTING.new"; mv "$MSB_EXISTING.new" "$MSB_EXISTING"
+fi
 if [ "$cmd" = exec ]; then
   vmname=""; for x in "$@"; do case "$x" in cage-*) vmname="$x"; break ;; esac; done
   case "$*" in
@@ -39,6 +46,7 @@ if [ "$cmd" = volume ]; then   # named volumes are folders under $MSB_VOLUMES
   case "$1" in
     inspect) [ -d "$MSB_VOLUMES/$2" ] || exit 1; printf 'Name:           %s\nKind:           dir\nPath:           %s\n' "$2" "$MSB_VOLUMES/$2" ;;
     create) mkdir -p "$MSB_VOLUMES/$2" && echo "$2" ;;
+    rm) [ -d "$MSB_VOLUMES/$2" ] || { echo "error: volume not found: $2" >&2; exit 1; }; rm -rf "${MSB_VOLUMES:?}/$2" ;;
   esac
 fi
 exit 0
@@ -145,14 +153,21 @@ grep -q '^mode = "default"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail 
 grep -q '^mode = "default"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "ask mode cursor"
 ok "CAGE_MODE=ask makes agents ask in chat before each tool call"
 
-# destroy guards
+# destroy: needs an explicit flag; --keep-login keeps the login volume. Each part goes on its own, so --yes after
+# --keep-login (the VM is gone already), or with no settings file at all, still deletes the login and files.
 if cage destroy claude 2>/dev/null; then fail "destroy without flag succeeded"; fi
-: > "$MSB_LOG"; cage destroy claude --keep-login 2>/dev/null
+echo cage-claude > "$MSB_EXISTING"; mkdir -p "$MSB_VOLUMES/cage-claude-home/work" "$MSB_VOLUMES/cage-claude-cache"
+: > "$MSB_LOG"; cage destroy claude --keep-login 2>"$T/err" || fail "destroy --keep-login: $(cat "$T/err")"
 grep -qx 'rm | --force | cage-claude' "$MSB_LOG" || fail "destroy --keep-login"
-grep -q 'volume' "$MSB_LOG" && fail "--keep-login removed the volume"
-: > "$MSB_LOG"; cage destroy claude --yes 2>/dev/null
-grep -qx 'volume | rm | cage-claude-home' "$MSB_LOG" || fail "destroy --yes kept the volume"
-ok "destroy needs an explicit flag; --keep-login keeps the login volume"
+grep -q 'volume | rm' "$MSB_LOG" && fail "--keep-login removed the volume"
+: > "$MSB_LOG"; cage destroy claude --yes 2>"$T/err" || fail "destroy --yes after --keep-login: $(cat "$T/err")"
+grep -q '^rm ' "$MSB_LOG" && fail "removed a VM that wasn't there"
+[ ! -e "$MSB_VOLUMES/cage-claude-home" ] && [ ! -e "$MSB_VOLUMES/cage-claude-cache" ] || fail "destroy --yes kept the volumes: $(cat "$T/err")"
+grep -q 'claude had no cage' "$T/err" && grep -q "deleted claude's login and files" "$T/err" || fail "destroy --yes: $(cat "$T/err")"
+echo cage-claude > "$MSB_EXISTING"; mkdir -p "$MSB_VOLUMES/cage-claude-home"
+CAGE_ENV="$T/no-such.env" cage destroy claude --yes 2>"$T/err" || fail "destroy without a settings file: $(cat "$T/err")"
+[ ! -s "$MSB_EXISTING" ] && [ ! -e "$MSB_VOLUMES/cage-claude-home" ] || fail "destroy without a settings file left things: $(cat "$T/err")"
+ok "destroy needs an explicit flag; --keep-login keeps the login volume; --yes deletes what's there, whatever is gone already"
 
 # status: one row per agent, its face showing the state; the login probe runs inside the VM as `agent`
 printf 'cage-codex\ncage-cursor\n' > "$MSB_EXISTING"
@@ -314,8 +329,9 @@ fi
 # msb installed by the official installer but not on PATH (autostart and `wsl.exe --exec` have no login shell)
 mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb"
 : > "$MSB_LOG"
-env -u MSB_HOME HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
-grep -qx 'stop | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
+echo cage-claude > "$T/h.running"
+env -u MSB_HOME HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" MSB_RUNNING="$T/h.running" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
+grep -qx 'stop | -t | 30 | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
 ok "finds msb in the installer's location when it isn't on PATH"
 
 # --- strict network: deny by default, only each agent's own hosts plus what you allow
@@ -547,7 +563,7 @@ if [ "$xattrs" = 1 ]; then
     || fail "the in-VM owner and mode (xattr) didn't come back"
 fi
 ls -d "$CAGE_HOME".before-restore-*/volumes/cage-claude-home >/dev/null || fail "what was there before wasn't kept"
-grep -q '^stop | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-claude |' "$MSB_LOG" || fail "agents not stopped, then woken: $(cat "$MSB_LOG")"
+grep -q '^stop | -t | 30 | cage-claude' "$MSB_LOG" && grep -q '^run | .*--name | cage-claude |' "$MSB_LOG" || fail "agents not stopped, then woken: $(cat "$MSB_LOG")"
 rm -rf "$CAGE_HOME".before-restore-*
 ok "restore: settings and volumes back (owners, links), old copy kept, agents woken; wrong passphrase refused"
 
@@ -795,6 +811,21 @@ if script --version 2>&1 | grep -q util-linux; then
       || fail "a VM that stopped isn't explained: $(cat -v "$T/x.out" | tail -5)" )
   ok "a VM that stops while starting is reported in seconds, with the last it said"
 fi
+
+# down: a VM that doesn't stop in 30 s is stopped at once (and you're told); asleep ones are left alone, and with
+# nobody awake, cage says so
+( fresh d
+  printf 'cage-claude\ncage-codex\n' > "$T/d.vms"; echo cage-claude > "$T/d.running"
+  export MSB_EXISTING="$T/d.vms" MSB_RUNNING="$T/d.running"
+  : > "$MSB_LOG"
+  MSB_STOP_STUCK=cage-claude "$ROOT/cage" down 2>"$T/d.err" || fail "down: $(cat "$T/d.err")"
+  grep -qx 'stop | -t | 30 | cage-claude' "$MSB_LOG" && grep -qx 'stop | --force | cage-claude' "$MSB_LOG" || fail "down didn't stop claude by force: $(cat "$MSB_LOG")"
+  grep -q "claude didn't stop within 30 s" "$T/d.err" && grep -q 'claude is asleep' "$T/d.err" || fail "down: $(cat "$T/d.err")"
+  if grep -q 'stop .*cage-codex' "$MSB_LOG"; then fail "down stopped an agent that was asleep"; fi
+  : > "$T/d.running"
+  "$ROOT/cage" down 2>"$T/d.err" && grep -q 'everyone is already asleep' "$T/d.err" || fail "down with nobody awake: $(cat "$T/d.err")"
+  "$ROOT/cage" down codex 2>"$T/d.err" && grep -q 'codex is already asleep' "$T/d.err" || fail "down codex: $(cat "$T/d.err")" )
+ok "down: a VM that won't stop in 30 s is stopped at once; asleep ones are left alone, and cage says when nobody was awake"
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
