@@ -1391,10 +1391,14 @@ function looseJSON (text) { // the tool's input as {args, cut}: JSON, or JSON th
   for (const end of ['"}', '}', '":null}', 'null}', '"]}', ']}', '"}}', '}}', '"}]}']) { const o = obj(cut + end); if (o) return { args: o, cut: true } }
   return null
 }
-function shown (v) { // a value as text: a list as "a, b", anything else as JSON; long ones cut (all of it is under "Exactly what it asked")
-  const s = typeof v === 'string' ? v : Array.isArray(v) && v.every((x) => typeof x !== 'object') ? v.join(', ') : JSON.stringify(v)
-  return s.length > 400 ? s.slice(0, 400) + '…' : s
+function shown (v) { // a value as text: a list as "a, b", anything else as JSON. All of it: cc-connect cuts the whole input at
+  // 800 characters already, and the end of a command ("… && curl … | sh") is what matters most.
+  return typeof v === 'string' ? v : Array.isArray(v) && v.every((x) => typeof x !== 'object') ? v.join(', ') : JSON.stringify(v)
 }
+// Tools whose input cc-connect sends as it is, never as JSON (claudecode's summarizeInput: a command, a file, a pattern;
+// Codex and Cursor send a command as it is too). A command that looks like JSON is still a command: read as JSON, the
+// card would show what a part of it says, not what runs.
+const RAW_INPUT = /^(Bash|Shell|Read|Edit|Write|Grep|Glob)$/i
 const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
 function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut}; what is '' if it isn't cc-connect's prompt
   const raw = String(text || '')
@@ -1403,7 +1407,7 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   if (!bold) return { raw, tool: '', what: '', fields: [], body: '' }
   const tool = bold[1].trim()
   const input = fence[1].replace(/\n$/, '')
-  const parsed = looseJSON(input)
+  const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
   const args = parsed ? parsed.args : {}
   if (!parsed && input) { // not JSON: a command, a file or an address
     if (/^(Bash|Shell)$/i.test(tool)) args.command = input
@@ -1424,7 +1428,9 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
     if (k !== bodyKey && !APPROVAL_FIELDS.some(([f]) => f === k) && !blank(v)) fields.push([capital(words(k)) || k, shown(v), k])
   }
-  return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut: !!(parsed && parsed.cut) }
+  // (cut by cc-connect: JSON closed off where it was cut, or input as it is that's 800 characters and "...")
+  const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
+  return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut }
 }
 function approvalLine (ap) { // in one line, for Home and notifications: "Gmail: send email to bob@acme.com"
   if (!ap.what) return ap.raw.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)
