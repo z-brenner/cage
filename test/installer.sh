@@ -9,7 +9,12 @@ trap '[ -z "$SERVER" ] || kill "$SERVER" 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
-commit() { git -C "$T/src" -c user.name=t -c user.email=t@t.invalid "$@"; }
+n=0
+commit() { # each commit a minute after the last, so releases built from them carry different file times
+  n=$((n + 1))
+  GIT_COMMITTER_DATE="$((1700000000 + n * 60)) +0000" GIT_AUTHOR_DATE="$((1700000000 + n * 60)) +0000" \
+    git -C "$T/src" -c user.name=t -c user.email=t@t.invalid "$@"
+}
 
 # a throwaway "remote": the current tree committed on a main branch
 mkdir -p "$T/src"
@@ -77,6 +82,7 @@ release() { # release <tag>: build the source tree as release <tag> and make it 
   "$T/src/scripts/build-release.sh" "$1" "$T/www/releases/download/$1" >/dev/null
   echo "$1" > "$T/www/latest"
 }
+mtime() { stat -c %Y "$HOME/cage/host/ui/server.py"; }
 
 unset CAGE_REF
 if bash "$ROOT/install.sh" 2>"$T/err"; then :; else fail "fallback install failed: $(cat "$T/err")"; fi
@@ -95,7 +101,7 @@ bash "$ROOT/install.sh" 2>"$T/err" || fail "re-run failed: $(cat "$T/err")"
 grep -q 'already the latest' "$T/err" || fail "re-run downloaded again: $(cat "$T/err")"
 ok "re-running with the latest release already installed changes nothing"
 
-inode="$(stat -c %i "$HOME/cage/guest")"
+inode="$(stat -c %i "$HOME/cage/guest")" before="$(mtime)"
 echo "# from v9.9.9" >> "$T/src/README.md"
 commit rm -q cage.env.example
 commit commit -qam v9.9.9
@@ -106,6 +112,16 @@ tail -1 "$HOME/cage/README.md" | grep -q 'from v9.9.9' || fail "new files not in
 [ ! -e "$HOME/cage/cage.env.example" ] || fail "a file the new release dropped is still there"
 [ "$(stat -c %i "$HOME/cage/guest")" = "$inode" ] || fail "guest/ was replaced, not updated in place (running VMs mount it)"
 ok "updates to a newer release in place: same folders, new files, dropped files gone"
+[ "$(mtime)" -gt "$before" ] || fail "server.py has the same time in both releases ($before), so a running web app wouldn't restart"
+[ "$(mtime)" = "$(git -C "$T/src" log -1 --format=%ct)" ] || fail "server.py isn't dated by its release's commit"
+ok "files in a release are dated by its commit, so the running web app sees the update and restarts"
+
+"$T/src/scripts/build-release.sh" v9.9.7 "$T/b1" >/dev/null
+(umask 077; "$T/src/scripts/build-release.sh" v9.9.7 "$T/b2" >/dev/null)
+cmp -s "$T/b1/SHA256SUMS" "$T/b2/SHA256SUMS" || fail "the release depends on who builds it: $(diff "$T/b1/SHA256SUMS" "$T/b2/SHA256SUMS")"
+modes="$(tar -tvzf "$T/b1/cage-v9.9.7.tar.gz" | awk '{ print $1 }' | sort -u | tr '\n' ' ')"
+[ "$modes" = "-rw-r--r-- -rwxr-xr-x drwxr-xr-x " ] || fail "odd file modes in the release: $modes"
+ok "a release is the same bytes whoever builds it (any umask), with plain file modes"
 
 echo "# v9.9.10" >> "$T/src/README.md"
 commit commit -qam v9.9.10
