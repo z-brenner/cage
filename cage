@@ -1732,9 +1732,13 @@ phase() { # phase <agent>: what its VM is busy with, in words
   esac
 }
 
-# Waits until each agent's VM has finished installing. On a terminal the cages blink while they work.
-wait_ready() { # wait_ready <agent>...
-  local agents=("$@") a st t=0 n=$# drawn=0 all frame line start=$SECONDS seen=""
+# Waits until each agent's VM has finished installing. On a terminal the cages blink while they work. A VM that's
+# asleep or gone on two looks in a row has stopped while starting: cage says so, shows its last words, and doesn't
+# wait for it any longer.
+WAIT_STOPPED=""
+wait_ready() { # wait_ready <agent>...: sets WAIT_STOPPED to those that stopped
+  local agents=("$@") a st t=0 n=$# drawn=0 all frame line start=$SECONDS seen="" i gone=()
+  WAIT_STOPPED=""
   if [ "$UI" = 1 ]; then
     printf '\033[?25l' >&2
     trap 'printf "\033[?25h" >&2; printf "\n" >&2; say "they keep going in the background · cage shows how they are doing"; exit 130' INT
@@ -1745,16 +1749,26 @@ wait_ready() { # wait_ready <agent>...
     refresh_running
     all=1 frame=$(( t % 2 + 1 ))
     [ "$UI" = 1 ] && [ $drawn = 1 ] && printf '\033[%sA' "$n" >&2
-    for a in "${agents[@]}"; do
-      st="$(probe "$a")"
+    for i in "${!agents[@]}"; do
+      a="${agents[i]}"
+      if [[ " $WAIT_STOPPED " == *" $a "* ]]; then st=stopped
+      else
+        st="$(probe "$a")"
+        case "$st" in
+          asleep|none) gone[i]=$(( ${gone[i]:-0} + 1 ))
+            if [ "${gone[i]}" -ge 2 ]; then WAIT_STOPPED="${WAIT_STOPPED:+$WAIT_STOPPED }$a"; st=stopped; fi ;;
+          *) gone[i]=0 ;;
+        esac
+      fi
       case "$st" in
         ready|login) line="$(face "$a" ready)  $(printf '%-12s' "$a") ${C_OK}ready${C_0}" ;;
+        stopped) line="$(face "$a" stuck)  $(printf '%-12s' "$a") ${C_ERR}stopped while starting${C_0}" ;;
         *) all=0; line="$(face "$a" "busy$frame")  $(printf '%-12s' "$a") $(phase "$a")…" ;;
       esac
       if [ "$UI" = 1 ]; then printf '\r\033[2K  %s\n' "$line" >&2
       elif [[ " $seen " != *" $a:$st "* ]]; then   # without animation: each change once
         seen="$(printf '%s' "$seen" | sed "s/ $a:[a-z]*//") $a:$st"
-        case "$st" in ready|login) ok "$a is ready" ;; *) say "$a: $(phase "$a")…" ;; esac
+        case "$st" in ready|login) ok "$a is ready" ;; stopped) ;; *) say "$a: $(phase "$a")…" ;; esac
       fi
     done
     drawn=1
@@ -1767,6 +1781,13 @@ wait_ready() { # wait_ready <agent>...
     if [ "$UI" = 1 ]; then sleep 1; else sleep 5; fi
   done
   if [ "$UI" = 1 ]; then printf '\033[?25h' >&2; trap - INT; fi
+  local last
+  for a in $WAIT_STOPPED; do
+    last="$("$MSB" logs --tail 5 "$(vm "$a")" 2>/dev/null | safe_text || true)"   # the VM's own output: text only
+    if [ -n "$last" ]; then bad "$a stopped while starting. The last it said:"; block "$last"
+    else bad "$a stopped while starting"; fi
+    hint "cage logs $a"
+  done
 }
 
 # --- Windows: cage runs inside WSL 2 -------------------------------------------------------------------------
@@ -2151,60 +2172,92 @@ UNIT
   esac
 }
 
+# Wakes one agent: (re)creates its VM. cmd_up runs it as `( set -e; up_one <agent> <file> )`, so a problem with one
+# agent (a setting that's broken, msb refusing) stops only that one; what msb says goes to <file>.
+up_one() {
+  local a="$1" outbox=() netlog=() quiet=() tzarg=() tz kv
+  mkdir -p "$CAGE_HOME/agents/$a"
+  connector_plan "$a"
+  render_config "$a"
+  secret_plan "$a"
+  events_harvest "$a"   # its runtime log goes with the old VM
+  app_dirs "$a"
+  if [ -n "$(agent_features "$a")" ]; then
+    mkdir -p "$OUTBOX/$a" && chmod 700 "$OUTBOX" && chmod 777 "$OUTBOX/$a"   # written by the VM's agent user
+    outbox=(--mount-dir "$OUTBOX/$a:/cage-outbox")
+  fi
+  if [ "${CAGE_NETWORK:-open}" = strict ]; then netlog=(--log-level debug); fi   # blocked hosts are logged at debug
+  if [ "$UI" = 1 ]; then quiet=(-q); fi
+  tz="$(host_tz)"
+  [ -z "$tz" ] || tzarg=(-e "TZ=$tz")
+  if [ "$UI" = 1 ]; then printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2; fi
+  # Always (re)create: microsandbox runs the `--` command only on `msb run`; a plain start/restart boots
+  # the VM without it. Re-creating reprovisions the system disk, from this agent's cache volume (everything it
+  # downloaded before; seconds, and no vendor needed), and keeps the named home volume, so logins, sessions and
+  # work survive. It also applies config changes. `cage update` does the same with fresh downloads.
+  # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
+  # Secret values reach msb only through its environment (never its arguments, which `ps` shows).
+  for kv in ${SECRET_ENV[@]+"${SECRET_ENV[@]}"}; do export "${kv?}"; done
+  # shellcheck disable=SC2086
+  exec "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
+    -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
+    --mount-named "$(vm "$a")-home:/home/agent" --mount-named "$(vm "$a")-cache:/var/cache/cage" \
+    --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
+    --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
+    --mount-dir "$BRAIN/memory:/memory:ro" \
+    --mount-dir "$BRAIN/inbox/$a:/memory-inbox" --mount-dir "$APPDIR/$a:/cage-app" ${outbox[@]+"${outbox[@]}"} \
+    -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} ${tzarg[@]+"${tzarg[@]}"} \
+    ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
+    "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" 2>"$2"
+}
+
+msb_private() { # microsandbox keeps each agent's home volume (its logins, its work) here: for your eyes only
+  local m="${MSB_HOME:-$HOME/.microsandbox}" d
+  for d in "$m" "$m/volumes" "$m/db"; do
+    if [ -d "$d" ]; then chmod 700 "$d" 2>/dev/null || true; fi
+  done
+}
+
 cmd_up() {
   load_env
   resolve_agents "$@"
-  find_msb || die "microsandbox isn't installed; run cage to set it up"
+  find_msb || die "microsandbox isn't installed; run: cage fix"
+  msb_private
   brain_init "${AGENTS[@]}"
   if oauth_any; then oauth_refresh_all 1800; fi
-  local quiet=()
-  [ "$UI" = 1 ] && quiet=(-q)
+  local a rc err said started=() failed=()
+  err="$(mktemp)"
   for a in "${AGENTS[@]}"; do
-    mkdir -p "$CAGE_HOME/agents/$a"
-    connector_plan "$a"
-    render_config "$a"
-    secret_plan "$a"
-    events_harvest "$a"   # its runtime log goes with the old VM
-    app_dirs "$a"
-    local outbox=()
-    if [ -n "$(agent_features "$a")" ]; then
-      mkdir -p "$OUTBOX/$a" && chmod 700 "$OUTBOX" && chmod 777 "$OUTBOX/$a"   # written by the VM's agent user
-      outbox=(--mount-dir "$OUTBOX/$a:/cage-outbox")
+    : > "$err"
+    set +e
+    ( set -e; up_one "$a" "$err" )
+    rc=$?
+    set -e
+    if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; fi
+    if [ $rc = 0 ]; then
+      started+=("$a")
+      [ "$UI" = 1 ] || ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"
+    else
+      failed+=("$a")
+      said="$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;s/^error: *//;p;q;}' "$err" | safe_text | cut -c1-200)"
+      bad "couldn't start $a${said:+: $said}"
+      if [ -n "$said" ]; then hint "cage logs $a"; fi
     fi
-    local netlog=()
-    if [ "${CAGE_NETWORK:-open}" = strict ]; then netlog=(--log-level debug); fi   # blocked hosts are logged at debug
-    [ "$UI" = 1 ] && printf '  %s  %-12s %sbuilding its cage…%s' "$(face "$a" asleep)" "$a" "$C_DIM" "$C_0" >&2
-    # Always (re)create: microsandbox runs the `--` command only on `msb run`; a plain start/restart boots
-    # the VM without it. Re-creating reprovisions the system disk, from this agent's cache volume (everything it
-    # downloaded before; seconds, and no vendor needed), and keeps the named home volume, so logins, sessions and
-    # work survive. It also applies config changes. `cage update` does the same with fresh downloads.
-    # Default microsandbox network policy: public internet only; host, LAN, loopback and cloud metadata blocked.
-    # Secret values reach msb only through its environment (never its arguments, which `ps` shows).
-    # shellcheck disable=SC2086
-    local tzarg=() tz
-    tz="$(host_tz)"
-    [ -z "$tz" ] || tzarg=(-e "TZ=$tz")
-    ( for kv in ${SECRET_ENV[@]+"${SECRET_ENV[@]}"}; do export "${kv?}"; done
-    exec "$MSB" run -d --replace --name "$(vm "$a")" --label app=cage --label "cage.agent=$a" \
-      -c "$CAGE_CPUS" -m "$CAGE_MEMORY" --root-disk "$CAGE_ROOT_DISK" \
-      --mount-named "$(vm "$a")-home:/home/agent" --mount-named "$(vm "$a")-cache:/var/cache/cage" \
-      --mount-dir "$CAGE_ROOT/guest:/cage:ro" \
-      --mount-dir "$CAGE_HOME/agents/$a:/cage-config:ro" \
-      --mount-dir "$BRAIN/memory:/memory:ro" \
-      --mount-dir "$BRAIN/inbox/$a:/memory-inbox" --mount-dir "$APPDIR/$a:/cage-app" ${outbox[@]+"${outbox[@]}"} \
-      -e "CC_CONNECT_VERSION=$CAGE_CC_CONNECT_VERSION" ${CAGE_REFRESH:+-e CAGE_REFRESH=1} ${tzarg[@]+"${tzarg[@]}"} \
-      ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} ${netlog[@]+"${netlog[@]}"} ${quiet[@]+"${quiet[@]}"} ${CAGE_MSB_EXTRA_ARGS:-} \
-      "$CAGE_IMAGE" -- /bin/bash /cage/entry.sh "$a" )
-    if [ "$UI" = 1 ]; then printf '\r\033[2K' >&2; else ok "started $(vm "$a") ($CAGE_CPUS vCPU, $CAGE_MEMORY RAM)"; fi
   done
+  rm -f "$err"
+  # the others keep going: the keepalive (WSL) and the background helper are for the agents that did start
   if is_wsl; then wsl_keepalive_start; fi
   refresher_start
-  if { [ "$UI" = 1 ] || [ -n "$PROTO" ]; } && [ -t 0 ] && [ -z "${NO_WAIT:-}" ]; then
-    wait_ready "${AGENTS[@]}"
-    [ "${ONBOARDING:-0}" = 1 ] || next_steps
-  else
-    say "they're installing in the background (about a minute) · cage status"
+  if [ ${#started[@]} -gt 0 ]; then
+    if { [ "$UI" = 1 ] || [ -n "$PROTO" ]; } && [ -t 0 ] && [ -z "${NO_WAIT:-}" ]; then
+      wait_ready "${started[@]}"
+      for a in $WAIT_STOPPED; do failed+=("$a"); done
+      [ "${ONBOARDING:-0}" = 1 ] || [ ${#failed[@]} -gt 0 ] || next_steps
+    else
+      say "they're installing in the background (about a minute) · cage status"
+    fi
   fi
+  [ ${#failed[@]} -eq 0 ]
 }
 
 cmd_login() {
@@ -2216,7 +2269,7 @@ cmd_login() {
   refresh_running
   case "$(probe "$a")" in
     asleep) die "$a is asleep; wake it up first: cage up $a" ;;
-    installing) wait_ready "$a" ;;
+    installing) wait_ready "$a"; [ -z "$WAIT_STOPPED" ] || exit 1 ;;
   esac
   [ -n "$PROTO" ] || printf '\n  %s  %ssign %s in to %s%s\n' "$(face "$a" login)" "$C_B" "$a" "$(agent_plan "$a")" "$C_0" >&2
   hint "$(login_hint "$a")"

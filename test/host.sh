@@ -18,6 +18,9 @@ cat > "$T/bin/msb" <<'EOF'
 cmd="$1"; { printf '%s' "$cmd"; shift; for a in "$@"; do printf ' | %s' "$a"; done; echo; } >> "$MSB_LOG"
 if [ "$cmd" = inspect ]; then grep -qx "$1" "$MSB_EXISTING" 2>/dev/null; exit $?; fi
 if [ "$cmd" = run ] && [ -n "${MSB_ENV_LOG:-}" ]; then env | grep -E '^[A-Z0-9_]*(TOKEN|KEY)=' >> "$MSB_ENV_LOG" || true; fi
+if [ "$cmd" = run ] && [ -n "${MSB_FAIL_RUN:-}" ]; then   # msb refuses to start that VM
+  case " $* " in *" --name $MSB_FAIL_RUN "*) echo "error: failed to allocate 4G of memory" >&2; exit 1 ;; esac
+fi
 if [ "$cmd" = ps ]; then cat "${MSB_RUNNING:-$MSB_EXISTING}" 2>/dev/null; exit 0; fi
 if [ "$cmd" = exec ]; then
   vmname=""; for x in "$@"; do case "$x" in cage-*) vmname="$x"; break ;; esac; done
@@ -31,7 +34,7 @@ if [ "$cmd" = exec ]; then
       if [ -e "${MSB_WA_STATUS:-}.1" ]; then cat "$MSB_WA_STATUS.1"; rm -f "$MSB_WA_STATUS.1"; else cat "${MSB_WA_STATUS:-/dev/null}"; fi ;;
   esac
 fi
-if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; esac; exit 0; fi
+if [ "$cmd" = logs ]; then case "$*" in *"--source system"*) cat "$MSB_SYSLOG" 2>/dev/null ;; *) cat "${MSB_VMLOG:-/dev/null}" ;; esac; exit 0; fi
 if [ "$cmd" = volume ]; then   # named volumes are folders under $MSB_VOLUMES
   case "$1" in
     inspect) [ -d "$MSB_VOLUMES/$2" ] || exit 1; printf 'Name:           %s\nKind:           dir\nPath:           %s\n' "$2" "$MSB_VOLUMES/$2" ;;
@@ -42,6 +45,7 @@ exit 0
 EOF
 chmod +x "$T/bin/msb"
 export PATH="$T/bin:$PATH" CAGE_HOME="$T/home" MSB_LOG="$T/msb.log" MSB_EXISTING="$T/existing" MSB_VOLUMES="$T/volumes" CAGE_NO_SELF_UPDATE=1   # `cage update` here: only the agents
+export MSB_HOME="$T/msbhome"   # never your own ~/.microsandbox
 : > "$MSB_EXISTING"
 cage() { "$ROOT/cage" "$@"; }
 
@@ -310,7 +314,7 @@ fi
 # msb installed by the official installer but not on PATH (autostart and `wsl.exe --exec` have no login shell)
 mkdir -p "$T/h/.microsandbox/bin" && cp "$T/bin/msb" "$T/h/.microsandbox/bin/msb"
 : > "$MSB_LOG"
-HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
+env -u MSB_HOME HOME="$T/h" PATH="/usr/local/bin:/usr/bin:/bin" "$ROOT/cage" down claude 2>/dev/null || fail "cage could not find msb in ~/.microsandbox/bin"
 grep -qx 'stop | cage-claude' "$MSB_LOG" || fail "did not use ~/.microsandbox/bin/msb: $(cat "$MSB_LOG")"
 ok "finds msb in the installer's location when it isn't on PATH"
 
@@ -715,6 +719,43 @@ ok "website sign-ins: sites with look-alike names keep their own; found by site 
     || fail "the Groq key couldn't be replaced: $(cat "$T/u.err")"
   "$ROOT/cage" secret rm VOICE_GROQ_KEY </dev/null >/dev/null 2>&1 && [ ! -e "$CAGE_HOME/secrets/VOICE_GROQ_KEY" ] || fail "the Groq key couldn't be deleted" )
 ok "voice notes through Groq: the key reaches VMs only while that's on, is replaced when you say so, and can be deleted"
+
+# one agent that can't start (msb refuses it, or a setting of its own is broken) doesn't keep the others asleep
+( fresh b
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+  printf 'CAGE_AGENTS="claude codex cursor"\nCAGE_ASK_ALL="on"\n' >> "$CAGE_HOME/cage.env"
+  : > "$MSB_LOG"
+  rc=0; MSB_FAIL_RUN=cage-claude "$ROOT/cage" up </dev/null 2>"$T/b.err" || rc=$?
+  [ $rc = 1 ] || fail "up said all is well with an agent that didn't start (exit $rc): $(cat "$T/b.err")"
+  grep -q "couldn't start claude: failed to allocate 4G of memory" "$T/b.err" && grep -q 'cage logs claude' "$T/b.err" || fail "no plain message: $(cat "$T/b.err")"
+  for a in codex cursor; do grep -q -- "--name | cage-$a |" "$MSB_LOG" || fail "$a wasn't started after claude failed: $(cat "$T/b.err")"; done
+  for _ in $(seq 20); do pgrep -f -- "$ROOT/cage _refresh" >/dev/null && break; sleep 0.2; done
+  pgrep -f -- "$ROOT/cage _refresh" >/dev/null || fail "the background helper wasn't started"
+  echo 'CAGE_SLACK_BOT_TOKEN_codex="xoxb-short"' >> "$CAGE_HOME/cage.env"
+  : > "$MSB_LOG"
+  rc=0; "$ROOT/cage" up </dev/null 2>"$T/b2.err" || rc=$?
+  [ $rc = 1 ] && grep -q "codex's Slack tokens are broken" "$T/b2.err" && grep -q "couldn't start codex" "$T/b2.err" || fail "broken setting: $(cat "$T/b2.err")"
+  for a in claude cursor; do grep -q -- "--name | cage-$a |" "$MSB_LOG" || fail "$a wasn't started after codex's setting failed"; done
+  pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+  # microsandbox's own folder (each agent's login and work is in its volumes) is yours alone
+  mkdir -p "$MSB_HOME/volumes/cage-claude-home" "$MSB_HOME/db" && chmod 755 "$MSB_HOME" "$MSB_HOME/volumes" "$MSB_HOME/db"
+  "$ROOT/cage" up claude </dev/null 2>/dev/null
+  [ "$(stat -c %a "$MSB_HOME")$(stat -c %a "$MSB_HOME/volumes")$(stat -c %a "$MSB_HOME/db")" = 700700700 ] || fail "microsandbox's folder is readable by others" )
+ok "up: an agent that can't start is named, with why; the others start, and the helper too; ~/.microsandbox is private"
+
+# a VM that stops right after it's started: cage says so in seconds (not 15 minutes of "waking up"), with its last words
+if script --version 2>&1 | grep -q util-linux; then
+  ( fresh x
+    echo cage-claude > "$T/x.vms"; : > "$T/x.running"
+    printf 'provision[7]: base packages\nkernel: Out of memory: Killed process 42\n' > "$T/x.log"
+    start=$SECONDS rc=0
+    MSB_EXISTING="$T/x.vms" MSB_RUNNING="$T/x.running" MSB_VMLOG="$T/x.log" TERM=xterm-256color \
+      timeout 60 script -qfec "$ROOT/cage up claude" /dev/null </dev/null > "$T/x.out" 2>&1 || rc=$?
+    [ $rc = 1 ] && [ $((SECONDS - start)) -lt 30 ] || fail "waited on a VM that stopped (exit $rc after $((SECONDS - start)) s)"
+    grep -q 'claude stopped while starting' "$T/x.out" && grep -q 'Out of memory' "$T/x.out" && grep -q 'cage logs claude' "$T/x.out" \
+      || fail "a VM that stopped isn't explained: $(cat -v "$T/x.out" | tail -5)" )
+  ok "a VM that stops while starting is reported in seconds, with the last it said"
+fi
 
 # --- Windows (WSL 2): WSL stops an idle distro, and its VMs with it. `up` holds one hidden wsl.exe session
 # (`cage _keepalive`) open through PowerShell's Start-Process; `down` with no agents releases it.
