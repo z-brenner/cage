@@ -52,9 +52,11 @@ ui_init() {
   UI_TC=$tc
 }
 UI_TC=0
-# CAGE_PROTO=1: cage is being driven by its web app (host/ui/server.py). Messages, links, QR codes and questions
-# come out as JSON lines on stderr, each starting with an ASCII record separator (\036), and answers come in on
-# stdin, so every flow works in the browser exactly as it does here. Anything else printed is shown as is.
+# CAGE_PROTO=<code>: cage is being driven by its web app (host/ui/server.py). Messages, links, QR codes and questions
+# come out as JSON lines on stderr, each starting with an ASCII record separator (\036) and the code, and answers
+# come in on stdin, so every flow works in the browser exactly as it does here. Anything else printed is shown as is.
+# The code is new for every job and never goes into a VM, so what a VM prints (during a sign-in, in its logs) can't
+# pass for one of cage's questions. CAGE_PROTO=1 is the same without a code (the tests; an older web app).
 PROTO="${CAGE_PROTO:-}"
 [ -n "$PROTO" ] || ui_init
 
@@ -64,9 +66,10 @@ jstr() { # jstr <text>: a JSON string
   printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')"
 }
 event() { # event <type> <text> [,"more":…]
-  local t="$2"
+  local t="$2" code="$PROTO"
   t="${t#"${t%%[! ]*}"}"   # no leading spaces (where a face or the brand would be)
-  printf '\036{"t":"%s","text":%s%s}\n' "$1" "$(jstr "$t")" "${3:-}" >&2
+  [ "$code" != 1 ] || code=""
+  printf '\036%s{"t":"%s","text":%s%s}\n' "$code" "$1" "$(jstr "$t")" "${3:-}" >&2
 }
 
 IND="  "   # message indent; steps of the guided setup nest their messages under the step's title
@@ -2318,9 +2321,19 @@ outbox_process() { # handle what the agents' hooks left; everything in an outbox
   if [ -f "$OUTBOX/.seen" ] && [ "$(wc -l < "$OUTBOX/.seen")" -gt 200 ]; then tail -n 100 "$OUTBOX/.seen" > "$OUTBOX/.seen.tmp" && mv "$OUTBOX/.seen.tmp" "$OUTBOX/.seen"; fi
 }
 
+text_file() { # text_file <file> <var>: a question the web app handed over in a file (argv is visible to other users)
+  local f="${1:-}" d
+  d="$(cd "$CAGE_HOME/jobs" 2>/dev/null && pwd -P)" || die "no text from the web app at $f"
+  [[ "$(basename -- "$f")" =~ ^[A-Za-z0-9_-]+\.txt$ ]] && [ "$(cd "$(dirname -- "$f")" 2>/dev/null && pwd -P)" = "$d" ] \
+    && [ -f "$f" ] && [ ! -L "$f" ] || die "no text from the web app at $f"
+  printf -v "$2" '%s' "$(cat -- "$f")"
+  rm -f -- "$f"
+}
+
 cmd_ask() { # cage ask "<question>" [agents]: every awake agent answers here
   load_env
   find_msb || die "microsandbox isn't installed: run cage"
+  if [ "${1:-}" = --text-file ]; then local text; text_file "${2:-}" text; shift 2; set -- "$text" "$@"; fi
   local q="${1:-}" a n=0 tmp
   [ -n "$q" ] || die "usage: cage ask \"<question>\" [agents]"
   shift
@@ -2553,6 +2566,7 @@ cmd_mask() { # cage mask [on|off [agents] | add|rm <term> | list | try "<text>"]
       [ -z "${CAGE_MASK:-}" ] || features_apply ;;
     list) if [ -s "$MASK_TERMS" ]; then sed 's/^/  /' "$MASK_TERMS" >&2; else say "no terms of your own yet: cage mask add \"…\""; fi ;;
     try)
+      if [ "${1:-}" = --text-file ]; then text_file "${2:-}" t; set -- "$t"; fi
       [ -n "${1:-}" ] || die "usage: cage mask try \"<text>\""
       command -v python3 >/dev/null 2>&1 || die "this needs python3 on this computer"
       t="$(mktemp -d)"
@@ -2751,7 +2765,7 @@ cmd_security() {
 
 # --- the web app ----------------------------------------------------------------------------------------------------
 # `cage ui` starts host/ui/server.py on 127.0.0.1 and opens it in your browser, so you never need a terminal. The page
-# runs cage itself for everything it does (with CAGE_PROTO=1, see above) and reads `cage _state` for what it shows.
+# runs cage itself for everything it does (with CAGE_PROTO set, see above) and reads `cage _state` for what it shows.
 UI_PORT="${CAGE_UI_PORT:-7771}"
 jbool() { if "$@"; then printf true; else printf false; fi; }
 jlist() { local x out=""; for x in "$@"; do out="$out${out:+,}$(jstr "$x")"; done; printf '[%s]' "$out"; }   # jlist <strings…>
