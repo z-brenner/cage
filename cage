@@ -385,27 +385,50 @@ conf_get() { sed -n "/^$2=/{s/^$2=//p;q;}" "$1" 2>/dev/null || true; }   # conf_
 # backslash or a line break is refused (callers check values too, those from a chat service's API above all).
 # Several cage commands can change settings at once (the web app runs them side by side), so writers take turns
 # (a lock folder, which works on macOS too), and each writes a temp file next to it and moves it into place.
+lock_mkdir() { # lock_mkdir <dir>: 0 when made, 1 when it's there already
+  local why
+  why="$(LC_ALL=C mkdir "$1" 2>&1)" && return 0
+  case "$why" in *"File exists"*) return 1 ;; esac
+  # any other reason (a full disk, a folder that isn't yours) is said at once, never waited out as a lock nobody holds
+  why="${why##*: }"
+  die "cage can't write in $(dirname "$1") (${why:-is the disk full, or is that folder not yours?})"
+}
 lock_take() { # lock_take <dir>: waits its turn. A lock whose cage died, or that's been held for over 10 s, is taken over.
-  local i=0 holder
-  until mkdir "$1" 2>/dev/null; do
+  local i=0 holder seen="" stuck
+  until lock_mkdir "$1"; do
     holder="$(cat "$1/pid" 2>/dev/null || true)"
-    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || [ $i -ge 100 ]; then rm -rf "$1"; i=0; continue; fi
+    [ "$holder" = "$seen" ] || { seen="$holder"; i=0; }   # each holder gets its own 10 s
+    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || [ $i -ge 100 ]; then
+      # One waiter at a time takes a lock over, and only from the holder it judged: two waiters that both saw a dead
+      # holder must not both end up holding the lock (the second would remove the one the first had just made).
+      if lock_mkdir "$1.break"; then
+        stuck=""
+        if [ "$(cat "$1/pid" 2>/dev/null || true)" = "$holder" ]; then rm -rf "$1" 2>/dev/null || stuck=1; fi
+        rmdir "$1.break" 2>/dev/null || true
+        [ -z "$stuck" ] || die "cage can't remove $1, left by a cage that stopped; remove it, then try again"
+        i=0; continue
+      fi
+      [ $i -lt 150 ] || rmdir "$1.break" 2>/dev/null || true   # left by a cage that stopped right there
+    fi
     sleep 0.1; i=$((i + 1))
   done
-  echo $$ > "$1/pid"
+  { echo $$ > "$1/pid"; } 2>/dev/null || { rm -rf "$1"; die "cage can't write in $(dirname "$1") (is the disk full?)"; }
 }
 env_edit() { # env_edit <set NAME VALUE | unset NAME...>
   local lock="$CAGE_ENV.lock"
   lock_take "$lock"
-  ( trap 'rm -rf "$lock"' EXIT
+  # Each step is checked by hand (set -e is off on the left of ||): the settings are only ever replaced by a whole
+  # copy, never by one that a full disk cut short.
+  ( local mode="$1" tmp="" n pat=()
+    trap '[ -z "$tmp" ] || rm -f "$tmp"; rm -rf "$lock"' EXIT
     umask 077
-    local mode="$1" tmp n pat=()
     shift
     if [ "$mode" = set ]; then pat=(-e "^$1="); else for n in "$@"; do pat+=(-e "^$n="); done; fi
-    tmp="$(mktemp "$CAGE_ENV.XXXXXX")"
-    { grep -v "${pat[@]}" "$CAGE_ENV" || true; } > "$tmp"
-    if [ "$mode" = set ]; then printf '%s="%s"\n' "$1" "$2" >> "$tmp"; fi
-    mv "$tmp" "$CAGE_ENV" )
+    tmp="$(mktemp "$CAGE_ENV.XXXXXX")" || exit 1
+    { grep -v "${pat[@]}" "$CAGE_ENV" || [ $? = 1 ]; } > "$tmp" || exit 1   # (grep: 1 is "no lines left", 2 an error)
+    if [ "$mode" = set ]; then printf '%s="%s"\n' "$1" "$2" >> "$tmp" || exit 1; fi
+    mv "$tmp" "$CAGE_ENV" || exit 1
+    tmp="" ) || die "couldn't save your settings in $CAGE_ENV (is the disk full?)"
 }
 env_name_ok() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
 set_env() { # set_env NAME VALUE: upserts NAME="VALUE" in the env file

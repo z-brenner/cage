@@ -672,8 +672,27 @@ ok "opening links: plain web addresses only; on Windows passed to PowerShell as 
   done
   cmp -s "$CAGE_HOME/cage.env" "$T/a.env" && "$ROOT/cage" status >/dev/null 2>&1 && [ ! -e "$T/a.pwned" ] || fail "an unexpected value got into cage.env"
   mkdir "$CAGE_HOME/cage.env.lock" && echo 999999 > "$CAGE_HOME/cage.env.lock/pid"   # left by a cage that died
-  timeout 20 "$ROOT/cage" ask-all off </dev/null >/dev/null 2>&1 && grep -q '^CAGE_ASK_ALL="off"' "$CAGE_HOME/cage.env" || fail "a dead cage's lock blocked settings" )
-ok "settings: writers at once all keep their change; values that would be code are refused; a dead writer's lock is taken over"
+  timeout 20 "$ROOT/cage" ask-all off </dev/null >/dev/null 2>&1 && grep -q '^CAGE_ASK_ALL="off"' "$CAGE_HOME/cage.env" || fail "a dead cage's lock blocked settings"
+  # a dead cage's lock, and several writers at once: one of them takes it over, and they still take turns
+  for round in 1 2 3 4 5 6 7 8 9 10; do
+    printf 'CAGE_AGENTS="claude"\n' > "$CAGE_HOME/cage.env"
+    mkdir "$CAGE_HOME/cage.env.lock" && sh -c 'echo $$' > "$CAGE_HOME/cage.env.lock/pid"   # a pid that's gone
+    for k in 1 2 3 4 5 6 7 8; do bash -c '. "$1" version >/dev/null; set_env "CAGE_K$2" v' _ "$ROOT/cage" "$k" 2>>"$T/a.err" & done
+    wait
+    [ "$(grep -c '^CAGE_K' "$CAGE_HOME/cage.env")" = 8 ] && [ ! -s "$T/a.err" ] || fail "round $round: settings lost taking over a dead cage's lock: $(cat "$CAGE_HOME/cage.env" "$T/a.err")"
+  done
+  # settings that can't be saved (a full disk, a folder that isn't yours) are said to be, at once, never waited on
+  # forever; and a full disk never leaves a cut-short cage.env behind
+  mkdir -p "$T/abin" && printf '#!/bin/sh\ncase "$*" in *.lock) echo "mkdir: cannot create directory '"'"'$*'"'"': No space left on device" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$(command -v mkdir)" > "$T/abin/mkdir" && chmod +x "$T/abin/mkdir"
+  start=$SECONDS rc=0
+  PATH="$T/abin:$PATH" timeout 20 "$ROOT/cage" approve claude on </dev/null >/dev/null 2>"$T/a.err" || rc=$?
+  [ $rc = 1 ] && [ $((SECONDS - start)) -le 3 ] && grep -q "cage can't write in $CAGE_HOME (No space left on device)" "$T/a.err" \
+    || fail "settings that can't be saved: exit $rc after $((SECONDS - start)) s: $(cat "$T/a.err")"
+  cp "$ROOT/cage.env.example" "$CAGE_HOME/cage.env" && echo 'CAGE_ASK_ALL="on"' >> "$CAGE_HOME/cage.env" && cp "$CAGE_HOME/cage.env" "$T/a.env"
+  rc=0; ( ulimit -f 1; bash -c '. "$1" version >/dev/null; unset_env CAGE_ASK_ALL' _ "$ROOT/cage" ) 2>"$T/a.err" || rc=$?   # (1 KB of room)
+  [ $rc = 1 ] && cmp -s "$CAGE_HOME/cage.env" "$T/a.env" && grep -q "couldn't save your settings" "$T/a.err" \
+    || fail "a full disk cut cage.env short (exit $rc, $(wc -c < "$CAGE_HOME/cage.env") of $(wc -c < "$T/a.env") bytes): $(cat "$T/a.err")" )
+ok "settings: writers at once keep their change (a dead writer's lock too); code is refused; a full disk is said at once, never saved cut short"
 
 # text a VM wrote never reaches the terminal raw: WhatsApp's status (an OSC 52 sequence would set your clipboard)
 # and the host names in its logs
