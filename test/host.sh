@@ -717,6 +717,24 @@ ok "settings: writers at once keep their change (a dead writer's lock too); code
   if LC_ALL=C grep -q $'\033\\|\007' "$T/sec2.out"; then fail "a host name from a VM's log reached the terminal raw: $(cat -v "$T/sec2.out")"; fi )
 ok "text a VM wrote (WhatsApp's status, host names in its logs) reaches the terminal without control codes"
 
+# WhatsApp's code to scan, drawn by qrencode on a terminal: what the VM wrote is only ever the text of the code, never
+# an option (-r <file> would draw one of your files, for you to scan with your phone)
+if script --version 2>&1 | grep -q util-linux; then
+  ( fresh qr
+    printf 'CAGE_AGENTS="claude"\nCAGE_WHATSAPP_MODE_claude="spare"\nCAGE_WHATSAPP_ALLOW_claude="15551234567"\n' >> "$CAGE_HOME/cage.env"
+    echo cage-claude > "$T/qr.vms"; mkdir -p "$T/qrbin"
+    printf '#!/bin/sh\nprintf "%%s|" "$@" >> "%s/qr.args"; echo >> "%s/qr.args"; echo QR\n' "$T" "$T" > "$T/qrbin/qrencode"; chmod +x "$T/qrbin/qrencode"
+    export MSB_EXISTING="$T/qr.vms" MSB_RUNNING="$T/qr.vms" MSB_WA_STATUS="$T/qr.status" PATH="$T/qrbin:$PATH" TERM=xterm-256color
+    printf '{"state":"linked","me":"15551234567"}' > "$T/qr.status"
+    for code in "-r$T/zhome-key" '2@Xyz+/abc==,AbC/1+x=,Q2Fn=,ZGV2'; do
+      printf '{"state":"qr","qr":"%s"}' "$code" > "$T/qr.status.1"
+      timeout 60 script -qfec "$ROOT/cage chat link whatsapp claude" /dev/null </dev/null > "$T/qr.out" 2>&1 || fail "chat link whatsapp: $(cat -v "$T/qr.out")"
+      grep -q 'linked to +15551234567' "$T/qr.out" || fail "not linked: $(cat -v "$T/qr.out")"
+    done
+    [ "$(cat "$T/qr.args")" = '-t|ANSIUTF8|-m|2|--|2@Xyz+/abc==,AbC/1+x=,Q2Fn=,ZGV2|' ] || fail "qrencode was given: $(cat "$T/qr.args")" )
+  ok "WhatsApp's code to scan reaches qrencode as text only, never as an option"
+fi
+
 # host patterns like *.anthropic.com stay patterns, whatever files are in the folder cage runs from
 ( fresh h
   mkdir -p "$T/hcwd" && cd "$T/hcwd" && touch www.anthropic.com notes.example.com www.example.org

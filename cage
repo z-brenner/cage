@@ -1648,7 +1648,7 @@ chat_add_whatsapp() {
 
 qr_redraw() { # qr_redraw <text>: draws a QR code in place of the one drawn before (QR_LINES)
   local out n
-  out="$(qrencode -t ANSIUTF8 -m 2 "$1" 2>/dev/null | sed "s/^/$IND  /")" || return 0
+  out="$(qrencode -t ANSIUTF8 -m 2 -- "$1" 2>/dev/null | sed "s/^/$IND  /")" || return 0
   [ "${QR_LINES:-0}" -gt 0 ] && printf '\033[%sA\033[J' "$QR_LINES" >&2
   printf '%s\n' "$out" >&2
   n="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
@@ -1656,7 +1656,7 @@ qr_redraw() { # qr_redraw <text>: draws a QR code in place of the one drawn befo
 }
 
 whatsapp_link() { # whatsapp_link <agent>: shows the code to scan until the phone has linked
-  local a="$1" st state last="" code="" num i shown=0 me pc
+  local a="$1" st state last="" code="" num i shown=0 me pc odd=0
   [ -n "$(cvar WHATSAPP_MODE "$a")" ] || die "WhatsApp isn't on for $a: cage chat add whatsapp $a"
   refresh_running
   [[ "$RUNNING" == *" $(vm "$a") "* ]] || die "$a is asleep: cage up $a"
@@ -1684,7 +1684,11 @@ whatsapp_link() { # whatsapp_link <agent>: shows the code to scan until the phon
         elif [ -n "$me" ]; then hint "message +$me from your phone to talk to $a"
         else hint "message $a's number from your phone to talk to it"; fi
         return 0 ;;
-      qr) code="$(printf '%s' "$st" | jget qr)"; [ "$code" = "$last" ] || { last="$code"; qr_redraw "$code"; } ;;
+      qr) code="$(printf '%s' "$st" | jget qr)"
+          # also from the VM: what WhatsApp's codes are made of (never an option for qrencode, like -r <a file of yours>)
+          if [[ "$code" =~ ^[A-Za-z0-9@+/=][A-Za-z0-9@,+/=._:-]{0,1023}$ ]]; then
+            [ "$code" = "$last" ] || { last="$code"; qr_redraw "$code"; }
+          elif [ $odd = 0 ]; then odd=1; warn "the code to scan came out wrong, so cage doesn't show it"; fi ;;
       code) pc="$(printf '%s' "$st" | jget code)"
             if [ $shown = 0 ] && [[ "$pc" =~ ^[A-Z0-9-]{4,12}$ ]]; then
               say "Tap ${C_B}Link with phone number instead${C_0} and enter: ${C_B}$pc${C_0}"; shown=1
