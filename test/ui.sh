@@ -103,6 +103,40 @@ echo 'not a backup' > "$T/evil.cagebackup" && echo 'nor this' > "$T/backups/note
 for f in "$T/evil.cagebackup" "$T/backups/../evil.cagebackup" "$T/backups/notes.txt"; do
   [ "$(job "{\"args\":[\"restore\",\"$f\"]}")" = 403 ] && grep -q "backups from $T/backups only" "$T/job.out" || fail "restore from $f: $(cat "$T/job.out")"
 done
+# A VM can't swap the file while cage waits for the passphrase: a link in its chat folder points into the backups
+# folder for the check, then at a backup it planted (made with cage's own settings, and a passphrase it knows)
+F="$CAGE_HOME/app/claude/files"
+mkdir -p "$F/planted" "$T/stage/config"
+echo 'a real backup' > "$T/backups/mine.cagebackup"
+printf 'touch %q\n' "$T/planted-ran" > "$T/stage/config/cage.env"
+printf '{"created": "2026-01-01", "agents": ""}\n' > "$T/stage/manifest.json"
+tar -C "$T/stage" -c manifest.json config | gzip | openssl enc -aes-256-cbc -pbkdf2 -iter "$(sed -n 's/^BACKUP_ITER=//p' "$ROOT/cage")" \
+  -pass pass:planted-pass -out "$F/planted/mine.cagebackup"
+ln -s "$T/backups" "$F/link"
+[ "$(job "{\"args\":[\"restore\",\"$F/link/mine.cagebackup\"]}")" = 200 ] || fail "restore through a link into the backups folder: $(cat "$T/job.out")"
+python3 - "$B" "$TOK" "$(jid)" "$F" <<'PY' > "$T/restore.out" || fail "restore while the link changed: $(cat "$T/restore.out")"
+import json, os, sys, urllib.request
+base, tok, jid, F = sys.argv[1:]
+def answer(text):
+    req = urllib.request.Request(f"{base}/api/jobs/{jid}/input", json.dumps({"text": text}).encode(), {"X-Cage-Token": tok})
+    urllib.request.urlopen(req, timeout=10).read()
+for line in urllib.request.urlopen(f"{base}/api/jobs/{jid}/events?from=0&token={tok}", timeout=60):
+    if not line.startswith(b"data: "):
+        continue
+    ev = json.loads(line[6:])
+    if ev["t"] == "exit":
+        break
+    e = ev.get("event") or {}
+    print(e.get("t"), e.get("text"))
+    if e.get("t") == "prompt":   # waiting for the passphrase: the VM points its link at the planted backup
+        os.remove(F + "/link")
+        os.symlink(F + "/planted", F + "/link")
+        answer("planted-pass")
+    elif e.get("t") == "confirm":
+        answer("y")
+PY
+grep -q "^bad couldn't open that backup" "$T/restore.out" && [ ! -e "$T/planted-ran" ] || fail "a backup a VM planted was restored: $(cat "$T/restore.out")"
+rm -rf "$F" "$T/backups/mine.cagebackup" "$T/stage"
 for site in cross-site same-site; do
   [ "$(code -H "Sec-Fetch-Site: $site" "$B/logo.svg")" = 403 ] && [ "$(code -H "Sec-Fetch-Site: $site" "${H[@]}" "$B/api/state")" = 403 ] \
     && [ "$(code -H "Sec-Fetch-Site: $site" "$B/healthz")" = 403 ] || fail "a $site request was answered"
@@ -111,7 +145,7 @@ done
 fx=(-H "Sec-Fetch-Site: cross-site" -H "Sec-Fetch-Mode: navigate")   # a link on another website
 [ "$(code "${fx[@]}" -H "Sec-Fetch-Dest: document" "$B/")" = 200 ] && [ "$(code "${fx[@]}" -H "Sec-Fetch-Dest: iframe" "$B/")" = 403 ] \
   && [ "$(code "${fx[@]}" -H "Sec-Fetch-Dest: document" "${H[@]}" "$B/api/state")" = 403 ] || fail "a link from another website"
-ok "the app can't delete an agent, add flags, or restore from outside the backups folder; other websites get nothing"
+ok "the app can't delete an agent, add flags, or restore from outside the backups folder (not even through a link a VM changes); other websites get nothing"
 
 # Odd requests get a plain answer (and never a hang or a dropped connection)
 raw() { python3 - "$PORT" "$1" <<'PY'

@@ -814,6 +814,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             where, f = os.path.realpath(State.backups() or "/nonexistent"), os.path.realpath(args[1])
             if not (f.startswith(where + os.sep) and f.endswith(".cagebackup") and os.path.isfile(f)):
                 raise Refused(403, f"The app restores backups from {State.backups() or 'cage’s backups folder'} only. Put the file there first.")
+            # cage gets the file that was checked, not the path as sent: that may go through a link a VM can change
+            # (in its chat folder, say) while cage waits for the passphrase. No VM can write to the backups folder.
+            args = [cmd, f]
         text, text_file = b.get("text"), None
         if text is None and (cmd == "ask" or args == ["mask", "try"]):
             raise Refused(400, "the question goes in \"text\"")
