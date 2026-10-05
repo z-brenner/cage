@@ -627,8 +627,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.dumps(body).encode()
         elif isinstance(body, str):
             body = body.encode()
+        # An answer given without reading the request's body (no such job, say) ends the connection: what's left of
+        # that body would otherwise be read as the next request
+        unread = [("Connection", "close")] if self.headers.get("Content-Length", "0").strip() not in ("", "0") and not self.body_read else []
         self.head(status, [("Content-Type", ctype), ("Content-Length", str(len(body))), ("Cache-Control", "no-store"),
-                           ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer")] + list((extra or {}).items()))
+                           ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer")] + unread + list((extra or {}).items()))
         if self.command != "HEAD":
             self.wfile.write(body)
 
@@ -660,6 +663,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def read_body(self, n):
         """n bytes of the request's body, from a client that has 30 seconds to send them."""
+        self.body_read = True
         self.connection.settimeout(30)
         try:
             data = self.rfile.read(n) if n else b""
@@ -694,7 +698,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.route("PUT")
 
     def route(self, method):
-        self.sent = False
+        self.sent, self.body_read = False, False
         try:
             self.dispatch(method)
         except Refused as e:

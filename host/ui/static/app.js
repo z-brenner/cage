@@ -505,10 +505,11 @@ function terminal () {
   const fit = new FitAddon.FitAddon()
   term.loadAddon(fit)
   term.open(el)
-  const resize = () => { try { fit.fit(); api(`/api/jobs/${job.id}/resize`, { method: 'POST', body: { cols: term.cols, rows: term.rows } }).catch(() => {}) } catch (e) {} }
+  const id = job.id
+  const resize = () => { try { fit.fit(); api(`/api/jobs/${id}/resize`, { method: 'POST', body: { cols: term.cols, rows: term.rows } }).catch(() => {}) } catch (e) {} }
   if (!job.signin) setTimeout(resize, 220)   // after the panel has widened
   job.fitTerm = resize
-  window.addEventListener('resize', () => { if (!el.hidden) resize() })
+  window.addEventListener('resize', () => { if (job && job.term === term && !el.hidden) resize() })   // (this job's terminal only)
   term.onData((d) => send({ raw: btoa(String.fromCharCode(...new TextEncoder().encode(d))) }))
   if (!job.signin) term.focus()
   job.term = term

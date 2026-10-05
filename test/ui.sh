@@ -171,8 +171,24 @@ s=$SECONDS
 [ "$(code -m 5 -I "${H[@]}" "$B/api/chat/stream?from=claude:0")" = 405 ] && [ $((SECONDS - s)) -le 2 ] || fail "HEAD on the chat stream"
 curl --noproxy '*' -sI "$B/" | head -1 | grep -q 200 || fail "HEAD on the page"
 [ "$(code -X PUT "${H[@]}" -d '[1]' "$B/api/memory/about")" = 400 ] || fail "PUT with a list"
+python3 - "$PORT" "$TOK" <<'PY' || fail "the request after one whose body wasn't read (a resize for a job that's gone)"
+import re, socket, sys
+port, tok = sys.argv[1].encode(), sys.argv[2].encode()
+s = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
+body = b'{"cols":80,"rows":24}'
+s.sendall(b"POST /api/jobs/nosuchjob/resize HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nX-Cage-Token: %s\r\nContent-Length: %d\r\n\r\n%s"
+          % (port, tok, len(body), body) + b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:%s\r\n\r\n" % port)
+data = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+said = re.findall(rb"HTTP/1\.1 (\d{3}) ", data)   # (an answer can start right after the one before)
+assert said[0] == b"404" and b"501" not in said, data
+PY
 if grep -q Traceback "$CAGE_HOME/ui.log" 2>/dev/null; then fail "the server crashed on a request: $(cat "$CAGE_HOME/ui.log")"; fi
-ok "odd requests: a negative or missing size, chunks, not an object, HEAD on a stream, all answered at once"
+ok "odd requests: a negative or missing size, chunks, not an object, HEAD on a stream, all answered at once; a body left unread never passes for the next request"
 
 # A question for your agents goes to cage in a file (other users can read command lines), however long it is
 events() { # events <job id>: everything the job printed, as {"n","t",…} lines, once it has ended
