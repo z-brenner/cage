@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prints a version's release notes: its section of CHANGELOG.md, without the heading. Fails when that section is
-# missing or empty, so every release says in plain words what changed. Used by .github/workflows/release.yml.
+# missing, empty or still just CHANGELOG.md's placeholder ("Nothing yet."), so every release says in plain words what
+# changed. Used by .github/workflows/release.yml.
 #   scripts/release-notes.sh <tag> [changelog]
 set -euo pipefail
 TAG="${1:?usage: release-notes.sh <tag> [changelog]}"
@@ -16,7 +17,8 @@ notes="$(awk -v tag="$TAG" '
     e = n; while (e >= s && line[e] ~ /^[[:space:]]*$/) e--
     for (i = s; i <= e; i++) print line[i]
   }' "$FILE")"
-if [ -z "$notes" ]; then
+# an Unreleased section renamed to the version before anyone wrote its notes
+if [ -z "$notes" ] || [ "$notes" = "Nothing yet." ]; then
   echo "CHANGELOG.md has no notes for $TAG. Add a '## $TAG' section that says what's new, what changed and anything" >&2
   echo "to do after updating (see the top of CHANGELOG.md), commit it to main, then release again." >&2
   exit 1

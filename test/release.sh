@@ -80,6 +80,10 @@ Header text, with a ## that isn't at the start of the line.
 
 - something not released yet
 
+## v1.3.0 (2026-10-05)
+
+Nothing yet.
+
 ## v1.2.0 (2026-10-01)
 
 **New:** one.
@@ -95,14 +99,19 @@ EOF
 notes="$("$ROOT/scripts/release-notes.sh" v1.2.0 "$T/CHANGELOG.md")" || fail "no notes for v1.2.0"
 [ "$notes" = "$(printf '**New:** one.\n\n### Details\n- two')" ] || fail "wrong notes for v1.2.0: $notes"
 [ "$("$ROOT/scripts/release-notes.sh" v1.1.0 "$T/CHANGELOG.md")" = "Older." ] || fail "a section with no date or no blank line"
-for missing in v1.0.0 v1.2 v1.0.0-beta.1; do
+for missing in v1.0.0 v1.2 v1.3.0 v1.0.0-beta.1; do
   if out="$("$ROOT/scripts/release-notes.sh" "$missing" "$T/CHANGELOG.md" 2>&1)"; then
-    fail "release notes for '$missing', which has no section (or an empty one): $out"
+    fail "release notes for '$missing', which has no section (or an empty one, or just the placeholder): $out"
   fi
 done
 grep -q "## v1.0.0-beta.1' section" <<<"$out" && grep -q 'release again' <<<"$out" || fail "doesn't say what to do: $out"
-"$ROOT/scripts/release-notes.sh" Unreleased "$ROOT/CHANGELOG.md" >/dev/null || fail "the repository's CHANGELOG.md has no Unreleased section"
-ok "release notes: the version's CHANGELOG.md section; none, or an empty one, stops the release"
+# The repository's own CHANGELOG.md: each version in it has notes. That holds before a release (only Unreleased),
+# after one (the heading renamed, with or without a new Unreleased above it), and whatever Unreleased says meanwhile.
+[ -f "$ROOT/CHANGELOG.md" ] || fail "there's no CHANGELOG.md, so no release can be published"
+for v in $(sed -nE 's/^## (v[0-9][^ ]*).*/\1/p' "$ROOT/CHANGELOG.md"); do
+  out="$("$ROOT/scripts/release-notes.sh" "$v" "$ROOT/CHANGELOG.md" 2>&1)" || fail "$out"
+done
+ok "release notes: the version's CHANGELOG.md section; none, an empty one or just 'Nothing yet.' stops the release"
 
 # --- release.yml itself
 W="$ROOT/.github/workflows/release.yml"
