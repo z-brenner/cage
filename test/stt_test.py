@@ -3,7 +3,6 @@
     python3 test/stt_test.py
 """
 import http.client
-import http.server
 import importlib.util
 import json
 import os
@@ -26,15 +25,18 @@ stt.log = LOGS.append
 
 
 class FakeWhisper:
-    """What stt.py uses of faster_whisper.WhisperModel. Loading waits for `gate` (a download in progress) and
-    raises whatever is queued in `fail`."""
+    """What stt.py uses of faster_whisper.WhisperModel. Loading raises whatever is queued in `fail` (at once, like
+    no network), or else waits for `gate` (the model loading, or downloading). Transcribing b"slow" takes a moment,
+    and `most` is how many transcriptions ever ran at the same time."""
     gate = threading.Event()
     fail = []
+    running = 0
+    most = 0
 
     def __init__(self, name, **kw):
-        FakeWhisper.gate.wait(10)
         if FakeWhisper.fail:
             raise FakeWhisper.fail.pop(0)
+        FakeWhisper.gate.wait(10)
         self.name = name
 
     def transcribe(self, path, language=None, beam_size=5, vad_filter=True):
@@ -44,6 +46,11 @@ class FakeWhisper:
             raise RuntimeError("the model fell over")
         if vad_filter and data == b"no-vad":
             raise ImportError("onnxruntime")
+        FakeWhisper.running += 1
+        FakeWhisper.most = max(FakeWhisper.most, FakeWhisper.running)
+        if data == b"slow":
+            time.sleep(0.3)
+        FakeWhisper.running -= 1
         seg = types.SimpleNamespace
         return iter([seg(text=" heard "), seg(text=f"{len(data)} bytes, {language or 'any language'}")]), None
 
@@ -69,10 +76,12 @@ def form(fields):
 class Server(unittest.TestCase):
     def setUp(self):
         stt.state.update(model=None, error=None)
+        stt.settled.clear()
         FakeWhisper.gate.clear()
         FakeWhisper.fail.clear()
+        FakeWhisper.most = 0
         del LOGS[:]
-        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), stt.Handler)   # one request at a time, as in the VM
+        self.httpd = stt.server(0)   # the server the VM runs
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
 
@@ -80,6 +89,25 @@ class Server(unittest.TestCase):
         FakeWhisper.gate.set()
         self.httpd.shutdown()
         self.httpd.server_close()
+
+    def wait_for(self, what, ok, seconds=5):
+        end = time.time() + seconds
+        while not ok():
+            if time.time() > end:
+                self.fail(f"timed out waiting for {what}")
+            time.sleep(0.02)
+
+    def in_background(self, fn, *a, **kw):
+        """Runs fn in a thread; returns a function that waits for its result."""
+        out = {}
+        t = threading.Thread(target=lambda: out.update(result=fn(*a, **kw)), daemon=True)
+        t.start()
+
+        def result():
+            t.join(10)
+            self.assertFalse(t.is_alive(), "still waiting for an answer")
+            return out["result"]
+        return result
 
     def request(self, method, path, fields=None, headers=None, timeout=5):
         c = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=timeout)
@@ -108,24 +136,36 @@ class Parsing(unittest.TestCase):
 
 
 class WhileLoading(Server):
-    def test_answers_at_once_while_the_model_downloads(self):
+    def setUp(self):
+        super().setUp()
+        self.wait = stt.WAIT
+        self.addCleanup(setattr, stt, "WAIT", self.wait)
+
+    def test_the_server_waits_two_minutes_at_most_well_inside_cc_connects_five(self):
+        self.assertEqual(self.wait, 120)
+
+    def test_a_voice_note_sent_while_the_model_loads_waits_for_it(self):
+        # every boot: the model takes a few seconds to load from disk, and voice notes sent while the VM was asleep
+        # arrive at once
+        threading.Thread(target=stt.load, daemon=True).start()
+        answer = self.in_background(self.post, {"file": ("note.ogg", b"abc")}, timeout=10)
+        time.sleep(0.5)
+        status, _, body = self.request("GET", "/health")   # the others aren't held up meanwhile
+        self.assertEqual((status, json.loads(body)["ready"]), (503, False))
+        FakeWhisper.gate.set()   # loaded
+        status, _, body = answer()
+        self.assertEqual((status, json.loads(body)), (200, {"text": "heard 3 bytes, any language"}))
+        self.assertEqual(self.request("GET", "/health")[0], 200)
+
+    def test_a_model_that_takes_longer_than_the_wait_gets_a_plain_try_again(self):
+        stt.WAIT = 0.3
         threading.Thread(target=stt.load, daemon=True).start()
         t = time.time()
         status, ctype, body = self.post({"file": ("note.ogg", b"abc")})
-        self.assertLess(time.time() - t, 2)
-        self.assertEqual(status, 503)
-        self.assertEqual(json.loads(body), {"error": {"message": "the speech model is still downloading, try again in a minute"}})
-        status, _, body = self.request("GET", "/health")
-        self.assertEqual((status, json.loads(body)["ready"]), (503, False))
-
-        FakeWhisper.gate.set()   # the download finishes
-        for _ in range(100):
-            if stt.state["model"] is not None:
-                break
-            time.sleep(0.05)
-        status, _, body = self.post({"file": ("note.ogg", b"abc")})
-        self.assertEqual((status, json.loads(body)), (200, {"text": "heard 3 bytes, any language"}))
-        self.assertEqual(self.request("GET", "/health")[0], 200)
+        self.assertGreaterEqual(time.time() - t, 0.3)
+        self.assertEqual((status, ctype), (503, "application/json"))
+        self.assertEqual(json.loads(body), {"error": {"message":
+                         "the speech model is still getting ready (the first time, it downloads); try again in a minute"}})
 
     def test_the_download_says_how_far_it_got(self):
         models = tempfile.mkdtemp(prefix="cage-stt-")
@@ -147,30 +187,60 @@ class WhileLoading(Server):
         loading.join(5)
         self.assertIn("model base loaded", LOGS)
 
+    def test_a_downloaded_file_counts_once_though_the_cache_links_to_it(self):
+        models = tempfile.mkdtemp(prefix="cage-stt-")
+        self.addCleanup(shutil.rmtree, models, True)
+        # huggingface_hub's cache: the file once under blobs/, and a link to it under snapshots/
+        blobs = os.path.join(models, "models--Systran--faster-whisper-base", "blobs")
+        snap = os.path.join(models, "models--Systran--faster-whisper-base", "snapshots", "abc123")
+        os.makedirs(blobs)
+        os.makedirs(snap)
+        with open(os.path.join(blobs, "f00d"), "wb") as f:
+            f.write(b"\0" * 3000)
+        os.symlink(os.path.join("..", "..", "blobs", "f00d"), os.path.join(snap, "model.bin"))
+        with open(os.path.join(blobs, "beef.incomplete"), "wb") as f:   # one still downloading
+            f.write(b"\0" * 500)
+        self.assertEqual(stt.downloaded(models), 3500)
+
     def test_a_model_that_wont_load_is_tried_again_and_said_meanwhile(self):
-        FakeWhisper.gate.set()
         FakeWhisper.fail.append(OSError("no network"))
-        stt.load(wait=0.01)
-        self.assertIsNotNone(stt.state["model"])
-        self.assertIsNone(stt.state["error"])
+        loading = threading.Thread(target=stt.load, kwargs={"wait": 0.5}, daemon=True)
+        loading.start()
+        self.wait_for("the first try to fail", lambda: stt.state["error"])
+        t = time.time()
+        status, _, body = self.post({"file": ("note.ogg", b"abc")})
+        self.assertLess(time.time() - t, 0.4, "no point waiting: it's between tries")
+        self.assertEqual((status, json.loads(body)),
+                         (503, {"error": {"message": "the speech model couldn't load yet; it will try again later"}}))
+        self.assertEqual(json.loads(self.request("GET", "/health")[2])["error"], "OSError: no network")
         self.assertTrue(any("no network" in m and "trying again" in m for m in LOGS), LOGS)
-        stt.state.update(model=None, error="OSError: no network")
+
+        # the next try is downloading: a voice note now hears that, not about the try that failed
+        self.wait_for("the next try", lambda: stt.state["error"] is None)
+        stt.WAIT = 0.2
         status, _, body = self.post({"file": ("note.ogg", b"abc")})
         self.assertEqual(status, 503)
-        self.assertIn("couldn't load (OSError: no network)", json.loads(body)["error"]["message"])
+        self.assertIn("still getting ready", json.loads(body)["error"]["message"])
+        FakeWhisper.gate.set()
+        loading.join(5)
+        self.assertIsNotNone(stt.state["model"])
+        status, _, body = self.post({"file": ("note.ogg", b"abc")})
+        self.assertEqual((status, json.loads(body)), (200, {"text": "heard 3 bytes, any language"}))
 
-    def test_a_client_that_stops_sending_does_not_hold_the_server(self):
+    def test_a_client_that_stops_sending_does_not_hold_the_others_and_is_dropped(self):
         self.assertEqual(stt.Handler.timeout, 60)
         stt.Handler.timeout = 0.5   # the same rule, faster
         try:
             self.loaded()
             stalled = socket.create_connection(self.httpd.server_address)
+            self.addCleanup(stalled.close)
             stalled.sendall(b"POST /v1/audio/transcriptions HTTP/1.1\r\nContent-Length: 1000\r\n\r\nonly part of it")
             t = time.time()
             status, _, _ = self.post({"file": ("note.ogg", b"abc")}, timeout=5)
             self.assertEqual(status, 200)
-            self.assertLess(time.time() - t, 4)
-            stalled.close()
+            self.assertLess(time.time() - t, 0.4)
+            stalled.settimeout(5)
+            self.assertEqual(stalled.recv(100), b"", "the stalled connection is closed after the time-out")
         finally:
             stt.Handler.timeout = 60
 
@@ -185,6 +255,12 @@ class Requests(Server):
         self.assertEqual((status, ctype, json.loads(body)), (200, "application/json", {"text": "heard 5 bytes, de"}))
         status, ctype, body = self.post({"file": ("note.ogg", b"hello"), "response_format": "text"})
         self.assertEqual((status, ctype, body), (200, "text/plain; charset=utf-8", b"heard 5 bytes, any language\n"))
+
+    def test_transcriptions_take_turns(self):
+        answers = [self.in_background(self.post, {"file": ("note.ogg", b"slow")}) for _ in range(3)]
+        for answer in answers:
+            self.assertEqual(answer()[0], 200)
+        self.assertEqual(FakeWhisper.most, 1)
 
     def test_without_silence_detection_when_that_fails(self):
         status, _, body = self.post({"file": ("note.ogg", b"no-vad")})

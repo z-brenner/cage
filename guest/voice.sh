@@ -52,7 +52,7 @@ fi
 
 [ "$MODE" = local ] || exit 0
 # The first time, stt.py downloads the Whisper model while it already answers (and logs how far the download got):
-# until the model is there, a voice note gets "still downloading, try again in a minute" at once, not a time-out.
+# a voice note waits for the model up to 2 minutes, then gets a plain "try again in a minute", not a time-out.
 delay=5
 while true; do
   log "speech-to-text on 127.0.0.1:$PORT (Whisper ${MODEL:-base})"
