@@ -3753,7 +3753,7 @@ usage() {
   row "  restart [agents]" "a fresh VM for each, same login and files"
   row "  down [agents]" "put agents to sleep"
   row "  login <agent>" "sign an agent in to your subscription"
-  row "  logs <agent> [-f]" "what an agent's VM printed lately (-f: follow it)"
+  row "  logs <agent> [-f]" "what an agent's VM printed lately (--tail N: that many lines; -f: follow it)"
   row "  shell <agent>" "a shell inside an agent's cage"
   row "  memory [open]" "review what your agents want to remember"
   row "  chat [add|rm]" "talk to them in Slack, Discord or WhatsApp too (rm: Telegram too)"
