@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Every fast check, one after another: what CI's "lint + host tests" job runs, so a green run here means a green job
-# there. Shows each suite's output as it goes, then a summary with how long each took.
+# Every fast check, one after another: what CI's "lint + host tests" job runs through this script. That job also runs
+# the host, setup, sign-in and mask suites under bash 3.2 (what macOS ships) and checks install.ps1 with PowerShell,
+# which this doesn't; for bash 3.2 here, run the docker command in .github/workflows/ci.yml's "bash 3.2" step.
+# Shows each suite's output as it goes, then a summary with how long each took.
 #   test/all.sh                    every suite
 #   test/all.sh host ui            only these (names as in the summary)
 #   test/all.sh --skip mask unit   all but these
@@ -27,22 +29,26 @@ wanted() {
   [ -z "$ONLY" ] || case " $ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
-js_parses() { # every script parses: the VM's, the web app's, the tests'
+js_parses() { # every script parses: the VM's, the web app's, the tests' (and their fixtures')
   local f rc=0
-  for f in guest/*.mjs host/ui/static/*.js test/*.mjs; do node --check "$f" || rc=1; done
+  for f in guest/*.mjs host/ui/static/*.js test/*.mjs test/*/*.mjs; do node --check "$f" || rc=1; done
   return $rc
 }
 python_compiles() { # every Python file compiles (the bytecode goes to a temp folder, not next to the sources)
   PYTHONPYCACHEPREFIX="$T/pycache" python3 -m py_compile host/*.py host/ui/*.py guest/*.py test/*.py
 }
-node_unit() { # node's own test runner, on every test/*.test.mjs but the browser test (the ui suite runs that one)
-  local f files=()
+# node's own test runner on every test/*.test.mjs but the browser test (the ui suite runs that one), then each Python
+# unit test, test/*_test.py
+unit_tests() {
+  local f files=() rc=0
   for f in test/*.test.mjs; do [ "$f" = test/ui.test.mjs ] || files+=("$f"); done
-  node --test "${files[@]}"
+  node --test "${files[@]}" || rc=1
+  for f in test/*_test.py; do echo "# $f"; PYTHONPYCACHEPREFIX="$T/pycache" python3 "$f" || rc=1; done
+  return $rc
 }
 have_playwright() { [ -n "${PLAYWRIGHT_MODULE:-}" ] || [ -d "$(npm root -g 2>/dev/null)/playwright" ]; }
 
-results=() failed=0 skipped=0
+results=() failed=0 skipped=0 ran_failed=0
 now_ms() { # bash 5 has the time to the microsecond (with the locale's decimal mark); older bash, to the second
   local t="${EPOCHREALTIME:-}"
   if [ -n "$t" ]; then t="${t//[.,]/}"; echo $((t / 1000)); else echo $((SECONDS * 1000)); fi
@@ -66,7 +72,7 @@ run() {
     results+=("$(printf '  ok       %-15s %8s' "$name" "$(took "$ms")")")
     echo "-- $name: ok ($(took "$ms"))"
   else
-    failed=1
+    failed=1 ran_failed=1
     results+=("$(printf '  FAILED   %-15s %8s' "$name" "$(took "$ms")")")
     if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::error title=test/all.sh::$name failed"; fi
     echo "-- $name: FAILED ($(took "$ms"))"
@@ -93,7 +99,7 @@ run js js_parses
 run python python_compiles
 run pins test/pins.sh
 run mask test/mask.sh
-run unit node_unit
+run unit unit_tests
 # guest/provision.sh's functions with stubs, where this checkout has that test
 if [ -f test/provision-unit.sh ]; then run provision-unit test/provision-unit.sh; fi
 if wanted host && [ -z "${CAGE_TEST_CC_CONNECT:-}" ]; then
@@ -103,7 +109,8 @@ run host test/host.sh
 run setup test/setup.sh
 run oauth test/oauth.sh
 run installer test/installer.sh
-run release test/release.sh
+if command -v jq >/dev/null; then run release test/release.sh
+else skip release "no jq (its stub gh needs it)"; fi
 if have_playwright; then run ui test/ui.sh
 else skip ui "no playwright (set PLAYWRIGHT_MODULE, or npm install -g playwright)"; fi
 
@@ -112,7 +119,8 @@ echo
 echo "== summary"
 printf '%s\n' "${results[@]}"
 total="$(took $(($(now_ms) - start)))"
-if [ "$failed" -ne 0 ]; then echo "FAILED (see above) after $total"
+if [ "$ran_failed" -ne 0 ]; then echo "FAILED (see above) after $total"
+elif [ "$failed" -ne 0 ]; then echo "FAILED after $total: not every suite could run here"
 elif [ "$skipped" -gt 0 ]; then echo "the rest passed, $skipped skipped, in $total"
 else echo "all passed in $total"; fi
 exit "$failed"
