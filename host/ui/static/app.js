@@ -767,7 +767,8 @@ function approvalRow (a, p, pos, placed) {
   const sub = [h('span', { dir: 'ltr' }, parts), p.at ? ' · ' + when(p.at) : '']
   if (!approvalWhole(ap)) {
     const why = ap.unseen ? 'It has characters that don’t show: open it to see where.' : ap.mixed ? 'It mixes letters from different alphabets: open it to see where.'
-      : ap.rtl ? 'Some of it is written right to left: open it to see it in the order it’s sent.' : 'Only part of it fits here: open it to see all it asks.'
+      : ap.rtl ? 'Some of it is written right to left: open it to see it in the order it’s sent.' : ap.blind ? 'It doesn’t say what it would write in the file.'
+        : 'Only part of it fits here: open it to see all it asks.'
     return row([...sub, '. ' + why], open(true), answer('perm:deny', 'sm'))
   }
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
@@ -1588,7 +1589,9 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const all = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])]
   // (words to read, written partly right to left: the text, a subject, a title, instructions)
   const rtl = [body, ...fields.filter(([, , k]) => PROSE.includes(k)).map(([, v]) => v)].some((s) => RTL.test(s))
-  return { raw, tool, what, via, fields, body, bodyKey, inWhat, keys: Object.keys(args), cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0, rtl }
+  // (a file to write or change, of which cc-connect sends only the name: not what it would write)
+  const blind = /^(Write|Edit)$/i.test(tool)
+  return { raw, tool, what, via, fields, body, bodyKey, inWhat, keys: Object.keys(args), cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0, rtl, blind }
 }
 // In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
 // U+FEFF or U+2028 is a space to \s, and then a space is all it would show.) A question not in cc-connect's words is
@@ -1623,12 +1626,13 @@ function moreOf (ap) {
 // of a command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
 // characters that don't show, letters from another alphabet that look like these, or names that read alike; nor when
 // words on it are written partly right to left (Home draws them as written words are, and what's next to them, a
-// number say, may be drawn in another order than it's sent: the card has it in order). Nor when
+// number say, may be drawn in another order than it's sent: the card has it in order). Nor for a file to write or
+// change, of which cc-connect sends only the name: what it would write in it is in no request. Nor when
 // it's as long as what Home has of it: server.py's activity() keeps the first 4,000 characters, and a "```" in a
 // longer one would end what Home reads of it there.
 function approvalWhole (ap) {
   const shown = new Set([ap.inWhat, ...moreOf(ap).keys].filter(Boolean))   // ("": nothing; not a field named "")
-  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && !ap.rtl && [...ap.raw].length < 4000 &&
+  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && !ap.rtl && !ap.blind && [...ap.raw].length < 4000 &&
     approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap)) && ap.keys.every((k) => shown.has(k))
 }
 function approvalView (ap) { // what the card shows above its buttons
@@ -1636,6 +1640,7 @@ function approvalView (ap) { // what the card shows above its buttons
     ap.unseen && 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.',
     ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.',
     ap.alike && 'Some names in this read the same, like “to” and “TO”. The app may use either one, so each is shown with the name it was sent with.',
+    ap.blind && 'It doesn’t say what it would write in the file, only which file it is.',
     ap.rtl && 'Some of the words in this are written right to left, as Hebrew and Arabic are, so what’s next to them, a number say, may be drawn in another order than it’s sent. Exactly what it asked, at the end, has all of it in the order it’s sent.'
   ].filter(Boolean).map((text) => h('p', { class: 'note warn' }, icon('triangle-alert'), text))
   if (!ap.what) return [...odd, h('pre', { class: 'approval-text exact' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
