@@ -57,6 +57,13 @@ cc_connect_stopped() { # cc_connect_stopped <exit code> <seconds it ran>: says s
   log "cc-connect exited with $1; restarting in ${pause}s"
 }
 
+# The privacy mask's own terms (cage mask add), readable by the agent user that runs guest/mask.py. Swapped in whole:
+# `install` alone deletes the old copy, then writes the new one unreadable at first, and a CLI that cage asks behind the
+# mask meanwhile (its ask_agent, which can come before this) would find no terms at all.
+terms_in_place() { # terms_in_place <from> <to>
+  if [ -r "$1" ]; then install -m 644 "$1" "$2.new" && mv -f "$2.new" "$2"; else rm -f "$2"; fi
+}
+
 if [ "${CAGE_ENTRY_LIB:-}" = 1 ]; then return 0; fi   # test/provision-unit.sh: just the functions above
 
 if ! id "$U" >/dev/null 2>&1; then
@@ -106,8 +113,7 @@ for v in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_
   if [[ "${!v}" =~ ^\$(MSB_[A-Z0-9_]+)$ ]]; then printf '%s=%q\n' "${BASH_REMATCH[1]}" "${!v}"; fi
 done > /etc/cage/runtime.env
 chmod 644 /etc/cage/runtime.env
-# The privacy mask's own terms (cage mask add), readable by the agent user that runs guest/mask.py
-if [ -r /cage-config/mask.terms ]; then install -m 644 /cage-config/mask.terms /etc/cage/mask.terms; else rm -f /etc/cage/mask.terms; fi
+terms_in_place /cage-config/mask.terms /etc/cage/mask.terms || log "couldn't put the privacy mask's terms in place"
 bash /cage/memory.sh "$KIND" || log "could not wire memory (continuing without it)"
 bash /cage/connectors.sh "$KIND" || log "could not wire connectors (continuing without them)"
 

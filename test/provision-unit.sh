@@ -348,6 +348,16 @@ STUB_PROVISION=ok
 try 1 15 && [ ! -s "$T/out" ] || fail "a try that worked: $(shown)"
 unset CAGE_PROVISION_LIMIT STUB_PROVISION
 ok "provisioning: each try has a time limit, longer each time; cage update uses the cache after 2 tries; cage status sees each failure"
+# your mask terms: swapped in whole, so the copy guest/mask.py reads is never the one being written (or gone meanwhile)
+terms() { install() { echo "install $*" >> "$T/calls"; command install "$@"; }; terms_in_place "$@"; }
+mkdir -p "$T/etc"; printf 'Old Corp\n' > "$T/etc/mask.terms"; printf 'Acme Corp\nBeta Client\n' > "$T/terms"
+: > "$T/calls"
+entry terms "$T/terms" "$T/etc/mask.terms" || fail "terms_in_place: $(shown)"
+[ "$(cat "$T/etc/mask.terms")" = $'Acme Corp\nBeta Client' ] && [ "$(stat -c %a "$T/etc/mask.terms")" = 644 ] \
+  && [ "$(ls -A "$T/etc")" = mask.terms ] || fail "your terms: $(ls -lA "$T/etc"; cat "$T/etc/mask.terms")"
+grep -q "^install -m 644 $T/terms $T/etc/mask.terms\.new\$" "$T/calls" || fail "the copy mask.py reads was written in place: $(shown)"
+entry terms "$T/none" "$T/etc/mask.terms" && [ -z "$(ls -A "$T/etc")" ] || fail "terms left behind with none to give: $(ls -A "$T/etc")"
+ok "your privacy mask's terms are swapped in whole for guest/mask.py, and removed when there are none"
 waits=""; p=0
 for ran in 1 1 1 1 1 1 400 1; do p="$(entry restart_wait "$p" "$ran")"; waits="$waits $p"; done
 [ "$waits" = " 5 10 20 40 60 60 5 10" ] || fail "cc-connect's restart waits:$waits"
