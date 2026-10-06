@@ -48,26 +48,42 @@ jobs:
           test/mask-vm.sh
       - name: "unit tests: node's (the WhatsApp adapter, the app's chat relay) and Python's (speech-to-text in the VM, the web app's server)"
         run: test/all.sh unit
-      - name: a real cc-connect (to check the configs cage writes) and Playwright (for the web app)
+      - name: a real cc-connect, to check the configs cage writes
         run: |
           curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/cc-connect.tgz" \
             https://github.com/chenhg5/cc-connect/releases/download/v1.5.1-beta.3/cc-connect-v1.5.1-beta.3-linux-amd64.tar.gz
           echo "4c969474d9e971395f36842646ef42a519557e90e0fee4eba128a4ba786ac21a  $RUNNER_TEMP/cc-connect.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/cc-connect.tgz" -C "$RUNNER_TEMP"
-          npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
-      # CAGE_TEST_NO_SKIP: a suite that can't run here (no Playwright, say) fails the job instead of being skipped
-      - name: the other fast checks, as a local test/all.sh runs them (mask and unit are the two steps above)
+      # CAGE_TEST_NO_SKIP: a suite that can't run here (no actionlint, say) fails the job instead of being skipped
+      - name: the other fast checks, as a local test/all.sh runs them (mask and unit are the two steps above; ui is its own job)
         env:
           CAGE_TEST_NO_SKIP: 1
           CAGE_TEST_CC_CONNECT: ${{ runner.temp }}/cc-connect-v1.5.1-beta.3-linux-amd64
-          PLAYWRIGHT_MODULE: ${{ runner.temp }}/pw/node_modules/playwright
-        run: CAGE_TEST_CHROME="$(command -v google-chrome)" test/all.sh --skip mask unit
+        run: test/all.sh --skip mask unit ui
       # util-linux's script gives the tests a terminal, for the colour and mascot test (busybox has no script)
       - name: host, setup, sign-in and privacy mask tests (bash 3.2, as shipped on macOS)
         run: >
           docker run --rm -v "$PWD:/w:ro" -w /w bash:3.2
           sh -c 'apk add -q python3 curl tar openssl util-linux-misc >/dev/null
           && bash test/host.sh && bash test/setup.sh && bash test/oauth.sh && bash test/mask.sh'
+
+  # The web app in a real browser: the longest of the fast suites (about 3 minutes), in a job of its own, so a slow run
+  # of it can't time out the checks above
+  ui:
+    name: web app (in Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Playwright
+        run: npm install --no-save --no-fund --no-audit --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 >/dev/null
+      - name: the web app's suite, as test/all.sh runs it
+        env:
+          CAGE_TEST_NO_SKIP: 1
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/pw/node_modules/playwright
+        run: CAGE_TEST_CHROME="$(command -v google-chrome)" test/all.sh ui
 
   windows-installer:
     name: windows installer (check only)
