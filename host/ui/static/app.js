@@ -1504,12 +1504,14 @@ function looseJSON (text) { // the tool's input as {args, cut, open}: JSON, or J
   if (!t.endsWith('...')) return null
   // closed off where it was cut (half an escape and a dangling comma dropped first), as far as it goes; and which value
   // that closed off (open): cut right after "cc": or "cc":", it's null or "" only because it was cut there. (Which one
-  // that is: the one that changes when it's closed off with something in it instead.)
+  // that is: the one that changes when it's closed off with something in it instead; for a list cut after an item,
+  // "cc":["", one more item in it.)
   const cut = t.slice(0, -3).replace(/\\+$/, (s) => s.length % 2 ? s.slice(1) : s).replace(/,\s*$/, '')
   for (const end of ['"}', '}', '":null}', 'null}', '"]}', ']}', '"}}', '}}', '"}]}']) {
     const o = obj(cut + end)
     if (!o) continue
-    const alt = obj(cut + (end.includes('null') ? end.replace('null', '0') : /^["\]]/.test(end) ? '0' + end : end)) || o
+    const alt = obj(cut + (end.includes('null') ? end.replace('null', '0') : /^["\]]/.test(end) ? '0' + end : end)) ||
+      (end[0] === ']' && obj(cut + ',0' + end)) || o
     return { args: o, cut: true, open: Object.keys(o).find((k) => JSON.stringify(o[k]) !== JSON.stringify(alt[k])) }
   }
   return null
@@ -1579,9 +1581,10 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const bodyKey = APPROVAL_BODY.find((k) => typeof args[k] === 'string' && args[k].trim())
   const known = (k) => APPROVAL_FIELDS.some(([f]) => f === k)
   // Each field it sends, an empty one too ("cc": "", null or []: it's on no line, so Home offers no Allow for it, and
-  // the card shows why), as "" (which the card says is empty); but for one that's empty only because it was cut there
-  const sent = (k) => Object.prototype.hasOwnProperty.call(args, k) && !(k === (parsed && parsed.open) && blank(args[k]))
+  // the card shows why), as "" (which the card says is empty); but for one that would say so only because it was cut
+  // there ([""] too, which shows as "")
   const said = (v) => blank(v) ? '' : shown(v)
+  const sent = (k) => Object.prototype.hasOwnProperty.call(args, k) && !(k === (parsed && parsed.open) && said(args[k]) === '')
   const fields = APPROVAL_FIELDS.filter(([k]) => sent(k) && k !== inWhat).map(([k, label]) => [label, said(args[k]), k])
   for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
     if (k !== bodyKey && !known(k) && sent(k)) fields.push([capital(words(k)) || JSON.stringify(k), said(v), k])   // (a name of no letters, "" say, as sent)

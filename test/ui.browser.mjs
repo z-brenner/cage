@@ -1688,9 +1688,11 @@ check('empty fields', JSON.stringify(r.card.fields) === JSON.stringify([['To', '
   JSON.stringify(r.card.empty) === '["Cc","Bcc","Labels"]', 'the card shows ' + JSON.stringify([r.card.fields, r.card.empty]))
 check('empty fields', r.home.line === 'Gmail: send email to bob@acme.com: Tell Bob the brief is ready', 'Home shows ' + JSON.stringify(r.home.line))
 notAtOnce('empty fields', r, partOnly)
-// (but not one that's null, "" or [] only because cc-connect cut what it asked right there: it may not be empty at all)
+// (but not one that's null, "" or [] only because cc-connect cut what it asked right there: it may not be empty at all.
+// Nor a list cut in or after its first item, [""] as it's closed off, which the card would say is empty too: it may go on)
 const cutThere = await page.evaluate((asks) => asks.map((text) => approvalOf(text).fields.map(([label, v]) => label + ': ' + v)),
-  ['"subject":...', '"subject":"...', '"labels":[...', '"subj...'].map((end) => permText('mcp__zapier__gmail_send_email', '{"cc":"","to":"bob@acme.com",' + end)))
+  ['"subject":...', '"subject":"...', '"labels":[...', '"subj...', '"labels":["...', '"labels":[""...', '"labels":["",...']
+    .map((end) => permText('mcp__zapier__gmail_send_email', '{"cc":"","to":"bob@acme.com",' + end)))
 check('empty fields', cutThere.every((f) => JSON.stringify(f) === '["To: bob@acme.com","Cc: "]'), 'the card shows, of what was cut: ' + JSON.stringify(cutThere))
 
 // Home has the first 4,000 characters of what it asks (server.py's activity()): a longer one is more than its line,
