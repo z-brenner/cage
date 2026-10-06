@@ -1554,7 +1554,7 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const known = (k) => APPROVAL_FIELDS.some(([f]) => f === k)
   const fields = APPROVAL_FIELDS.filter(([k]) => !blank(args[k]) && k !== inWhat).map(([k, label]) => [label, shown(args[k]), k])
   for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
-    if (k !== bodyKey && !known(k) && !blank(v)) fields.push([capital(words(k)) || k, shown(v), k])
+    if (k !== bodyKey && !known(k) && !blank(v)) fields.push([capital(words(k)) || JSON.stringify(k), shown(v), k])   // (a name of no letters, "" say, as sent)
   }
   // Names that read alike ("TO" next to "to", two files, or a name like one of the card's own, "Command"): the app it
   // goes to may use either one, so each is shown with its name as it was sent ("TO"), and Home doesn't offer Allow
@@ -1605,7 +1605,7 @@ function moreOf (ap) {
 // it's as long as what Home has of it: server.py's activity() keeps the first 4,000 characters, and a "```" in a
 // longer one would end what Home reads of it there.
 function approvalWhole (ap) {
-  const shown = new Set([ap.inWhat, ...moreOf(ap).keys])
+  const shown = new Set([ap.inWhat, ...moreOf(ap).keys].filter(Boolean))   // ("": nothing; not a field named "")
   return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && [...ap.raw].length < 4000 &&
     approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap)) && ap.keys.every((k) => shown.has(k))
 }
