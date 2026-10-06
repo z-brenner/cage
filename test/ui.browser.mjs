@@ -791,6 +791,9 @@ ok("raw output (an agent's logs) shows in a terminal view; a log left open stops
 // what you write about yourself isn't lost to a redraw, and leaving without saving asks first
 await page.getByRole('link', { name: 'Memory' }).click()
 const about = page.getByLabel('About you')
+// (once what's saved has come: it goes into the box if that's still empty, and Playwright's fill empties the box and
+// then types, as two steps, so text that came in between them would stay in front of what it types)
+await page.waitForFunction(() => ABOUT.saved !== null, null, { timeout: 10000 })
 await about.fill('I am Sam, a contracts lawyer in Berlin.')
 await page.getByRole('heading', { name: 'Memory' }).click()   // out of the box, so the page may be redrawn
 await page.getByText('Unsaved changes').waitFor({ timeout: 5000 })
