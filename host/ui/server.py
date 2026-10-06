@@ -1163,7 +1163,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.send(404, {"error": "no such endpoint"})
 
     def events_head(self):
-        self.head(200, [("Content-Type", "text/event-stream"), ("Cache-Control", "no-store"), ("X-Accel-Buffering", "no")])
+        self.head(200, [("Content-Type", "text/event-stream"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                        ("Referrer-Policy", "no-referrer"), ("X-Accel-Buffering", "no")])   # (as send() answers)
         self.close_connection = True
 
     def multi(self, query):

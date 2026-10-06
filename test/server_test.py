@@ -830,7 +830,7 @@ class Live(unittest.TestCase):
 
     def test_headers(self):
         """The routes Home uses answer with the headers every other API answer has: JSON, not kept, not sniffed, no
-        referrer; whatever the answer (a refusal too)."""
+        referrer; whatever the answer (a refusal too). The chats' stream, and a job's, too, but for their type."""
         p = self.asks("claude", "Bash(ls)")
         want = {k: v for k, v in self.call("GET", "/api/jobs")[1].items() if k not in ("Date", "Content-Length", "Server")}
         self.assertEqual(want, {"Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
@@ -839,10 +839,21 @@ class Live(unittest.TestCase):
                                            ("POST", "/api/chat/claude/action", {"action": "perm:allow", "pending": dict(p, at=1)}, 409),
                                            ("POST", "/api/chat/claude/action", {"action": "perm:deny", "pending": p}, 200),
                                            ("POST", "/api/chat/claude/usage", b"{", 400), ("GET", "/api/chat/claude/usage", None, 405),
-                                           ("GET", "/api/activity?agents=claude", None, 200)):
-            got, headers, _ = self.call(method, path, body, {"Content-Type": "application/json"} if isinstance(body, bytes) else None)
+                                           ("POST", "/api/chat/claude/action", b"{}", 415), ("GET", "/api/activity?agents=claude", None, 200)):
+            kind = {"Content-Type": "application/json" if status != 415 else "text/plain"} if isinstance(body, bytes) else None
+            got, headers, _ = self.call(method, path, body, kind)
             self.assertEqual(got, status, path)
             self.assertEqual({k: v for k, v in headers.items() if k not in ("Date", "Content-Length", "Server", "Connection")}, want, path)
+        job = server.Job.__new__(server.Job)   # (a job's events, without a command behind it)
+        job.events, job.first, job.cond, job.watchers, job.unwatched = [{"t": "exit", "code": 0, "n": 0}], 0, threading.Condition(), 0, 0
+        server.Job.jobs["test"] = job
+        try:
+            for path in ("/api/chat/stream?from=claude:0", "/api/jobs/test/events?from=0"):
+                got, headers, _ = self.call("GET", path)
+                self.assertEqual({k: v for k, v in headers.items() if k not in ("Date", "Server")},
+                                 dict(want, **{"Content-Type": "text/event-stream", "X-Accel-Buffering": "no"}), path)
+        finally:
+            del server.Job.jobs["test"]
 
 
 if __name__ == "__main__":
