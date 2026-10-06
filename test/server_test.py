@@ -761,19 +761,32 @@ class Live(unittest.TestCase):
         self.assertEqual(self.answer("claude", "perm:allow", p)[0], 409)   # (and that one went: it's the answer)
 
     def test_two_windows_at_once(self):
-        """Allow for the same approval from two windows at the same moment: one goes, the others get 409."""
-        p, go, statuses = self.asks("claude", "Bash(ls)"), threading.Barrier(8), []
+        """Allow for the same approval from two windows at the same moment: one goes, the others get 409. So too when
+        the answer takes a while to write (a slow disk): an agent's answers are taken one at a time, so no other finds
+        the approval still unanswered while the first is on its way."""
+        send = server.Chat.send
 
-        def allow():
+        def slowly(chat, req):
+            time.sleep(0.2)
+            return send(chat, req)
+
+        def allow(p, go, statuses):
             go.wait()
             statuses.append(self.answer("claude", "perm:allow", p)[0])
-        threads = [threading.Thread(target=allow) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        self.assertEqual(sorted(statuses), [200] + [409] * 7)
-        self.assertEqual(len(self.sent("claude")), 1)
+        for slow in (False, True):
+            p, go, statuses = self.asks("claude", "Bash(ls)"), threading.Barrier(8), []
+            threads = [threading.Thread(target=allow, args=(p, go, statuses)) for _ in range(8)]
+            server.Chat.send = slowly if slow else send
+            try:
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            finally:
+                server.Chat.send = send
+            self.assertEqual(sorted(statuses), [200] + [409] * 7, slow)
+            self.assertEqual(len(self.sent("claude")), 1, slow)
+            self.taken("claude")
 
     def test_names_stay_inside(self):
         """An agent's name comes in the address: whatever it says (.., a path, NUL, a very long one), only cage's own
