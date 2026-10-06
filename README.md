@@ -33,7 +33,7 @@ That's the whole setup. On Windows, or on Linux with a desktop, cage then opens 
 After that, open **Cage** from your Start menu (Windows) or app menu (Linux) to chat with your agents and see how they're doing. Telegram, Slack, Discord and WhatsApp are there for your phone, whenever you want them.
 
 The app does everything, in plain words:
-- **Home** shows what needs you (a sign-in, something cage blocked) and how each agent is doing.
+- **Home** shows what needs you (an agent waiting for your OK, a sign-in, something cage blocked), what each agent is doing, and how much of its plan is left.
 - **Ask your agents** sends one question to every awake agent and shows their answers side by side, so you can see where they agree.
 - **Each agent's page** is a chat with it, its files, and its settings: chat apps, asking before it acts (for Codex, working read-only), plan usage, privacy mask, and who answers when it hits its usage limit.
 - **Apps, Sign-ins & keys, Memory, Security and Settings** cover the rest. Press Ctrl+K (⌘K on a Mac) to jump to any of them.
