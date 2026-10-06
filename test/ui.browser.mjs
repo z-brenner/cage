@@ -1225,6 +1225,7 @@ const chatTab = await ctx.newPage()   // its card in the chat, while Home shows 
 watch(chatTab)
 await chatTab.goto(base + '/#agent/claude')
 await chatTab.locator('.chat textarea').waitFor({ timeout: 15000 })
+await chatTab.waitForFunction(() => CHAT && CHAT.loaded, null, { timeout: 15000 })   // (with all it has shown: each new card is counted)
 // (in each page: where an element's characters are drawn before one written before them, on the same line)
 const drawing = () => {
   window.__swapped = (el) => {
@@ -1436,6 +1437,12 @@ const marks = 'echo "**hi**" `whoami` <b>x</b> [a](https://evil.example) > /tmp/
 r = await asked(permText('Bash', marks))
 shownAsIs('a command with markup', r)
 check('a command with markup', field(r, 'Command') === marks && r.home.allow && r.home.line === command(marks), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.text]))
+// (and a terminal's escape sequences, "ESC [8m" hiding what comes after it there, are marked)
+const ansi = 'printf "\u{1B}[8mhidden\u{1B}[0m" && ls'
+r = await asked(permText('Bash', ansi))
+shownAsIs('a command with escape sequences', r)
+check('a command with escape sequences', field(r, 'Command') === marked(ansi) && r.home.line === command(marked(ansi)), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.line]))
+notAtOnce('a command with escape sequences', r, hiddenWhy, /characters that don’t show/)
 // (and a request not in cc-connect's words, which Home shows as it is too: its "*", ">", "`" and "_" are kept)
 const plain = 'Agent wants to run rm -rf ~/* > /dev/null && echo `whoami` # done_now'
 r = await asked(plain)
