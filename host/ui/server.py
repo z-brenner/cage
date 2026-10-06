@@ -953,17 +953,21 @@ class Usage:
 
 class State:
     lock, at, body, ok = threading.Lock(), 0.0, b"{}", False
+    began, changed = 0.0, 0.0   # when the look the last answer is from began; when what it shows last changed (stale())
     TIMEOUT = 20   # seconds `cage _state` may take
 
     @classmethod
     def get(cls):
         """`cage _state`, at most every 2 seconds. While it runs, others get the last answer; if it hangs, they get
-        that too, marked stale (and with no answer at all yet, an error). An agent it calls asleep has forgotten the
-        approval it was waiting for (Stopped)."""
-        if not cls.lock.acquire(blocking=not cls.ok):
+        that too, marked stale (and with no answer at all yet, an error). But not an answer from a look that began
+        before something changed (stale(): a job started or ended, an answer found a VM stopped), which may say what
+        was true before (an agent up that has just stopped): they wait for a look that began after it. An agent it
+        calls asleep has forgotten the approval it was waiting for (Stopped)."""
+        if not cls.lock.acquire(blocking=not cls.ok or cls.began <= cls.changed):
             return cls.body
         try:
-            if time.time() - cls.at > 2:
+            if time.time() - cls.at > 2 or cls.began <= cls.changed:
+                began = time.monotonic()
                 env = dict(os.environ)
                 env.pop("CAGE_PROTO", None)
                 logs = Stopped.logs()
@@ -977,16 +981,17 @@ class State:
                     if not cls.ok:
                         raise Refused(504, "cage is taking too long to answer")
                     cls.body = json.dumps(dict(json.loads(cls.body), stale=True)).encode()
+                    began = time.monotonic()   # (that's all there is to say now, marked as old: the next one waits no more)
                 except ValueError:
                     pass
-                cls.at = time.time()
+                cls.at, cls.began = time.time(), began
             return cls.body
         finally:
             cls.lock.release()
 
     @classmethod
     def stale(cls):
-        cls.at = 0.0
+        cls.changed = time.monotonic()
 
     @classmethod
     def backups(cls):

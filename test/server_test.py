@@ -231,6 +231,36 @@ class SlowState(unittest.TestCase):
         server.State.stale()
         self.assertEqual(json.loads(server.State.get()), {"version": "v1"})
 
+    def test_a_change_while_it_looks(self):
+        """Something changes while cage looks (a job ends, an answer finds an agent's VM stopped: stale()): that look
+        may say what was true before. So a page that looks again after the change gets neither its answer nor the one
+        before it, but waits for a look that began after the change; and the look under way doesn't count as one."""
+        now, looking = os.path.join(HOME, "now.json"), os.path.join(HOME, "looking")
+        with open(self.stub, "w") as f:   # (it reads what's true, then takes a while to say it)
+            f.write('#!/bin/sh\nv="$(cat "%s")"\nif [ -e "%s" ]; then touch "%s"; sleep 1; fi\necho "$v"\n' % (now, self.slow, looking))
+        server.State.TIMEOUT = 15
+        with open(now, "w") as f:
+            f.write('{"version": "v1"}')
+        self.assertEqual(json.loads(server.State.get()), {"version": "v1"})
+        open(self.slow, "w").close()
+        server.State.stale()
+        under_way = threading.Thread(target=server.State.get)
+        under_way.start()
+        end = time.time() + 10
+        while not os.path.exists(looking) and time.time() < end:
+            time.sleep(0.01)
+        try:
+            self.assertTrue(os.path.exists(looking), "cage was never asked")
+            with open(now, "w") as f:   # what it shows changes while it looks
+                f.write('{"version": "v2"}')
+            os.unlink(self.slow)
+            server.State.stale()
+            self.assertEqual(json.loads(server.State.get()), {"version": "v2"})
+        finally:
+            under_way.join()
+            os.unlink(looking)
+        self.assertEqual(json.loads(server.State.get()), {"version": "v2"})
+
 
 class Peers(unittest.TestCase):
     """Who is on the other end of a connection (Linux): a pairing code is only traded for the token with a program of
