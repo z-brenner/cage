@@ -1001,7 +1001,7 @@ for (let i = 0; i < 50 && allowed() === allowedBefore; i++) await page.waitForTi
 if (allowed() !== allowedBefore + 1) fail('Allow on Home did not reach the agent')
 await page.locator('#toasts .toast.ok', { hasText: 'Allowed: Claude Code, Gmail: send email to bob@acme.com' }).waitFor({ timeout: 5000 })
   .catch(() => fail('Allow on Home says nothing when it went'))
-const focusOn = () => page.evaluate(() => document.activeElement.tagName + ' ' + document.activeElement.textContent)
+const focusOn = () => page.evaluate(() => document.activeElement.tagName + ' ' + document.activeElement.textContent.slice(0, 60))
 if (!['H1 Home', 'H2 Needs you'].includes(await focusOn())) fail('after Allow on Home, the focus is on ' + await focusOn())
 await claudeRow.locator('.agent-act', { hasText: 'Last: Sent the email to bob@acme.com.' }).waitFor({ timeout: 15000 })
 if (!['H1 Home', 'H2 Needs you'].includes(await focusOn())) fail('after Allow on Home and a redraw, the focus is on ' + await focusOn())
