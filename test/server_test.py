@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Unit tests for the web app's server (host/ui/server.py): the parts that decide what a request or a file becomes,
-without a browser or a running server. test/ui.sh tests the running server.
+without a browser or `cage ui`, and (Live) the routes Home uses, asked over HTTP of the real handler on a port of its
+own. test/ui.sh tests the server `cage ui` starts.
 
   python3 test/server_test.py
 """
-import atexit, contextlib, importlib.util, io, json, os, shutil, signal, socket, struct, sys, tempfile, threading, time, unittest
+import atexit, contextlib, http.client, importlib.util, io, json, os, secrets, shutil, signal, socket, struct, sys, tempfile, threading, time
+import unittest
 
 HOME = tempfile.mkdtemp()
 atexit.register(shutil.rmtree, HOME, True)
@@ -500,6 +502,217 @@ class UsageAnswers(unittest.TestCase):
         self.assertEqual(q["pos"], os.path.getsize(self.path))   # read on from there next time
         os.unlink(os.path.join(server.APPDIR, "claude", "in", q["rid"] + ".json"))
         self.assertFalse(self.chat.waiting(q["rid"]))
+
+
+def strict(body):
+    """JSON as a browser reads it: no NaN or Infinity (Python's json reads and writes them; JSON.parse doesn't)."""
+    def refuse(c):
+        raise ValueError(f"{c} isn't JSON")
+    return json.loads(body, parse_constant=refuse)
+
+
+class Live(unittest.TestCase):
+    """What Home asks of the server (/api/activity, Allow and Deny on /api/chat/<a>/action, plan usage) and the chats'
+    stream, asked over HTTP of the real handler, as a page, or anything else on this computer, could ask it. The
+    agents' logs are written here as their VMs would write them, and what goes to an agent is what lands in its in/."""
+    PERM = Activity.PERM
+    AT = [1791000000000]   # when each approval was asked: never twice the same
+
+    @classmethod
+    def setUpClass(cls):
+        cls.token = secrets.token_hex(24)
+        with open(server.TOKEN_FILE, "w") as f:
+            f.write(cls.token)
+        cls.httpd = server.Server(("127.0.0.1", 0), server.Handler)
+        cls.port, server.PORT = server.PORT, cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        server.PORT = cls.port
+        os.unlink(server.TOKEN_FILE)
+
+    def setUp(self):
+        self.tearDown()
+
+    def tearDown(self):
+        for a in server.AGENTS:
+            f = os.path.join(server.APPDIR, a)
+            if os.path.islink(f) or os.path.isfile(f):
+                os.unlink(f)
+            else:
+                shutil.rmtree(f, True)
+
+    def call(self, method, path, body=None, headers=None, token=True):
+        """(status, headers, body) of a request as the page makes it (with the token; a body as JSON), but for these
+        headers (None: without that one)."""
+        h = {"Host": "127.0.0.1:%d" % server.PORT}
+        if token:
+            h["X-Cage-Token"] = self.token
+        if body is not None and not isinstance(body, bytes):
+            body, h["Content-Type"] = json.dumps(body).encode(), "application/json"
+        h = {k: v for k, v in dict(h, **(headers or {})).items() if v is not None}
+        c = http.client.HTTPConnection("127.0.0.1", server.PORT, timeout=20)
+        try:
+            c.request(method, path, body, h)
+            r = c.getresponse()
+            return r.status, r.headers, b"" if r.headers.get("Content-Type") == "text/event-stream" else r.read()
+        finally:
+            c.close()
+
+    def stream(self, query, until=lambda events: False, timeout=5.0):
+        """The chats' stream: its headers, and the events it sent until `until(events)` (or `timeout` seconds)."""
+        s = socket.create_connection(("127.0.0.1", server.PORT), timeout=timeout)
+        s.sendall(("GET /api/chat/stream?%s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Cage-Token: %s\r\n\r\n" % (query, server.PORT, self.token)).encode())
+        buf, events, end = b"", [], time.time() + timeout
+        try:
+            while not until(events) and time.time() < end:
+                s.settimeout(max(0.01, end - time.time()))
+                try:
+                    chunk = s.recv(1 << 20)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                lines = buf.partition(b"\r\n\r\n")[2].split(b"\n")[:-1]   # (whole lines only)
+                events = [strict(line[6:]) for line in lines if line.startswith(b"data: ")]
+        finally:
+            s.close()
+        return buf.partition(b"\r\n\r\n")[0].decode("latin-1"), events
+
+    def log(self, agent, *entries):
+        os.makedirs(os.path.join(server.APPDIR, agent), exist_ok=True)
+        with open(os.path.join(server.APPDIR, agent, "log.jsonl"), "ab") as f:
+            for e in entries:
+                f.write((e if isinstance(e, bytes) else json.dumps(e).encode()) + b"\n")
+
+    def asks(self, agent, text):
+        """The agent asks for your OK: what Home gets of it (the "pending" Allow and Deny go with)."""
+        Live.AT[0] += 1000
+        self.log(agent, {"t": "buttons", "session": "you", "text": text, "buttons": self.PERM, "at": Live.AT[0]})
+        return {"text": text, "at": Live.AT[0]}
+
+    def answer(self, agent, action, *pending, **more):
+        """Allow or Deny as Home sends it, with the approval it showed (or, without one, as a card in the chat does)."""
+        body = dict(more, action=action, label=action)
+        if pending:
+            body["pending"] = pending[0]
+        return self.call("POST", f"/api/chat/{agent}/action", body)
+
+    def sent(self, agent):
+        """What went to the agent: its in/, which its VM hasn't taken yet."""
+        d = os.path.join(server.APPDIR, agent, "in")
+        out = []
+        for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            with open(os.path.join(d, name)) as f:
+                out.append(json.load(f))
+        return out
+
+    def taken(self, agent):
+        """The VM takes what was sent, and its log says so, as guest/app.mjs does."""
+        for r in self.sent(agent):
+            os.unlink(os.path.join(server.APPDIR, agent, "in", r["id"] + ".json"))
+            self.log(agent, {"t": "action", "session": r["session"], "id": r["id"], "action": r["action"], "label": r["label"]} if r["type"] == "action"
+                     else {"t": "you", "session": r["session"], "id": r["id"], "text": r["text"], "files": r["files"]})
+
+    def test_who_may_ask(self):
+        """Only cage's own page, on this computer, with the token: without it or with a wrong one (in the header or the
+        address), from another site (Sec-Fetch-Site, Origin, even a link that opens it) or through another host name
+        (DNS rebinding), nothing is read or sent. A request without Sec-Fetch-Site (curl, `cage ui`, a browser too old
+        to send it) still needs the token: a page elsewhere can't make a browser that sends it leave it out."""
+        p = self.asks("claude", "Bash(ls)")
+        refused = ((401, {}, False), (401, {"X-Cage-Token": "x" * 48}, False), (403, {"Sec-Fetch-Site": "cross-site"}, True),
+                   (403, {"Sec-Fetch-Site": "same-site"}, True), (403, {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": "document"}, True),
+                   (403, {"Origin": "https://evil.example"}, True), (403, {"Origin": "null"}, True),
+                   (403, {"Origin": "http://127.0.0.1:%d.evil.example" % server.PORT}, True), (403, {"Host": "evil.example:%d" % server.PORT}, True),
+                   (403, {"Host": "127.0.0.1:%d" % (server.PORT + 1)}, True))
+        for method, path, body in (("GET", "/api/activity?agents=claude", None), ("POST", "/api/chat/claude/action", {"action": "perm:allow", "pending": p}),
+                                   ("POST", "/api/chat/claude/usage", {"fresh": True}), ("GET", "/api/chat/stream?from=claude:0", None)):
+            for status, headers, token in refused:
+                self.assertEqual(self.call(method, path, body, headers, token)[0], status, (path, headers, token))
+            self.assertEqual(self.call(method, path + ("&" if "?" in path else "?") + "token=" + "y" * 48, body, token=False)[0], 401, path)
+        self.assertEqual(self.sent("claude"), [])
+        for site in (None, "same-origin", "none"):
+            status, _, body = self.call("GET", "/api/activity?agents=claude", headers={"Sec-Fetch-Site": site})
+            self.assertEqual((status, strict(body)["agents"]["claude"]["pending"]), (200, p), site)
+        self.assertEqual(self.call("GET", "/api/activity?agents=claude", headers={"Sec-Fetch-Site": None}, token=False)[0], 401)
+
+    def test_methods(self):
+        """GET to look, POST to answer or ask for plan usage: any other method is refused, and sends nothing."""
+        p = self.asks("claude", "Bash(ls)")
+        for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            status, headers, body = self.call(method, "/api/activity?agents=claude", b"{}" if method in ("POST", "PUT", "PATCH") else None)
+            self.assertIn(status, (404, 405, 501), method)
+            self.assertNotIn(b"pending", body)
+        for what in ("action", "usage"):
+            for method in ("GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+                body = json.dumps({"action": "perm:allow", "pending": p}).encode() if method in ("PUT", "PATCH") else None
+                self.assertIn(self.call(method, f"/api/chat/claude/{what}", body, {"Content-Type": "application/json"})[0], (405, 501), (what, method))
+            self.assertEqual(self.call("POST", f"/api/chat/claude/{what}", b"action=perm:allow", {"Content-Type": "application/json"})[0], 400)
+            self.assertEqual(self.call("POST", f"/api/chat/claude/{what}", b"[]", {"Content-Type": "application/json"})[0], 400)
+        self.assertEqual(self.sent("claude"), [])
+
+    def test_home_answers_the_approval_it_showed(self):
+        """Allow or Deny from Home goes with the approval Home showed, and reaches that one or none: one asked before
+        the one that waits now, or since, one another agent asked, one cc-connect forgot when it restarted (the relay
+        registers with it again), each gets 409, and nothing goes to any agent."""
+        old = self.asks("claude", "Bash(ls)")
+        p = self.asks("claude", "Bash(rm -rf ~/work/old)")   # two at once: the one asked last is the one that waits
+        theirs = self.asks("codex", "Bash(rm -rf ~/work/old)")
+        for agent, pending in (("claude", old), ("claude", dict(p, at=p["at"] - 1)), ("claude", dict(p, text="Bash(ls)")), ("claude", theirs),
+                               ("codex", p), ("claude", p["text"]), ("claude", {"text": p["text"]}), ("claude", dict(p, also=1)), ("claude", [p])):
+            status, _, body = self.answer(agent, "perm:allow", pending)
+            self.assertEqual(status, 409, (agent, pending))
+            self.assertEqual(strict(body)["error"], "It isn’t waiting for that any more. Open its chat to see what it’s doing.")
+        self.log("codex", {"t": "status", "connected": True})
+        self.assertEqual(self.answer("codex", "perm:allow", theirs)[0], 409)
+        self.assertEqual(self.sent("claude") + self.sent("codex"), [])
+        self.assertEqual(self.answer("claude", "perm:deny", p)[0], 200)
+        self.assertEqual([(r["type"], r["session"], r["action"]) for r in self.sent("claude")], [("action", "you", "perm:deny")])
+        self.taken("claude")
+        self.assertEqual(self.answer("claude", "perm:allow", p)[0], 409)   # answered: what it asks next is another
+        self.assertEqual(self.sent("claude"), [])
+
+    def test_names_stay_inside(self):
+        """An agent's name comes in the address: whatever it says (.., a path, NUL, a very long one), only cage's own
+        agents' folders are read or written, and none is made for a name that isn't one."""
+        before, p = sorted(os.listdir(HOME)), self.asks("claude", "Bash(ls)")
+        for name in ("..", "%2e%2e", "..%2f..%2fetc", "%2fetc%2fpasswd", "claude%00", "claude%2f..%2f..%2fui.token", "CLAUDE", "claude%20", "", "x" * 4000):
+            for method, what in (("POST", "action"), ("POST", "usage"), ("POST", "send"), ("GET", "history"), ("GET", "file?p=files/x.png")):
+                body = {"action": "perm:allow", "pending": p, "text": "yes"} if method == "POST" else None
+                self.assertEqual(self.call(method, f"/api/chat/{name}/{what}", body)[0], 400, (name[:20], what))
+        for agents in ("..,../..,/etc/passwd,claude%00,claude/../codex,%2e%2e,claude%2f..,CLAUDE", "x" * 30000, ",".join(["claude"] * 5000), "", ",,,"):
+            status, _, body = self.call("GET", "/api/activity?since=0&agents=" + agents)
+            self.assertEqual(status, 200, agents[:40])
+            self.assertLessEqual(set(strict(body)["agents"]), {"claude"}, agents[:40])
+        status, _, body = self.call("GET", "/api/activity?agents=claude&since=" + "9" * 5000)   # (an int that big: 400 in Python 3.11 on)
+        self.assertIn(status, (200, 400))
+        strict(body)
+        head, events = self.stream("from=..:0,claude%00:0,%2e%2e:0,/etc/passwd:0", timeout=1)
+        self.assertTrue(head.startswith("HTTP/1.1 200"), head)
+        self.assertEqual(events, [])
+        self.assertEqual(self.sent("claude"), [])
+        self.assertEqual(sorted(os.listdir(HOME)), before)
+        self.assertEqual(os.listdir(server.APPDIR), ["claude"])
+
+    def test_headers(self):
+        """The routes Home uses answer with the headers every other API answer has: JSON, not kept, not sniffed, no
+        referrer; whatever the answer (a refusal too)."""
+        p = self.asks("claude", "Bash(ls)")
+        want = {k: v for k, v in self.call("GET", "/api/jobs")[1].items() if k not in ("Date", "Content-Length", "Server")}
+        self.assertEqual(want, {"Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                                "Referrer-Policy": "no-referrer"})
+        for method, path, body, status in (("GET", "/api/activity?agents=claude,codex", None, 200), ("GET", "/api/activity", None, 200),
+                                           ("POST", "/api/chat/claude/action", {"action": "perm:allow", "pending": dict(p, at=1)}, 409),
+                                           ("POST", "/api/chat/claude/action", {"action": "perm:deny", "pending": p}, 200),
+                                           ("POST", "/api/chat/claude/usage", b"{", 400), ("GET", "/api/chat/claude/usage", None, 405),
+                                           ("GET", "/api/activity?agents=claude", None, 200)):
+            got, headers, _ = self.call(method, path, body, {"Content-Type": "application/json"} if isinstance(body, bytes) else None)
+            self.assertEqual(got, status, path)
+            self.assertEqual({k: v for k, v in headers.items() if k not in ("Date", "Content-Length", "Server", "Connection")}, want, path)
 
 
 if __name__ == "__main__":
