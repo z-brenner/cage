@@ -1311,6 +1311,7 @@ const lineOf = (s) => s.length <= 160 ? s : s.slice(0, 159) + '…'   // (Home's
 const wrong = []
 const check = (name, ok, what) => { if (!ok) wrong.push(`${name}: ${what}`) }
 const field = (r, label) => (r.card.fields.find(([l]) => l === label) || [])[1]
+const labelOf = (r, value) => (r.card.fields.find(([, v]) => v === value) || [])[0]
 const shownAsIs = (name, r) => { // what holds for any request: nothing in it hidden, made markup, drawn in another order, past the edge or cut off
   for (const [where, text] of [['the card', r.card.shown], ['Home', r.home.text], ['what a screen reader says on Home', r.home.said]]) {
     check(name, !new RegExp(HIDDEN.source, 'u').test(text), `${where} has characters that don't show as what they are: ${JSON.stringify(text.match(HIDDEN))}`)
@@ -1435,6 +1436,23 @@ const marks = 'echo "**hi**" `whoami` <b>x</b> [a](https://evil.example) > /tmp/
 r = await asked(permText('Bash', marks))
 shownAsIs('a command with markup', r)
 check('a command with markup', field(r, 'Command') === marks && r.home.allow && r.home.line === command(marks), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.text]))
+
+// Names like the card's own ("TO", "Command") next to the real "to": each value is shown with the name it was sent
+// with, where another reads the same, as the app it goes to may use either; so not at once on Home. And none of what
+// it sends is left off the card: an app's tool with two files has both. (An app's tool with one says which on Home.)
+const alike = { Command: 'ls', Note: 'Checked: this goes to bob@acme.com', TO: 'bob@acme.com', To: 'carol@acme.com', subject: 'Hi', to: 'eve@evil.example' }
+r = await asked(permText('mcp__zapier__gmail_send_email', JSON.stringify(alike)))
+shownAsIs('names like the card\'s own', r)
+check('names like the card\'s own', labelOf(r, 'eve@evil.example') === '"to"' && labelOf(r, 'bob@acme.com') === '"TO"' && labelOf(r, 'carol@acme.com') === '"To"' &&
+  labelOf(r, 'ls') === '"Command"' && labelOf(r, alike.Note) === 'Note' && new Set(r.card.fields.map(([l]) => l)).size === r.card.fields.length, 'the card shows ' + JSON.stringify(r.card.fields))
+check('names like the card\'s own', r.home.line === 'Gmail: send email to eve@evil.example', 'Home shows ' + JSON.stringify(r.home.line))
+notAtOnce('names like the card\'s own', r, partOnly, /names/)
+r = await asked(permText('mcp__filesystem__write_file', JSON.stringify({ content: 'hello', file_path: '/home/agent/work/notes.md', path: '/home/agent/.bashrc' })))
+shownAsIs('an app\'s tool with two files', r)
+check('an app\'s tool with two files', labelOf(r, '/home/agent/work/notes.md') === '"file_path"' && labelOf(r, '/home/agent/.bashrc') === '"path"', 'the card shows ' + JSON.stringify(r.card.fields))
+notAtOnce('an app\'s tool with two files', r, partOnly, /names/)
+r = await asked(permText('mcp__filesystem__write_file', JSON.stringify({ content: 'hello', path: '/home/agent/.bashrc' })))
+check('an app\'s tool with a file', r.home.line === 'Filesystem: write file: /home/agent/.bashrc', 'Home shows ' + JSON.stringify(r.home.line))
 
 await chatTab.close()
 if (wrong.length) fail('an approval not shown as it is:\n  ' + wrong.join('\n  '))

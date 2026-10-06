@@ -1526,11 +1526,11 @@ function visible (s) { // what it asks as it's shown, wherever it is: what doesn
     return others.length ? word.replace(new RegExp(`(?:[${others.map((name) => `\\p{Script=${name}}`).join('')}]\\p{M}*)+`, 'gu'), '⟨$&⟩') : word
   }).replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
 }
-function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen, mixed}; what is '' if it isn't cc-connect's prompt
+function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen, mixed, alike}; what is '' if it isn't cc-connect's prompt
   const raw = String(text || '')
   const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
   const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
-  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen: UNSEEN.test(raw), mixed: mixesAlphabets(raw) }
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen: UNSEEN.test(raw), mixed: mixesAlphabets(raw), alike: false }
   const tool = bold[1].trim()
   const input = fence[1].replace(/\n$/, '')
   const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
@@ -1541,25 +1541,29 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
     else if (/^(Write|Edit|MultiEdit|Read|NotebookEdit|NotebookRead)$/.test(tool)) args.path = input
     else args.input = input
   }
-  const path = ['file_path', 'notebook_path', 'path'].map((k) => args[k]).find((v) => typeof v === 'string') || ''
-  const { what, via } = toolWords(tool, path)
+  // its file, in what it does (of two, which would that be? Both are shown, below)
+  const paths = ['file_path', 'notebook_path', 'path'].filter((k) => typeof args[k] === 'string' && args[k])
+  const { what, via } = toolWords(tool, paths.length === 1 ? args[paths[0]] : '')
+  const inWhat = /^(Change|Read) a file:/.test(what) ? paths[0] : ''
   const bodyKey = APPROVAL_BODY.find((k) => typeof args[k] === 'string' && args[k].trim())
-  const fields = []
-  let file = /^(Change|Read) a file:/.test(what)   // its file is in what it does already
-  for (const [k, label] of APPROVAL_FIELDS) {
-    if (blank(args[k]) || (label === 'File' && file)) continue
-    if (label === 'File') file = true
-    fields.push([label, shown(args[k]), k])
-  }
+  const known = (k) => APPROVAL_FIELDS.some(([f]) => f === k)
+  const fields = APPROVAL_FIELDS.filter(([k]) => !blank(args[k]) && k !== inWhat).map(([k, label]) => [label, shown(args[k]), k])
   for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
-    if (k !== bodyKey && !APPROVAL_FIELDS.some(([f]) => f === k) && !blank(v)) fields.push([capital(words(k)) || k, shown(v), k])
+    if (k !== bodyKey && !known(k) && !blank(v)) fields.push([capital(words(k)) || k, shown(v), k])
   }
+  // Names that read alike ("TO" next to "to", two files, or a name like one of the card's own, "Command"): the app it
+  // goes to may use either one, so each is shown with its name as it was sent ("TO"), and Home doesn't offer Allow
+  const own = new Set(APPROVAL_FIELDS.map(([, label]) => label.toLowerCase()))
+  const named = {}
+  for (const name of [...fields.map(([label]) => label.toLowerCase()), bodyKey && words(bodyKey)]) if (name) named[name] = (named[name] || 0) + 1
+  const alike = fields.filter(([label, , k]) => named[label.toLowerCase()] > 1 || (!known(k) && own.has(label.toLowerCase())))
+  for (const f of alike) f[0] = JSON.stringify(f[2])
   // (cut by cc-connect: JSON closed off where it was cut, or input as it is that's 800 characters and "...")
   const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
   const body = bodyKey ? args[bodyKey] : ''
   // (in what it asked, or in what's read from its JSON: Go writes U+2028 and the control characters there as \u2028)
   const all = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])]
-  return { raw, tool, what, via, fields, body, cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets) }
+  return { raw, tool, what, via, fields, body, cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0 }
 }
 // In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
 // U+FEFF or U+2028 is a space to \s, and then a space is all it would show.)
@@ -1575,20 +1579,21 @@ function moreOf (ap) {
   const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
   const to = [f.to, f.cc && 'cc ' + f.cc, f.bcc && 'bcc ' + f.bcc].filter(Boolean).join(', ')
   if (to) return [' to ' + to, false]
-  const k = ['command', 'url', 'query', 'subject', 'title'].find((x) => f[x])
+  const k = ['command', 'url', 'file_path', 'notebook_path', 'path', 'query', 'subject', 'title'].find((x) => f[x])
   return k ? [': ' + f[k], PROSE.includes(k)] : ['', false]
 }
 // Is that line all it asks, as far as saying yes goes? Not when it isn't cc-connect's question, when cc-connect cut what
 // it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end of a
 // command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
-// characters that don't show.
+// characters that don't show, letters from another alphabet that look like these, or names that read alike.
 function approvalWhole (ap) {
-  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
+  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
 }
 function approvalView (ap) { // what the card shows above its buttons
   const odd = [ // (why Home offers no Allow for it, where that's in what it asks)
     ap.unseen && 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.',
-    ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.'
+    ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.',
+    ap.alike && 'Some names in this read the same, like “to” and “TO”. The app may use either one, so each is shown with the name it was sent with.'
   ].filter(Boolean).map((text) => h('p', { class: 'note warn' }, icon('triangle-alert'), text))
   if (!ap.what) return [...odd, h('pre', { class: 'approval-text exact' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
   const clamp = h('div', { class: 'clamp' }, visible(ap.body))
