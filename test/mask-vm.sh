@@ -6,7 +6,8 @@
 #              when the mask can't run, nothing is written unmasked
 #   cage mask forget: the VM drops the values behind its placeholders, and AGENTS.md gets new ones
 #   cage ask: the CLI runs as the agent, behind the mask, with the question from a file that is then removed (also
-#             when the CLI fails), and the answer comes back unmasked
+#             when the CLI fails), and the answer comes back unmasked; your terms as they are now are in place first,
+#             even before the VM's own setup has put them there, and the CLI doesn't run when they can't be
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -122,5 +123,24 @@ out="$(STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is dana.tester@example.com 
 grep -q "no answer" <<<"$out" || fail "cage ask, the CLI failing: $out"
 [ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk when the CLI failed"
 ok "cage ask: the CLI runs as the agent, masked, with the question as typed; its file is removed, also when it fails"
+
+# The VM's copy of your terms isn't there yet (its own setup puts it there only once it has installed everything), and
+# a term was added since it woke up: the CLI still gets your terms as they are now, masked. When they can't be put in
+# place (here: /etc/cage isn't a folder), the CLI doesn't run at all.
+vm rm -f /tmp/fail /tmp/asked /etc/cage/mask.terms
+cage mask add "Zeta Partners" </dev/null >/dev/null 2>&1
+out="$(STANDIN="$NAME" cage ask "ask Acme Corp and Zeta Partners" claude 2>/dev/null)"
+asked="$(vm cat /tmp/asked)"
+grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" || fail "the CLI didn't get your terms masked: $asked"
+if grep -qiE 'acme|zeta' <<<"$asked"; then fail "the CLI got your terms: $asked"; fi
+grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" || fail "cage ask: $out"
+[ "$(vm stat -c '%a %U' /etc/cage/mask.terms)" = "644 root" ] && [ "$(vm cat /etc/cage/mask.terms)" = "$(cat "$C/mask.terms")" ] \
+  && grep -qx 'Zeta Partners' "$C/mask.terms" || fail "the VM's terms: $(vm ls -l /etc/cage/mask.terms; vm cat /etc/cage/mask.terms)"
+vm sh -c 'rm -f /tmp/asked && mv /etc/cage /etc/cage.d && touch /etc/cage'
+out="$(STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
+grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran without your terms in place: $out / $(vm cat /tmp/asked 2>&1)"
+vm sh -c 'rm -f /etc/cage && mv /etc/cage.d /etc/cage'
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+ok "cage ask: the CLI gets your terms as they are now, masked, even before the VM has its own copy; it doesn't run when they can't be put in place"
 
 echo "all $pass mask VM tests passed"

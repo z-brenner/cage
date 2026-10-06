@@ -639,6 +639,9 @@ grep -qx 'Acme Corp' "$CAGE_HOME/agents/cursor/mask.terms" || fail "with /all on
 cage ask-all off </dev/null >/dev/null 2>&1; cage up cursor 2>/dev/null
 [ ! -e "$CAGE_HOME/agents/cursor/mask.terms" ] || fail "cursor kept your terms with /all off again"
 [ -e "$CAGE_HOME/agents/claude/mask.on" ] && [ ! -e "$CAGE_HOME/agents/codex/mask.on" ] || fail "mask.on isn't per agent"
+# a term added while the agents run (no restart): what's asked behind the mask gets it all the same (below)
+cage mask add "Beta Client" </dev/null >/dev/null 2>&1
+grep -qx 'Beta Client' "$CAGE_HOME/agents/codex/mask.terms" && fail "codex's copy of your terms changed without a restart or an ask"
 printf 'cage-claude\ncage-codex\n' > "$T/running"
 export MSB_RUNNING="$T/running" MSB_SENT="$T/sent" MSB_PS="$T/ps"
 pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `cage up` started, without these settings, would race `cage _outbox` below)
@@ -654,12 +657,19 @@ grep -qF "$marker" "$MSB_SENT" || fail "the conversation didn't reach the stand-
 [ -s "$MSB_PS" ] || fail "no process list taken during the ask"
 if grep -qF "$marker" "$MSB_LOG" "$MSB_PS"; then fail "the conversation was on a command line"; fi
 [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "question files left behind"
+# Before the CLI runs behind the mask, the VM's copy of your terms (which its own setup puts there only once it has
+# installed everything, and only when it wakes up) is made, as root, exactly your terms as they are now
+[ "$(cat "$CAGE_HOME/agents/codex/mask.terms")" = $'Acme Corp\nBeta Client' ] || fail "codex wasn't given your terms as they are now: $(cat "$CAGE_HOME/agents/codex/mask.terms")"
+flat="$(tr '\n' ' ' < "$MSB_LOG")"
+[[ "$flat" == *'cage-codex | -- | bash | -c | q="$(cat "$1")" || exit 1 '*'if [ -e /cage-config/mask.terms ]; then install -D -m 644 /cage-config/mask.terms "/etc/cage/.mask.terms.$$" && '*'mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms; else rm -f /etc/cage/mask.terms; fi || exit 1 '*'exec runuser -u agent '*'exec python3 /cage/mask.py codex exec'* ]] \
+  || fail "the stand-in's CLI ran before its VM had your terms: $(cat "$MSB_LOG")"
 : > "$MSB_LOG"
 cage ask "is it $marker?" codex >/dev/null 2>&1
 grep -q '^exec | .*cage-codex' "$MSB_LOG" || fail "cage ask didn't ask codex"
 grep -q '/cage/mask.py' "$MSB_LOG" && fail "cage ask masked for codex, which has it off"
-cage fallback claude off </dev/null 2>/dev/null
-ok "relays keep the mask: your terms go where a masked agent's words can, a stand-in answers behind it, never via ps"
+grep -q 'mask.terms' "$MSB_LOG" && fail "cage ask touched codex's terms, with no mask involved: $(cat "$MSB_LOG")"
+cage fallback claude off </dev/null 2>/dev/null; cage mask rm "Beta Client" </dev/null 2>/dev/null
+ok "relays keep the mask: your terms go where a masked agent's words can, a stand-in answers behind it with your terms as they are now, never via ps"
 
 # an answer is the VM's text: printed here, it can't carry terminal control codes (to rewrite the screen, set the clipboard)
 out="$(cage ask $'hi \033]52;c;Y3VybA==\007 \033[2Jthere' codex 2>/dev/null)"
