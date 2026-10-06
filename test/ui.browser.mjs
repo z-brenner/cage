@@ -326,10 +326,16 @@ if (!/^claude \d{4}-\d\d-\d\d \d{4}\.md$/.test(saved.suggestedFilename()) || !fs
 const sent = (text) => (fs.readFileSync(path.join(dir, 'log.jsonl'), 'utf8').match(new RegExp(`"t":"you"[^\\n]*"text":"${text}"`, 'g')) || []).length
 // (the page is there once it's drawn, a moment after the address changes: a shortcut before that is still the last page's)
 const drawn = (at) => page.waitForFunction((at) => location.hash === '#' + at && document.getElementById('main').dataset.page === at, at, { timeout: 5000 })
+// (into its message box; what you were writing to the other one is kept for it, and there when you come back)
+await composerBox.fill('a draft for Claude')
 await page.keyboard.press('Alt+2')
 await drawn('agent/codex')
+const inBox = (agent) => page.evaluate((agent) => !!CHAT && CHAT.agent === agent && document.activeElement === CHAT.ta ? CHAT.ta.value : null, agent)
+if ((await inBox('codex')) !== '') fail('Alt+2 did not open Codex\'s chat ready to write in: the focus is on ' + await page.evaluate(() => document.activeElement.outerHTML.slice(0, 80)))
 await page.keyboard.press('Alt+1')
 await drawn('agent/claude')
+if ((await inBox('claude')) !== 'a draft for Claude') fail('back in Claude\'s chat with Alt+1, what you were writing is not there: ' + await inBox('claude'))
+await composerBox.fill('')
 // but in a box you type in, Option and a digit types a character on a Mac ("#" on a UK keyboard, "@" on a Swedish one):
 // it goes into the box, and the page stays
 const composed = await page.evaluate(() => {

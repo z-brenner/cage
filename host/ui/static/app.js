@@ -1276,6 +1276,14 @@ function chatOpen (a) {
   C.el.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); C.el.classList.add('drop') } })
   C.el.addEventListener('dragleave', (e) => { if (!C.el.contains(e.relatedTarget)) C.el.classList.remove('drop') })
   C.el.addEventListener('drop', (e) => { e.preventDefault(); C.el.classList.remove('drop'); attach(C, e.dataTransfer.files) })
+  const draft = DRAFTS[a]   // what you wrote here and didn't send, before you looked at another agent
+  if (draft) {
+    delete DRAFTS[a]
+    C.ta.value = draft.text
+    C.attached = draft.attached
+    drawAttached(C)
+    requestAnimationFrame(() => { grow(C.ta); if (blanksLeft(C.ta.value).length) blanksHint(C) })   // (once it's on the page)
+  }
   CHAT = C
   chatLoad(C)
   return C
@@ -1288,8 +1296,13 @@ function recipesBy (C, show) { // the recipes by the message box: shown (drawn a
   C.recipePanel.replaceChildren(h('div', { class: 'recipes-head' }, h('p', { class: 'recipes-title' }, 'Start from a recipe'),
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close the recipes', onclick: () => { recipesBy(C, false); C.recipeBtn.focus() } }, icon('x'))), recipeTiles(a, 'chat'))
 }
+// What you wrote to an agent and didn't send yet stays its own while you look at another one (in this page only):
+// the text, and the files that finished going up
+const DRAFTS = {}
 function chatClose () {
   if (!CHAT) return
+  const attached = CHAT.attached.filter((f) => !f.uploading && f.path)
+  if (CHAT.ta.value.trim() || attached.length) DRAFTS[CHAT.agent] = { text: CHAT.ta.value, attached }
   clearTimeout(CHAT.retry)
   CHAT = null
 }
@@ -2239,7 +2252,11 @@ document.addEventListener('keydown', (e) => {
   // digit is how many keyboards type "#", "@", "$" or "£", which must go into the box, not to another page.
   if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-4]$/.test(e.code) && !(field && !/^[1-4]$/.test(e.key))) {
     const a = STATE.agents.slice().sort((x, y) => y.enabled - x.enabled)[+e.code.slice(5) - 1]
-    if (a) { e.preventDefault(); go('agent/' + a.name) }
+    if (a) { // its chat, ready to write in (unless you stay, to save what you wrote on this page)
+      e.preventDefault()
+      if (!a.enabled) go('agent/' + a.name)
+      else { const C = openChat(a.name); if (C) C.ta.focus() }
+    }
   } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyO') {
     if (page.startsWith('agent/')) { e.preventDefault(); newConversation(page.split('/')[1]) }
   } else if (e.key === 'Escape' && CHAT && page === 'agent/' + CHAT.agent && !CHAT.typing.hidden && !CHAT.ta.value.trim() && (!field || document.activeElement === CHAT.ta)) {

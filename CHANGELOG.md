@@ -23,7 +23,7 @@ Nothing yet.
 - **Plan usage on Home:** how much of each plan is left and when it resets, for Claude Code and Codex. Home checks at most every 10 minutes. An agent that has used up its plan is offered a stand-in right there.
 - **Stop, Copy and Save in the app's chat.** Stop (or Esc, when you haven't typed anything) stops the agent while it works. Copy puts an answer on the clipboard with its formatting, for Word or an email, and Save as a file downloads it.
 - **Recipes:** eight ready-made tasks to start from, in the chat (an empty one shows them; later, Recipes by the message box), and the six that run on a schedule on an agent's Schedule tab too, such as a morning briefing, inbox triage, a first pass on a contract or NDA, and receipts into a spreadsheet. Each says which apps it uses, and marks anything you fill in yourself, like the topic of a news watch.
-- **Keyboard shortcuts in the app:** Alt+1 to 4 opens an agent's chat, Ctrl+Shift+O starts a new conversation, and ? lists them all.
+- **Keyboard shortcuts in the app:** Alt+1 to 4 opens an agent's chat, ready to write in, Ctrl+Shift+O starts a new conversation with the agent you're on, and ? lists them all. What you were writing to one agent waits for you while you look at another.
 - **Go back a release.** `cage rollback` puts back the release you had before, without a download. `cage update --to v0.3.0` installs any release you name, older ones too.
 - **Take cage off your computer.** On Linux: `cage uninstall`. On Windows: run the install line with `$env:CAGE_UNINSTALL='1'` set first. Your backups always stay.
 - **New commands:** `cage restart`, `cage remove <agent>`, `cage logs <agent> --tail 500` (or `-f` to follow along), `cage status --json` and `cage chat rm telegram <agent>`.
