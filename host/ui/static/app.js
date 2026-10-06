@@ -1693,14 +1693,16 @@ function choose (C, box, value, label, pending) {
     box.classList.remove('is-answered')
     const chosen = box.querySelector('.chosen')
     if (row && chosen) chosen.replaceWith(row)
-    box.querySelectorAll('button').forEach((b) => { b.disabled = false })
+    box.querySelectorAll(ANSWERS).forEach((b) => { b.disabled = false })
     toast(err.message)
   })
 }
-// What a card says once it's answered (what you chose), or once it can't be (why), instead of its buttons
+// What a card says once it's answered (what you chose), or once it can't be (why), instead of its buttons. Only its
+// answers are off: what it shows can still be read (an email's body, with Show all)
+const ANSWERS = '.choice-row button, .list-item button'
 function answered (box, label, why) {
   box.classList.add('is-answered')
-  box.querySelectorAll('button').forEach((b) => { b.disabled = true })
+  box.querySelectorAll(ANSWERS).forEach((b) => { b.disabled = true })
   const row = box.querySelector('.choice-row, .chosen')
   if (row) row.replaceWith(why ? h('div', { class: 'chosen over' }, icon('info'), why) : h('div', { class: 'chosen' }, icon('check'), 'You chose: ', h('b', {}, label.replace(/^[^\p{L}\p{N}]+/u, ''))))
 }
