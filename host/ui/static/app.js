@@ -1167,9 +1167,12 @@ async function useRecipe (a, r, where, button) {
   }
   // One that reads your email runs by itself with nobody watching, and anyone can send you an email: without "Ask
   // before acting", what an email says could get the agent to send or change things in your apps. Say so first.
-  if (r.needs.includes('zapier') && !a.approve && !(await confirmSheet(`${r.title} runs by itself and reads your email, which anyone can send you. ` +
-    `${a.label} doesn’t ask before acting in your apps now, so an email could get it to send or change something there. To be safe, turn on “Ask before acting” in its settings first.`,
-  'Add it anyway', 'Not now'))) return
+  // Codex never asks: working read-only (its switch) may not stop it in your apps, so it's said for Codex either way.
+  const unwatched = a.name === 'codex'
+    ? 'Codex can’t ask before acting in your apps, and working read-only may not stop it there, so an email could get it to send or change something. To be safe, add it to another agent, with “Ask before acting” on.'
+    : `${a.label} doesn’t ask before acting in your apps now, so an email could get it to send or change something there. To be safe, turn on “Ask before acting” in its settings first.`
+  if (r.needs.includes('zapier') && (!a.approve || a.name === 'codex') &&
+    !(await confirmSheet(`${r.title} runs by itself and reads your email, which anyone can send you. ${unwatched}`, 'Add it anyway', 'Not now'))) return
   // as it is: the same task the form below would add (cc-connect's cron, through the agent's VM)
   const expr = cronOf(sched.kind, sched.time, sched.day)
   button.disabled = true   // (once: a second click would add it twice)
@@ -1845,7 +1848,23 @@ function usageView (a, offer) { // bars, or why there are none; offer: a stand-i
   ]
 }
 
-// Settings for one agent: chat apps, asking first, plan usage, privacy, stand-in, troubleshooting
+// Asking first (cage approve): Claude Code asks before it uses your apps, Cursor and Antigravity before every action.
+// Codex can't ask at all: with it on, cc-connect runs Codex in its read-only sandbox and never asks (approval_policy
+// never), so its switch is called what it does, and nothing says it asks.
+function askingFirst (a) {
+  if (a.name === 'codex') {
+    return section('Working read-only', '', h('div', { class: 'card' },
+      setting('Work read-only', 'Codex can’t ask you before it acts. With this on, it works read-only instead: it can read and answer, but not change files. Apps you connected for it may still let it act, so to be sure, don’t connect apps to Codex.',
+        toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Working read-only'), 'Work read-only'))))
+  }
+  return section('Asking first', '', h('div', { class: 'card' },
+    setting('Ask before acting in your apps', a.name === 'claude'
+      ? 'Before it sends an email, books a meeting or changes anything in an app you connected, it asks you in the chat. Work on its own computer goes ahead.'
+      : `${a.label} can only ask before every action, so expect more questions. It asks in the chat, with Allow and Deny buttons.`,
+    toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Asking first'), 'Ask before acting'))))
+}
+
+// Settings for one agent: chat apps, asking first (or working read-only), plan usage, privacy, stand-in, troubleshooting
 function agentSettings (a) {
   const s = statusOf(a)
   const meta = AGENT[a.name]
@@ -1876,11 +1895,7 @@ function agentSettings (a) {
     section('Plan usage', `How much is left on its plan (${a.plan}). Only Claude Code and Codex can tell.`, h('div', { class: 'card usage-card' },
       h('div', { class: 'usage', 'data-usage': a.name }, usageView(a)),
       a.state === 'ready' && TELLS_USAGE.includes(a.name) ? h('div', { class: 'row' }, btn('Check again', again, 'sm ghost', 'refresh-cw')) : null)),
-    section('Asking first', '', h('div', { class: 'card' },
-      setting('Ask before acting in your apps', a.name === 'claude'
-        ? 'Before it sends an email, books a meeting or changes anything in an app you connected, it asks you in the chat. Work on its own computer goes ahead.'
-        : `${a.label} can only ask before every action, so expect more questions. It asks in the chat, with Allow and Deny buttons.`,
-      toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Asking first'), 'Ask before acting')))),
+    askingFirst(a),
     section('Chat apps', 'Talk to it from your phone too. Only you can message it, unless you let others in.', h('ul', { class: 'list chats' }, CHATS.map(([k, n]) => chatRow(k, n)))),
     section('Preferences', '', h('div', { class: 'card' },
       setting('Privacy mask', `In what you type, your About me and your notes’ names and titles, emails, phone and card numbers, bank details, keys and your own words reach ${meta.vendor} as placeholders like [EMAIL_1], and come back as themselves. Files and pictures you send, notes and web pages it opens, and app results go as they are; voice notes go to Groq as they are, if you use Groq for them. Anyone who can chat with it can ask it about masked values, and so can a web page or app result it reads. The real values are kept in its VM, so something that tells it to look there can find them.`,
