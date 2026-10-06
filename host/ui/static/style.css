@@ -21,8 +21,8 @@
   --raised: #ffffff;
   --fg: #3f3f46;
   --ink: #18181b;
-  --muted: #71717a;
-  --faint: #a1a1aa;
+  --muted: #6e6e77;
+  --faint: #a1a1aa;            /* icons and lines only: too faint for text (--muted is the faintest text) */
   --line: #e4e4e7;
   --line-soft: #efeff1;
   --hover: #f4f4f5;
@@ -153,14 +153,13 @@ code, .mono { font-family: var(--mono); font-size: .9em; }
 }
 #nav a:hover { background: var(--hover); color: var(--fg); }
 #nav a.active { background: var(--card); color: var(--ink); box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); }
-#nav a.off { color: var(--faint); }
 #nav a.off .avatar { filter: grayscale(1); opacity: .55; }
 #nav .ic { display: grid; place-items: center; width: 18px; }
 #nav .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #nav .nav-add { color: var(--faint); opacity: 0; transition: opacity .12s; display: grid; }
 #nav a:hover .nav-add { opacity: 1; }
 #nav .nav-add .i { width: 14px; height: 14px; }
-.nav-group { display: flex; align-items: center; gap: 8px; padding: 18px 8px 6px; font-size: 12px; font-weight: 500; color: var(--faint); }
+.nav-group { display: flex; align-items: center; gap: 8px; padding: 18px 8px 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .nav-group::after { content: ""; flex: 1; height: 1px; background: var(--line); opacity: .7; }
 .nav-spacer { flex: 1; min-height: 20px; }
 .badge {
@@ -168,7 +167,7 @@ code, .mono { font-family: var(--mono); font-size: .9em; }
   background: var(--line); color: var(--ink); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .badge.alert { background: var(--bad); color: #fff; }
-.sidebar-foot { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 8px 2px; color: var(--faint); font-size: 12px; }
+.sidebar-foot { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 8px 2px; color: var(--muted); font-size: 12px; }
 .sidebar-foot .update {
   display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; cursor: pointer;
   border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -277,7 +276,7 @@ input[type=text], input[type=password], select, textarea {
   font: inherit; font-size: 14px; transition: border-color .12s, box-shadow .12s;
 }
 textarea { height: auto; padding: 10px 12px; line-height: 1.55; resize: vertical; }
-input::placeholder, textarea::placeholder { color: var(--faint); }
+input::placeholder, textarea::placeholder { color: var(--muted); }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--ring-solid); box-shadow: 0 0 0 3px var(--ring); }
 select {
   width: auto; padding-right: 30px; appearance: none; cursor: pointer;
@@ -434,7 +433,7 @@ input[type=checkbox] { accent-color: var(--primary); width: 15px; height: 15px; 
 
 .answers { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 .answers-q { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.answers-q .you { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.answers-q .you { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .answers-q p { flex: 1; min-width: 200px; margin: 0; color: var(--ink); font-weight: 550; overflow-wrap: anywhere; }
 .answers-grid { display: grid; gap: 12px; grid-template-columns: repeat(var(--n, 1), minmax(0, 1fr)); align-items: start; }
 .answer-card {
@@ -545,7 +544,7 @@ dialog#job.wide .job-log:empty + .job-term { margin-top: 16px; }
 .msg a { color: var(--link); text-underline-offset: 2px; }
 .step { display: flex; flex-direction: column; gap: 2px; margin-top: 14px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
 .step:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
-.step-n { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+.step-n { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
 .step-title { color: var(--ink); font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 pre.block { margin: 0 0 0 30px; padding: 12px 14px; border-radius: 10px; background: var(--hover); font: 13.5px/1.55 var(--font); white-space: pre-wrap; overflow-wrap: anywhere; }
 .qr { align-self: flex-start; display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 4px 0 4px 30px; padding: 14px 14px 10px; background: #fff; border: 1px solid var(--line); border-radius: 14px; }
@@ -681,7 +680,7 @@ dialog.keys::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparen
 
 .msg-you { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; margin-left: 15%; animation: rise .2s var(--ease); }
 .msg-you .bubble { max-width: 100%; padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: color-mix(in srgb, var(--primary) 9%, var(--card)); border: 1px solid color-mix(in srgb, var(--primary) 14%, var(--line)); color: var(--ink); }
-.msg-you time, .agent-who time { color: var(--faint); font-size: 11px; }
+.msg-you time, .agent-who time { color: var(--muted); font-size: 11px; }
 .md.plain { white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-agent { display: flex; flex-direction: column; gap: 6px; margin-right: 6%; animation: rise .2s var(--ease); }
 .msg-agent:not(.first) { margin-top: -6px; }
@@ -696,7 +695,7 @@ dialog.keys::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparen
 @media (hover: none) { .msg-tools { opacity: 1; } }
 .msg-agent.streaming .agent-body .md > :last-child::after { content: "▍"; margin-left: 2px; color: var(--muted); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
-.chat-divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; font-weight: 500; }
+.chat-divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; font-weight: 500; }
 .chat-divider::before, .chat-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .chat-divider.earlier { margin-bottom: 4px; }
 .link-host { color: var(--muted); font-size: .92em; }   /* where a link with words of its own really goes */

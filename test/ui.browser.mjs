@@ -836,12 +836,13 @@ await page.keyboard.press('Escape')
 ok('a main heading on every page, focused on arrival only; the palette is a combobox; the page asks and tells in its own words (no browser boxes)')
 
 // No colour too faint to read, and a main heading, on each page in light and dark (with axe-core, when the test is given
-// it: CAGE_TEST_AXE=/path/to/axe.min.js)
+// it: CAGE_TEST_AXE=/path/to/axe.min.js). Phone-sized too: on a wide window, Home's background is a gradient, and axe
+// can't tell the contrast of any text on it (test/style.test.mjs reads the colours themselves, always).
 if (process.env.CAGE_TEST_AXE) {
   const axe = fs.readFileSync(process.env.CAGE_TEST_AXE, 'utf8')
   const found = []
-  for (const colorScheme of ['light', 'dark']) {
-    const c = await browser.newContext({ locale: 'en-US', timezoneId: 'UTC', reducedMotion: 'reduce', colorScheme, bypassCSP: true, viewport: { width: 1280, height: 860 } })
+  for (const [colorScheme, width] of [['light', 1280], ['dark', 1280], ['light', 390], ['dark', 390]]) {
+    const c = await browser.newContext({ locale: 'en-US', timezoneId: 'UTC', reducedMotion: 'reduce', colorScheme, bypassCSP: true, viewport: { width, height: 860 } })
     const p = await c.newPage()
     await p.goto(base + '/#pair=' + pairing())
     await p.locator('.agent').first().waitFor({ timeout: 15000 })
@@ -851,12 +852,12 @@ if (process.env.CAGE_TEST_AXE) {
       await p.waitForTimeout(at === 'setup' ? 3000 : 1200)   // what the page loads (the schedule, the work folder, the checks)
       await p.evaluate(axe)
       const r = await p.evaluate(() => window.axe.run(document, { runOnly: { type: 'rule', values: ['color-contrast', 'page-has-heading-one'] } }))
-      for (const v of r.violations) for (const n of v.nodes) found.push(`${colorScheme} #${at}: ${v.id} ${n.target.join(' ')} ${(n.any[0] || {}).message || ''}`)
+      for (const v of r.violations) for (const n of v.nodes) found.push(`${colorScheme} ${width}px #${at}: ${v.id} ${n.target.join(' ')} ${(n.any[0] || {}).message || ''}`)
     }
     await c.close()
   }
   if (found.length) fail('axe-core:\n' + found.join('\n'))
-  ok('axe-core, 12 pages, light and dark: no text too faint to read, and a main heading on each')
+  ok('axe-core, 12 pages, light and dark, wide and phone-sized: no text too faint to read, and a main heading on each')
 } else console.log('# skipped axe-core (set CAGE_TEST_AXE to the path of axe.min.js)')
 
 // setting up a fresh computer: checks, picking agents, signing in by device code, about you (opened the older way,
