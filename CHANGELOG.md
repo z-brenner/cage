@@ -19,7 +19,7 @@ Nothing yet.
 ## v0.4.0 (2026-10-05)
 
 **New:**
-- **Home shows an agent waiting for your OK,** in the same words as its chat ("Gmail: send email to bob@acme.com"), with Allow, Deny and Open (just Open and Deny when the request is too long to show there in full). Each agent's row on Home says what it's doing: waiting for your OK, working, or what it said last.
+- **Home shows an agent waiting for your OK,** in the same words as its chat ("Gmail: send email to bob@acme.com"), with Allow, Deny and Open (just Open and Deny when there's more to the request than that line shows). Each agent's row on Home says what it's doing: waiting for your OK, working, or what it said last.
 - **Plan usage on Home:** how much of each plan is left and when it resets, for Claude Code and Codex. Home checks at most every 10 minutes. An agent that has used up its plan is offered a stand-in right there.
 - **Stop, Copy and Save in the app's chat.** Stop (or Esc, when you haven't typed anything) stops the agent while it works. Copy puts an answer on the clipboard with its formatting, for Word or an email, and Save as a file downloads it.
 - **Recipes:** eight ready-made tasks to start from, in the chat (an empty one shows them; later, Recipes by the message box), and the six that run on a schedule on an agent's Schedule tab too, such as a morning briefing, inbox triage, a first pass on a contract or NDA, and receipts into a spreadsheet. Each says which apps it uses, and marks anything you fill in yourself, like the topic of a news watch.
@@ -50,6 +50,7 @@ Nothing yet.
 - **Every release now comes with notes like these,** and is published only from a commit that passed all of cage's tests.
 
 **Fixed:**
+- In the app's chat, Allow on a request the agent had stopped waiting for (you'd answered it in a message or stopped it, or it had asked something else since) could say yes to what it asked next. An answer now goes only to the request it was for, and a request the agent stopped waiting for says so.
 - An offline `cage update` could delete cage and leave the `cage` command pointing at nothing.
 - When GitHub's release list didn't answer, an update could quietly install an unreviewed copy of the code.
 - The app kept running its old version after an update.
