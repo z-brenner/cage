@@ -19,7 +19,11 @@ Nothing yet.
 ## v0.4.0 (2026-10-05)
 
 **New:**
-<!-- web app home and approvals: added when that PR merges -->
+- **Home shows an agent waiting for your OK,** in the same words as its chat ("Gmail: send email to bob@acme.com"), with Allow, Deny and Open (just Open and Deny when the request is too long to show there in full). Each agent's row on Home says what it's doing: waiting for your OK, working, or what it said last.
+- **Plan usage on Home:** how much of each plan is left and when it resets, for Claude Code and Codex. Home checks at most every 10 minutes. An agent that has used up its plan is offered a stand-in right there.
+- **Stop, Copy and Save in the app's chat.** Stop (or Esc, when you haven't typed anything) stops the agent while it works. Copy puts an answer on the clipboard with its formatting, for Word or an email, and Save as a file downloads it.
+- **Recipes:** eight ready-made tasks to start from, on an agent's Schedule tab and in an empty chat, such as a morning briefing, inbox triage, a first pass on a contract or NDA, and receipts into a spreadsheet. Each says which apps it uses, and marks anything you fill in yourself, like the topic of a news watch.
+- **Keyboard shortcuts in the app:** Alt+1 to 4 opens an agent's chat, Ctrl+Shift+O starts a new conversation, and ? lists them all.
 - **Go back a release.** `cage rollback` puts back the release you had before, without a download. `cage update --to v0.3.0` installs any release you name, older ones too.
 - **Take cage off your computer.** On Linux: `cage uninstall`. On Windows: run the install line with `$env:CAGE_UNINSTALL='1'` set first. Your backups always stay.
 - **New commands:** `cage restart`, `cage remove <agent>`, `cage logs <agent> --tail 500` (or `-f` to follow along), `cage status --json` and `cage chat rm telegram <agent>`.
@@ -38,6 +42,8 @@ Nothing yet.
 - **Asking your other agents keeps the mask.** What you told a masked agent stays masked when `/all`, a stand-in or `cage ask` passes it on. The question is no longer on a command line, where others on your computer could read it.
 - **The app opens with a one-time code,** never with its key in the address bar.
 - **Old files in the app's chat folder are cleared** after a week when no chat mentions them, sooner when the folder passes 2 GB.
+- **When an agent asks for your OK in the app, it says in words what it would do** ("Gmail: send email", to whom, the subject and the email) instead of showing cc-connect's raw text, which stays one click away. "Allow All (this session)" is now "Allow for the rest of this conversation", and the notification says the same as the chat.
+- **The app works better with a screen reader and the keyboard:** text that was too faint is darker, every page has a main heading that gets the focus, an answer still being written is read out once, when it's done, and the app asks and tells you things in its own messages instead of the browser's pop-ups.
 - **WhatsApp messages you send while the agent is asleep reach it when it wakes,** if they're less than a day old.
 - **With `cage approve claude on`,** Claude's newer tools that stay inside its own computer go ahead without asking.
 - **The computer check** explains how to turn on nested virtualization when cage runs in a virtual machine, and names only the site that's blocked.
@@ -52,10 +58,11 @@ Nothing yet.
 - WhatsApp lost messages sent while the agent's chat service restarted, and kept asking WhatsApp for new linking codes while nobody was linking.
 - A voice note sent while the agent was starting failed instead of waiting for the speech model.
 - Questions over 8 KB failed in the app, files with non-Latin names couldn't be downloaded, Esc stopped running jobs, and switches showed your click even when cage didn't do it.
+- The app forgot which chats you hadn't read when you reloaded it, and marked a reply as unread while you were looking at that agent's files or settings. A file smaller than 1 kB showed as 1 kB.
 - An agent's computer could trick cage: with links in its chat folder or memory inbox, with terminal control codes in a note or in what cage showed while waking it up, by faking one of cage's questions in the app, or (on Windows) with a sign-in link that ran PowerShell commands.
 - Two cage commands at once could lose a setting, and a full disk could cut your settings short.
 - One agent that couldn't start kept the others asleep.
-- `cage approve codex on` said Codex would ask you in the chat. It can't; it now says Codex works read-only.
+- `cage approve codex on`, and the app's switch for it, said Codex would ask you in the chat. It can't; both now say Codex works read-only.
 - A backup that wouldn't open again could still be reported as saved. Restore now checks the passphrase and free space first.
 
 **After updating:**
