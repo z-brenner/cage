@@ -16,7 +16,7 @@ Write for the people who use cage, not for its developers: short sentences, no i
 
 Nothing yet.
 
-## v0.4.0 (2026-10-05)
+## v0.4.0 (2026-10-06)
 
 **New:**
 <!-- web app home and approvals: added when that PR merges -->
@@ -57,6 +57,7 @@ Nothing yet.
 - One agent that couldn't start kept the others asleep.
 - `cage approve codex on` said Codex would ask you in the chat. It can't; it now says Codex works read-only.
 - A backup that wouldn't open again could still be reported as saved. Restore now checks the passphrase and free space first.
+- `/all` in an agent's chat ran another command, `/allow`: that agent never got your question, and a tool named like its first word could then run without asking first (`/all Write a poem` allowed Write). Now that agent answers too, however you capitalize `/all`, with your question exactly as you wrote it, and `/allow` is turned off. Chat apps' command menus list it as `/askall`.
 
 **After updating:**
 - Nothing to do for most. Your agents are rebuilt with fresh downloads, and keep their logins and files.
