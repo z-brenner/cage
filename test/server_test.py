@@ -369,6 +369,31 @@ class Activity(unittest.TestCase):
             self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
             self.assertEqual(server.activity(self.chat, 0)["pending"], {"text": "May I?", "at": 7}, after)
 
+    def test_commands_as_cc_connect_reads_them(self):
+        """cc-connect runs a command by the start of its name when just one of its commands has a name that starts so
+        ("/sto" is /stop, "/rea" /reasoning, "/ch" /dir as chdir), and a "/" message that names none of its commands
+        is a message to it, an answer when it has an answer word in it ("/x yes"). /mode told a mode, and a card's
+        act: button that switches something, start the agent's session afresh: those end the wait (as cc-connect
+        v1.5.1-beta.3 does, each one tried against it: then a "yes" answers nothing). Those that leave it waiting
+        don't: a command that only shows something, or is told nothing, or names more than one ("/c")."""
+        for after in ("/sto", "/ne", "/ca", "/canc", "/rea high", "/eff low", "/ch /tmp", "/x yes", "/ yes", "/foo ok", "/c yes",
+                      "/x 'yes'", "/mode plan", "/mode default", "/STOP", "/stop please", "/new now", '/"stop"', "/d\u0130r /tmp",
+                      "/provider work", "/provider sw work", "/upgrade confirm", "/restart", "act:/mode default", "act:/mode plan",
+                      "act:/new", "act:/stop", "act:/model switch 2", "act:/reasoning 2", "act:/provider clear", "act:/switch 3",
+                      "act:/dir select 2", "cmd:/sto", "cmd:/mode plan", "cmd:yes", "askq:yes"):
+            line = {"t": "action", "action": after} if after.split(":")[0] in ("act", "cmd", "askq") else {"t": "you", "text": after}
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(line, at=8))
+            self.assertIsNone(server.activity(self.chat, 0)["pending"], after)
+            self.assertTrue(server.ends(line), after)
+        for after in ("What does it do?", "/help", "/compact", "/c", "/sw", "/model", "/mode", "/provider list", "/provider l",
+                      "/provider switch", "/upgrade", "/upgrade check", "/dir help", "/ps yes", "/all yes", "/stop\nplease", "/yes",
+                      "act:/mode", "act:/lang en", "act:/heartbeat pause", "act:/STOP", "nav:/mode", "nav:/new", "cmd:/help",
+                      "askq:0:1"):
+            line = {"t": "action", "action": after} if after.split(":")[0] in ("act", "cmd", "askq", "nav") else {"t": "you", "text": after}
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(line, at=8))
+            self.assertEqual(server.activity(self.chat, 0)["pending"], {"text": "May I?", "at": 7}, after)
+            self.assertFalse(server.ends(line), after)
+
     def test_working_and_last(self):
         self.write({"t": "you", "text": "hi", "at": 1}, {"t": "reply", "text": "hello", "at": 2},
                    {"t": "card", "card": {"header": {"title": "Usage"}}, "at": 3}, {"t": "file", "name": "a.md", "at": 4},
@@ -844,20 +869,21 @@ class Live(unittest.TestCase):
     def test_typed_after_an_answer(self):
         """A message cc-connect reads as an answer ("yes", "ok, and…", "no") is one, typed or not. Typed after Allow (from
         Home, or another window's card) while the approval still seems to wait, it would answer what the agent asks
-        next, which nobody has seen. So it gets 409, and nothing is sent (the page keeps it in the box). A command
-        (/stop) still goes, and so does anything once the VM has taken the answer."""
+        next, which nobody has seen. So it gets 409, and nothing is sent (the page keeps it in the box); "/x yes" too,
+        which cc-connect reads as a message, x being none of its commands. A command of its own (/stop, or /sto for
+        short) still goes, and so does anything once the VM has taken the answer."""
         p = self.asks("claude", "Bash(ls)")
         self.assertEqual(self.answer("claude", "perm:allow", p)[0], 200)
-        for text in ("Yes, go on.", "ok, and then run the tests", "No!", "好的", "/stop yes"):
-            files = [{"path": "files/a.png", "name": "a.png", "mime": "image/png"}] if text.startswith("/") else []
+        for text in ("Yes, go on.", "ok, and then run the tests", "No!", "好的", "/stop yes", "/x yes", "/c yes"):
+            files = [{"path": "files/a.png", "name": "a.png", "mime": "image/png"}] if text == "/stop yes" else []
             if files:
                 os.makedirs(os.path.join(server.APPDIR, "claude", "files"), exist_ok=True)
                 open(os.path.join(server.APPDIR, "claude", "files", "a.png"), "wb").close()
             status, _, body = self.call("POST", "/api/chat/claude/send", {"text": text, "files": files})
             self.assertEqual((status, strict(body)["error"]), (409, "You answered that already. Send this again once the chat shows your answer."), text)
         self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "What does it do?"})[0], 200)   # (not an answer)
-        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "/stop"})[0], 200)
-        self.assertEqual(sorted(r.get("action") or r["text"] for r in self.sent("claude")), ["/stop", "What does it do?", "perm:allow"])
+        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "/sto"})[0], 200)
+        self.assertEqual(sorted(r.get("action") or r["text"] for r in self.sent("claude")), ["/sto", "What does it do?", "perm:allow"])
         self.taken("claude")
         self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "Yes, go on."})[0], 200)
 

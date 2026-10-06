@@ -547,24 +547,115 @@ class Chat:
 
 TAIL = 512 << 10   # how much of the end of a chat log Home reads
 WORKING = 15 * 60   # "working…" for longer than this without a word is stale (it was stopped, or its VM restarted)
-# How cc-connect (v1.5.0 and 1.5.1-beta.3, core/engine.go) reads what you send while it waits for your OK: a message
-# with any of these words in it is the answer (allow, deny or allow all, in English or Chinese), and so is a perm:
-# button; anything else gets "Waiting for permission response", and the approval still waits. A command that ends the
-# turn ends the wait too, and so does one that starts the agent's session afresh (cleanupInteractiveState): /switch,
-# /model, /reasoning, /dir and /provider when they're told what to switch to (without, they only show what there is). So
-# does a restart of cc-connect, which keeps what it waits for only in memory: the relay registering with it again (a
-# "status" line).
+# How cc-connect (v1.5.0 and 1.5.1-beta.3, core/engine.go) reads what you send while it waits for your OK. A message
+# that starts with "/" (and has no picture) is one of its own commands when it names one: by one of its names, in any
+# case, or by the start of just one command's names ("/sto" is /stop, "/ch" is /dir, as "chdir"). Those that end the
+# turn end the wait (/stop, /new, /cancel), and so do those that start the agent's session afresh
+# (cleanupInteractiveState) when they're told what to switch to: /switch, /model, /reasoning, /mode, /dir and
+# /provider (without, they show what there is); and /restart and /upgrade confirm, which restart cc-connect. Its other
+# commands leave the wait as it is. Any other message is the answer when it has one of these words in it (allow, deny
+# or allow all, in English or Chinese), a "/" one that names none of its commands too ("/x yes": cc-connect says it
+# isn't one of its commands, and reads it as a message). Anything else gets "Waiting for permission response", and
+# the approval still waits.
+# A card's buttons (core/bridge.go): perm: is an answer; cmd: is the message after it, and askq: the message as it is;
+# act: does what the card does (executeCardAction: /new and /stop end the wait, and /model, /reasoning, /mode,
+# /provider, /switch and /dir start afresh when told what to switch to); nav: only shows another card.
+# Where cc-connect may or may not end it (/mode with the mode it's in, a /model it doesn't have), it counts as ended:
+# the card then says it isn't waiting any more, and an answer typed in the chat still goes. A restart of cc-connect
+# ends the wait too, as it keeps what it waits for only in memory: the relay registering with it again (a "status"
+# line).
 ANSWER_WORDS = {"allow", "yes", "y", "ok", "approve", "deny", "no", "n", "reject", "cancel", "allowall", "允许", "同意",
                 "可以", "好", "好的", "是", "确认", "拒绝", "不允许", "不行", "不", "否", "取消", "允许所有", "允许全部",
                 "全部允许", "所有允许", "都允许", "全部同意"}
 ANSWER_SPLIT = re.compile(r"[\s@＠,，.。!！?？:：;；()（）\[\]【】\"'“”‘’、·]+")
-ENDS_TURN = ("/stop", "/new", "/cancel")
-STARTS_AFRESH = ("/switch", "/model", "/reasoning", "/effort", "/dir", "/cd", "/chdir", "/workdir")
+# cc-connect's own commands, each with all its names (builtinCommands)
+CC_COMMANDS = {cmd: names.split() for cmd, names in {
+    "new": "new", "list": "list sessions", "switch": "switch", "name": "name rename", "current": "current",
+    "status": "status", "usage": "usage quota", "history": "history", "allow": "allow", "model": "model",
+    "reasoning": "reasoning effort", "mode": "mode", "lang": "lang", "quiet": "quiet", "provider": "provider",
+    "memory": "memory", "cron": "cron", "timer": "timer at remind", "heartbeat": "heartbeat hb",
+    "compress": "compress compact", "stop": "stop", "cancel": "cancel", "help": "help", "version": "version",
+    "commands": "commands command cmd", "skills": "skills skill", "config": "config", "doctor": "doctor",
+    "upgrade": "upgrade update", "restart": "restart", "alias": "alias", "delete": "delete del rm", "bind": "bind",
+    "search": "search find", "shell": "shell sh exec run", "show": "show", "dir": "dir cd chdir workdir", "tts": "tts",
+    "workspace": "workspace ws", "whoami": "whoami myid", "web": "web", "diff": "diff", "ps": "ps btw"}.items()}
+ENDS_TURN = ("new", "stop", "cancel", "restart")
+STARTS_AFRESH = ("switch", "model", "reasoning", "mode", "dir", "provider", "upgrade")   # (when told what to switch to)
+CARD_ENDS = ("/new", "/stop")
+CARD_STARTS_AFRESH = ("/model", "/reasoning", "/mode", "/provider", "/switch", "/dir")
 
 
 def picture(files):
     """Is one of these files (sent with a message) a picture? cc-connect then gives the agent the message, command or not."""
     return any(isinstance(f, dict) and re.fullmatch(r"image/(png|jpeg|gif|webp)", str(f.get("mime"))) for f in files)
+
+
+def words_of(text):
+    """A command's words, as cc-connect splits them (splitCommandArgs): at spaces and tabs, but not inside quotes,
+    which it takes off."""
+    out, word, single, double = [], "", False, False
+    for ch in text:
+        if ch == "'" and not double:
+            single = not single
+        elif ch == '"' and not single:
+            double = not double
+        elif ch in " \t" and not single and not double:
+            if word:
+                out.append(word)
+            word = ""
+        else:
+            word += ch
+    return out + [word] if word else out
+
+
+def one_of(word, names):
+    """The one of these a word names, as cc-connect reads what follows a command (matchSubCommand): itself, or the start
+    of just one; else the word as it is."""
+    if word in names:
+        return word
+    starting = [n for n in names if n.startswith(word)]
+    return starting[0] if len(starting) == 1 else word
+
+
+def command(text):
+    """The command of cc-connect's own a message is, as handleCommand reads it: [the command, the words after it]; or
+    None for one that names none of them (cc-connect then runs a command or skill of yours of that name, if there is
+    one, or else reads it as a message). (In lower case as Go makes it: "İ" is "i".)"""
+    text = text.strip()
+    if not text.startswith("/"):
+        return None
+    words = words_of(text)
+    name = words[0][1:].replace("İ", "i").lower()
+    for cmd, names in CC_COMMANDS.items():
+        if name in names:
+            return [cmd, words[1:]]
+    starting = {cmd for cmd, names in CC_COMMANDS.items() if any(n.startswith(name) for n in names)}
+    return [starting.pop(), words[1:]] if len(starting) == 1 else None
+
+
+def ends_by(cmd, told):
+    """Does cc-connect's command `cmd`, told `told` (the words after it), end the wait for an approval?"""
+    if cmd in ENDS_TURN:
+        return True
+    if cmd not in STARTS_AFRESH or not told:
+        return False
+    if cmd == "dir":   # (but for its help)
+        return told not in (["help"], ["-h"], ["--help"])
+    if cmd == "provider":   # (but for what only shows, adds or removes one)
+        sub = one_of(told[0].lower(), ["list", "add", "remove", "switch", "current", "clear", "reset", "none"])
+        return sub not in ("list", "add", "remove", "rm", "delete", "current") and (sub != "switch" or len(told) > 1)
+    if cmd == "upgrade":   # (but for looking for one)
+        return one_of(told[0], ["confirm", "check"]) == "confirm"
+    return True
+
+
+def message_ends(text, files=()):
+    """Does a message (typed, or a card's cmd: or askq: button) end the wait for an approval: a command of cc-connect's
+    that ends it, or anything else with one of the answer words in it?"""
+    cmd = None if picture(files) else command(text)
+    if cmd:
+        return ends_by(*cmd)
+    return any(w in ANSWER_WORDS for w in ANSWER_SPLIT.split(text.strip().lower()))
 
 
 def answers(e):
@@ -573,19 +664,19 @@ def answers(e):
     said = e.get("text") if t == "you" else e.get("action") if t == "action" else None
     if not isinstance(said, str):
         return False
-    if t == "action":
-        if said.startswith("perm:"):
-            return True
-        said = re.sub(r"^(cmd|act):", "", said)   # a card's other buttons: a command ("act:/stop"), or something to show
-        if not said.startswith("/"):
-            return False
-    said = said.strip().lower()
-    files = e.get("files") if t == "you" and isinstance(e.get("files"), list) else []
-    if said.startswith("/") and not picture(files):
-        cmd = said.split()
-        afresh = len(cmd) > 1 and (cmd[0] in STARTS_AFRESH or (cmd[0] == "/provider" and cmd[1] in ("switch", "clear", "reset", "none")))
-        return cmd[0] in ENDS_TURN or afresh
-    return any(w in ANSWER_WORDS for w in ANSWER_SPLIT.split(said))
+    if t == "you":
+        return message_ends(said, e.get("files") if isinstance(e.get("files"), list) else [])
+    kind, _, rest = said.partition(":")
+    if kind == "perm":
+        return True
+    if kind == "cmd":
+        return message_ends(rest)
+    if kind == "askq":
+        return message_ends(said)
+    if kind == "act":   # (the card's command, and what it's told after its first space)
+        cmd, _, told = rest.partition(" ")
+        return cmd in CARD_ENDS or (cmd in CARD_STARTS_AFRESH and bool(told.strip()))
+    return False
 
 
 def ends(e):
@@ -1180,8 +1271,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with Answered.of(c.agent):   # (an answer typed in the chat: see Answered)
                     typed = session == "you" and answers({"t": "you", "text": text, "files": files})
                     waits = activity(c, 0)["pending"] if typed else None
-                    # (as from the chat's card: but for a command, which still goes)
-                    if waits is not None and Answered.last.get(c.agent) == waits and not (text.strip().startswith("/") and not picture(files)):
+                    # (as from the chat's card: but for a command of cc-connect's own, which still goes; "/x yes" is an answer)
+                    if waits is not None and Answered.last.get(c.agent) == waits and (picture(files) or not command(text)):
                         raise Refused(409, "You answered that already. Send this again once the chat shows your answer.")
                     rid = c.send({"type": "message", "session": session, "text": text, "files": files})
                     Answered.sent(c.agent, waits)   # (once it's sent: one that couldn't be isn't an answer)
