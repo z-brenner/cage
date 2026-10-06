@@ -1499,17 +1499,20 @@ function shown (v) { // a value as text: a list as "a, b", anything else as JSON
 // card would show what a part of it says, not what runs.
 const RAW_INPUT = /^(Bash|Shell|Read|Edit|Write|Grep|Glob)$/i
 const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
-// Characters that don't show, or that turn the text after them around (U+202E): with one, a command or an address
-// can look like it says what it doesn't. Shown as what they are (⟨U+202E⟩), and Home doesn't offer Allow for them.
-const UNSEEN = /(?![\n\t])[\p{C}\u2028\u2029\u115F\u1160\u3164\uFFA0]/u
+// Characters that don't show as what they are: ones that don't show at all (U+200B, U+FEFF, a variation selector),
+// control and format characters, ones that turn the text after them around (U+202E), and spaces that aren't the
+// space (to a shell, "rm -rf ~/old ~" with U+00A0 for its second space is one word). With one, a command or an
+// address can look like it says what it doesn't. Shown as what they are (⟨U+202E⟩), and Home doesn't offer Allow for
+// them. (But for a newline and a tab; and for the variation selector that makes an emoji one: cc-connect's ⚠️ is ⚠
+// and U+FE0F.)
+const UNSEEN = /(?![\t\n ]|(?<=\p{Emoji})[\u{FE0E}\u{FE0F}])[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}]/u
 const UNSEEN_ALL = new RegExp(UNSEEN.source, 'gu')
 function visible (s) { return String(s).replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`) }
 function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen}; what is '' if it isn't cc-connect's prompt
   const raw = String(text || '')
-  const unseen = UNSEEN.test(raw)
   const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
   const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
-  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen }
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen: UNSEEN.test(raw) }
   const tool = bold[1].trim()
   const input = fence[1].replace(/\n$/, '')
   const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
@@ -1535,11 +1538,16 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   }
   // (cut by cc-connect: JSON closed off where it was cut, or input as it is that's 800 characters and "...")
   const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
-  return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut, unseen }
+  const body = bodyKey ? args[bodyKey] : ''
+  // (in what it asked, or in what's read from its JSON: Go writes U+2028 and the control characters there as \u2028)
+  const unseen = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])].some((s) => UNSEEN.test(s))
+  return { raw, tool, what, via, fields, body, cut, unseen }
 }
-function approvalLine (ap, all) { // in one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut
-  if (!ap.what) return visible(ap.raw.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()).slice(0, 160)
-  const line = visible((ap.what + approvalMore(ap)).replace(/\s+/g, ' '))
+// In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
+// U+FEFF or U+2028 is a space to \s, and then a space is all it would show.)
+function approvalLine (ap, all) {
+  if (!ap.what) return visible(ap.raw.replace(/[*_`#>]/g, '')).replace(/[\t\n ]+/g, ' ').trim().slice(0, 160)
+  const line = visible(ap.what + approvalMore(ap)).replace(/[\t\n ]+/g, ' ')
   return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
 }
 function approvalMore (ap) { // what the line says after what it does: who it goes to (all of them), or what it runs, opens…
@@ -1555,7 +1563,7 @@ function approvalWhole (ap) {
   return !!ap.what && !ap.cut && !ap.unseen && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
 }
 function approvalView (ap) { // what the card shows above its buttons
-  const odd = ap.unseen ? h('p', { class: 'note warn' }, icon('triangle-alert'), 'This has characters that don’t show, which can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.') : null
+  const odd = ap.unseen ? h('p', { class: 'note warn' }, icon('triangle-alert'), 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.') : null
   if (!ap.what) return [odd, h('pre', { class: 'approval-text' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
   const clamp = h('div', { class: 'clamp' }, visible(ap.body))
   const body = ap.body ? h('div', { class: 'approval-body' }, clamp) : null

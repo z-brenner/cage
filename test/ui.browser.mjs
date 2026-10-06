@@ -1345,13 +1345,40 @@ check('a recipient that turns around', field(r, 'To') === marked(turnedTo), 'the
 check('a recipient that turns around', r.home.line === 'Gmail: send email to ' + marked(turnedTo), 'Home shows ' + JSON.stringify(r.home.line))
 notAtOnce('a recipient that turns around', r, hiddenWhy, /characters that don’t show/)
 
-// Characters that don't show: zero-width ones, and ones that say which way text goes
+// Characters that don't show: zero-width ones, U+2060, U+FEFF, a soft hyphen and other format characters (a tag
+// character, U+E0041, is a way to hide text from people and show it to a model), a carriage return; a variation
+// selector or U+034F, which change nothing you see; and spaces that look like the space but aren't one, to a shell or
+// in an address
+const zero = 'ls\u{200B} ~/docs\u{200C}\u{200D} && cat\u{2060} notes\u{FEFF}.txt\u{AD} \u{180E}\u{2064}\u{E0041}\u{1D173} ; echo ok\r'
+r = await asked(permText('Bash', zero))
+shownAsIs('a command with characters that don\'t show', r)
+check('a command with characters that don\'t show', field(r, 'Command') === marked(zero), 'the card shows ' + JSON.stringify(field(r, 'Command')))
+check('a command with characters that don\'t show', r.home.line === lineOf(command(marked(zero))), 'Home shows ' + JSON.stringify(r.home.line))
+notAtOnce('a command with characters that don\'t show', r, hiddenWhy, /characters that don’t show/)
 const zeroTo = { subject: 'Hi\u{200E}\u{200F}\u{61C}', to: 'bob@acme.com\u{200B}' }
 r = await asked(permText('mcp__zapier__gmail_send_email', JSON.stringify(zeroTo)))
 shownAsIs('a recipient with a character that doesn\'t show', r)
 check('a recipient with a character that doesn\'t show', field(r, 'To') === marked(zeroTo.to) && field(r, 'Subject') === marked(zeroTo.subject), 'the card shows ' + JSON.stringify(r.card.fields))
 check('a recipient with a character that doesn\'t show', r.home.line === 'Gmail: send email to ' + marked(zeroTo.to), 'Home shows ' + JSON.stringify(r.home.line))
 notAtOnce('a recipient with a character that doesn\'t show', r, hiddenWhy, /characters that don’t show/)
+const quiet = 'ls\u{FE00}\u{34F} ~/docs\u{E0100} && rm -rf ~/old\u{A0}~ ~/tmp\u{2007}/'
+r = await asked(permText('Bash', quiet))
+shownAsIs('a command with a variation selector, and spaces that aren\'t the space', r)
+check('a command with a variation selector, and spaces that aren\'t the space', field(r, 'Command') === marked(quiet), 'the card shows ' + JSON.stringify(field(r, 'Command')))
+check('a command with a variation selector, and spaces that aren\'t the space', r.home.line === lineOf(command(marked(quiet))), 'Home shows ' + JSON.stringify(r.home.line))
+notAtOnce('a command with a variation selector, and spaces that aren\'t the space', r, hiddenWhy, /characters that don’t show/)
+r = await asked(permText('mcp__zapier__gmail_send_email', JSON.stringify({ subject: 'Hi', to: 'bob@acme.com\u{3000}' })))
+shownAsIs('a recipient with a wide space', r)
+check('a recipient with a wide space', field(r, 'To') === 'bob@acme.com⟨U+3000⟩' && r.home.line === 'Gmail: send email to bob@acme.com⟨U+3000⟩', 'shown as ' + JSON.stringify([field(r, 'To'), r.home.line]))
+notAtOnce('a recipient with a wide space', r, hiddenWhy, /characters that don’t show/)
+// (in an app's JSON, Go writes U+2028 and the control characters as \u2028, \u001b: there in what it asked, as they
+// are in the email; and that escape is how a terminal colours text red)
+r = await asked(permText('mcp__zapier__gmail_send_email', '{"subject":"\\u001b[31mPaid\\u001b[0m","to":"bob@acme.com\\u2028eve@evil.example"}'))
+shownAsIs('JSON with escaped characters that don\'t show', r)
+check('JSON with escaped characters that don\'t show', field(r, 'To') === 'bob@acme.com⟨U+2028⟩eve@evil.example' && field(r, 'Subject') === '⟨U+001B⟩[31mPaid⟨U+001B⟩[0m',
+  'the card shows ' + JSON.stringify(r.card.fields))
+check('JSON with escaped characters that don\'t show', r.home.line === 'Gmail: send email to bob@acme.com⟨U+2028⟩eve@evil.example', 'Home shows ' + JSON.stringify(r.home.line))
+notAtOnce('JSON with escaped characters that don\'t show', r, hiddenWhy, /characters that don’t show/)
 
 // Newlines and tabs (each line runs), and a long line with no spaces: shown to its end, with nothing past the edge
 // or cut off out of sight (on a phone too), and none pushed there by a long name; Home's line is cut, and says so
