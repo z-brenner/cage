@@ -677,7 +677,8 @@ class Live(unittest.TestCase):
     def test_home_answers_the_approval_it_showed(self):
         """Allow or Deny from Home goes with the approval Home showed, and reaches that one or none: one asked before
         the one that waits now, or since, one another agent asked, one cc-connect forgot when it restarted (the relay
-        registers with it again), each gets 409, and nothing goes to any agent."""
+        registers with it again), none at all, or one in another conversation than the chat's: each gets 409, and
+        nothing goes to any agent."""
         old = self.asks("claude", "Bash(ls)")
         p = self.asks("claude", "Bash(rm -rf ~/work/old)")   # two at once: the one asked last is the one that waits
         theirs = self.asks("codex", "Bash(rm -rf ~/work/old)")
@@ -693,7 +694,57 @@ class Live(unittest.TestCase):
         self.assertEqual([(r["type"], r["session"], r["action"]) for r in self.sent("claude")], [("action", "you", "perm:deny")])
         self.taken("claude")
         self.assertEqual(self.answer("claude", "perm:allow", p)[0], 409)   # answered: what it asks next is another
+        self.assertEqual(self.answer("claude", "perm:allow", None)[0], 409)   # nothing waits: not an answer to "nothing"
+        q = self.asks("claude", "Bash(ls)")
+        self.assertEqual(self.answer("claude", "perm:allow", q, session="usage")[0], 409)   # (Home shows the chat's)
         self.assertEqual(self.sent("claude"), [])
+
+    def test_one_answer_per_approval(self):
+        """cc-connect's buttons say allow or deny, not to what: an answer goes to whatever waits when it gets there.
+        Until the VM has taken an answer (and its log says so), the approval it answers still seems to wait, and a
+        second answer to it (from another window, or a card in the chat after Home) would reach whatever the agent
+        asks next, which nobody has seen. So the first answer to an approval is the one; the others get 409, and
+        nothing more is sent. A command still goes, and what it asks next is answered as ever."""
+        p = self.asks("claude", "Bash(ls)")
+        self.assertEqual(self.answer("claude", "perm:allow", p)[0], 200)
+        for action, pending in (("perm:allow", (p,)), ("perm:deny", (p,)), ("perm:allow", ()), ("perm:allow_all", ())):
+            status, _, body = self.answer("claude", action, *pending)
+            self.assertEqual((status, strict(body)["error"]), (409, "You answered that already."), (action, pending))
+        self.assertEqual(self.answer("claude", "act:/stop")[0], 200)
+        self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow", "act:/stop"])
+        self.taken("claude")
+        nxt = self.asks("claude", "Bash(rm -rf ~/work/old)")   # what it asks next
+        self.assertEqual(self.answer("claude", "perm:allow", p)[0], 409)
+        self.assertEqual(self.sent("claude"), [])
+        # an answer typed in the chat is one too, as cc-connect reads it (a question isn't)
+        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "What does it delete?"})[0], 200)
+        self.assertEqual(self.answer("claude", "perm:deny", nxt)[0], 200)
+        self.taken("claude")
+        typed = self.asks("claude", "Bash(rm -rf ~/work/old)")
+        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "No, keep it."})[0], 200)
+        self.assertEqual(self.answer("claude", "perm:allow", typed)[0], 409)
+        self.assertEqual(self.answer("claude", "perm:allow")[0], 409)
+        self.assertEqual([r["text"] for r in self.sent("claude")], ["No, keep it."])
+        self.taken("claude")
+        last = self.asks("claude", "Bash(ls)")
+        self.assertEqual(self.answer("claude", "perm:allow")[0], 200)   # a card in the chat answers it first
+        self.assertEqual(self.answer("claude", "perm:allow", last)[0], 409)
+        self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
+
+    def test_two_windows_at_once(self):
+        """Allow for the same approval from two windows at the same moment: one goes, the others get 409."""
+        p, go, statuses = self.asks("claude", "Bash(ls)"), threading.Barrier(8), []
+
+        def allow():
+            go.wait()
+            statuses.append(self.answer("claude", "perm:allow", p)[0])
+        threads = [threading.Thread(target=allow) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(statuses), [200] + [409] * 7)
+        self.assertEqual(len(self.sent("claude")), 1)
 
     def test_names_stay_inside(self):
         """An agent's name comes in the address: whatever it says (.., a path, NUL, a very long one), only cage's own

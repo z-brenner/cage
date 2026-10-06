@@ -44,7 +44,8 @@ and only pictures are shown in the page (everything else downloads).
   POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
   POST /api/chat/<a>/action             {"action", "label"?, "pending"?}  (a button in the chat; from Home, with the
-                                        approval it answers, as /api/activity gave it: 409 if it isn't that one now)
+                                        approval it answers, as /api/activity gave it: 409 if it isn't that one now.
+                                        409 too for a second answer to one, until the VM has taken the first)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
   POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
                                         seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
@@ -602,6 +603,25 @@ def activity(c, since):
     return {"pending": pending, "typing": typing, "last": last, "today": today}
 
 
+class Answered:
+    """The approval each agent was last sent an answer for, as its log showed it waiting then. cc-connect's buttons say
+    allow or deny, not to what: an answer goes to whatever waits when it gets there. Until the VM has taken one (and
+    its log says so), the approval still seems to wait, and a second answer to it (another window's, or a card's in
+    the chat after Home's) would answer what the agent asks next, which nobody has seen. So that one is refused. An
+    agent's answers go one at a time: two can't both find the approval still waiting."""
+    lock, locks, last = threading.Lock(), {}, {}
+
+    @classmethod
+    def of(cls, agent):
+        with cls.lock:
+            return cls.locks.setdefault(agent, threading.Lock())
+
+    @classmethod
+    def sent(cls, agent, pending):
+        if pending is not None:
+            cls.last[agent] = pending
+
+
 def ask_usage(c, timeout=25):
     """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show), and waits
     a while for the answer: {"rid": the question's id, "pos": how far its log has been read for the answer, "entry": the
@@ -1097,15 +1117,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     files.append({"path": p, "name": safe_name(f.get("name") or p.split("/")[-1]), "mime": str(f.get("mime") or "")[:100]})
                 if not text.strip() and not files:
                     raise ValueError("nothing to send")
-                return self.send(200, {"id": c.send({"type": "message", "session": session, "text": text, "files": files})})
+                with Answered.of(c.agent):   # (an answer typed in the chat: see Answered)
+                    if session == "you" and answers({"t": "you", "text": text, "files": files}):
+                        Answered.sent(c.agent, activity(c, 0)["pending"])
+                    rid = c.send({"type": "message", "session": session, "text": text, "files": files})
+                return self.send(200, {"id": rid})
             if what == "action":
-                # From Home, with the approval it showed: only while that's still the one the agent waits for. Answered
-                # since (in another window, say), it may be asking something else, which an Allow from here would say
-                # yes to.
-                if "pending" in b and activity(c, 0)["pending"] != b["pending"]:
-                    return self.send(409, {"error": "It isn’t waiting for that any more. Open its chat to see what it’s doing."})
-                return self.send(200, {"id": c.send({"type": "action", "session": session, "action": str(b.get("action", ""))[:512],
-                                                     "label": str(b.get("label", ""))[:200]})})
+                action = str(b.get("action", ""))[:512]
+                said = {"t": "action", "action": action}
+                with Answered.of(c.agent):
+                    now = activity(c, 0)["pending"] if session == "you" and ("pending" in b or answers(said)) else None
+                    again = now is not None and Answered.last.get(c.agent) == now
+                    # From Home, with the approval it showed: only while that's still the one the agent waits for (in the
+                    # chat). Answered since (in another window, say), it may be asking something else, which an Allow
+                    # from here would say yes to. And nowhere a second answer to one (see Answered).
+                    if "pending" in b and (now is None or now != b["pending"]):
+                        error = "It isn’t waiting for that any more. Open its chat to see what it’s doing."
+                    elif again and ("pending" in b or action.startswith("perm:")):
+                        error = "You answered that already."
+                    else:
+                        error = None
+                        if answers(said):
+                            Answered.sent(c.agent, now)
+                        rid = c.send({"type": "action", "session": session, "action": action, "label": str(b.get("label", ""))[:200]})
+                return self.send(409, {"error": error}) if error else self.send(200, {"id": rid})
             if what == "request":
                 kind = b.get("type")
                 req = {"type": kind}
