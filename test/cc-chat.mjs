@@ -165,6 +165,13 @@ try {
     ask('/all Fix this:\n    if x:\n        return 1'),
     ask(`/all echo "$HOME" and 'single'  a  b   c`),
     { ...ask('/all Describe this picture'), files: [{ path: 'files/dot.png', mime: 'image/png', name: 'dot.png' }] },
+    // cc-connect trims a message first, and takes /all only before a space: after a tab it's /allow (which is off),
+    // and on its own line cc-connect passes the message on as it is
+    ask('  /all Leading spaces'), ask('\n/all After a line break'),
+    off('/all\tAfter a tab'),
+    { typed: '/all\nOn the next line', agent: '/all\nOn the next line', others: null },
+    { typed: '/askall\tAfter a tab', agent: '@all After a tab', others: 'After a tab' },
+    { typed: '@all\tAt, then a tab', agent: '@all\tAt, then a tab', others: 'At, then a tab' },
     // nothing to ask: the agent gets "@all", not an empty message
     { typed: '/all', agent: '@all', others: null },
     // cc-connect's /allow, however it's written

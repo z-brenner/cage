@@ -39,8 +39,11 @@ remember() { # remember <who> <text>: one line per turn, the last six kept
 }
 
 shopt -s nocasematch
-# /all, /askall or @all, in any case (/all@yourbot: in a Telegram group)
-all_re='^(/askall|[/@]all)(@[A-Za-z0-9_]+)?[[:space:]]+(.+)$'
+# A question for all your agents, as cc-connect sees one (so this agent and your others answer the same messages): a
+# message that starts, once trimmed, with /all and a space (cage's aliases: after a tab, it's cc-connect's /allow),
+# /askall and a space or a tab (cage's command too), or @all (plain text, which this agent gets anyway), in any case,
+# and has a question after it. /all@YourBot: Telegram leaves your bot's name on when it's written in another case.
+all_re=$'^(/all(@[A-Za-z0-9_]+)? |/askall(@[A-Za-z0-9_]+)?[ \t]|@all[[:space:]])[[:space:]]*(.+)$'
 # Claude: "5-hour limit reached ∙ resets 3pm", "You've hit your limit", "API Error: 529 Overloaded";
 # Codex: "You've hit your usage limit…", "…429 Too Many Requests"
 limit_re="limit (reached|exceeded|will reset)|hit (your|the) .{0,20}limit|api error: (429|529)|too many requests|out of (credits|usage)|(quota|credits) (exceeded|reached|exhausted)|exceeded (your|the) .{0,20}quota"
@@ -48,10 +51,15 @@ limit_re="limit (reached|exceeded|will reset)|hit (your|the) .{0,20}limit|api er
 case "${CC_HOOK_EVENT:-}" in
   message.received)
     text="${CC_HOOK_CONTENT:-}"
+    # cc-connect trims a message first; what counts here is its start
+    [[ "$text" =~ ^[[:space:]]+ ]] && text="${text:${#BASH_REMATCH[0]}}"
     [ -n "$text" ] || exit 0
     if [[ "$text" =~ $all_re ]]; then
-      text="${BASH_REMATCH[3]}"
-      if on ask; then request ask "$text"; fi
+      q="${BASH_REMATCH[4]}"
+      if [[ "$q" =~ [^[:space:]] ]]; then
+        text="$q"
+        if on ask; then request ask "$text"; fi
+      fi
     fi
     if on fallback; then remember User "$text"; fi
     ;;

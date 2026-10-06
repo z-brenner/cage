@@ -471,15 +471,18 @@ hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="5-hour limit reached ∙ resets
 grep -lx fallback "$O"/*/kind >/dev/null || fail "no fallback request"
 f="$(dirname "$(grep -lx fallback "$O"/*/kind)")/text"
 grep -q '^User: hi there$' "$f" && grep -q '^Agent: Hello! How can I help?$' "$f" && grep -q "^User: what's the capital" "$f" || fail "stand-in context: $(cat "$f")"
-# cc-connect makes /all (in any case) and /askall "@all …" after the hook has seen them; both ask the others, @all and
-# Telegram's /all@yourbot too. Anything else starting with /all doesn't.
+# The hook asks the others when cc-connect gives this agent "@all <question>" (test/cc-chat.mjs checks that with a
+# real one): /all (in any case) and a space, /askall and a space or a tab, @all, after any spaces cc-connect trims, and
+# /all@YourBot (Telegram's, when your bot's name is written in another case). Anything else starting with /all doesn't.
 mkdir "$T/outbox-all"
-for m in "/askall Q1" "/ALL Q2" "/aLl Q3" "@all Q4" "/all@cage_claude_bot Q5" "/AskAll Q6" "/allow Q7" "/allQ8" "/askallQ9" "all Q10"; do
+for m in "/askall Q1" "/ALL Q2" "/aLl Q3" "@all Q4" "/all@Cage_Claude_Bot Q5" "/AskAll Q6" "/allow Q7" "/allQ8" "/askallQ9" "all Q10" \
+  "  /all Q11" "$(printf '\t/all Q12')" "$(printf '\n\n/all Q13')" "$(printf '/all\tQ14')" "$(printf '/all\nQ15')" \
+  "$(printf '/askall\tQ16')" "$(printf '@all\tQ17')" "/all   Q18" "/all   " "$(printf '/all \n ')" "/all" "/askall"; do
   hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="$m" CAGE_OUTBOX="$T/outbox-all" CC_HOOK_SESSION_KEY=telegram:222:222
 done
-asked="$(for f in "$T"/outbox-all/*/text; do cat "$f"; echo; done | sort | tr '\n' ' ')"
-[ "$asked" = "Q1 Q2 Q3 Q4 Q5 Q6 " ] || fail "/all and /askall asked the others: $asked"
-ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't; /askall is /all"
+asked="$(for f in "$T"/outbox-all/*/text; do tr '\n\t' '~~' < "$f"; echo; done | LC_ALL=C sort | tr '\n' ' ')"
+[ "$asked" = "Q1 Q11 Q12 Q13 Q16 Q17 Q18 Q2 Q3 Q4 Q5 Q6 " ] || fail "/all and /askall asked the others: $asked"
+ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't; /all as cc-connect takes it"
 
 # cage relays them: other awake agents answer into the asking chat; nothing in a request is ever run
 printf 'cage-claude\ncage-codex\n' > "$T/running"
