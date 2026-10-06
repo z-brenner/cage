@@ -761,7 +761,7 @@ function approvalRow (a, p, pos, placed) {
     return b
   }
   const sub = [line, p.at ? ' · ' + when(p.at) : '']
-  if (!approvalWhole(ap)) return row([...sub, ap.unseen ? '. It has characters that don’t show: open it to see where.' : '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
+  if (!approvalWhole(ap)) return row([...sub, ap.unseen ? '. It has characters that don’t show: open it to see where.' : ap.mixed ? '. It mixes letters from different alphabets: open it to see where.' : '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
 }
 function when (at) { // 8:21 AM today; Mon 8:21 AM this week; Oct 3 before that
@@ -1507,12 +1507,26 @@ const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray
 // and U+FE0F.)
 const UNSEEN = /(?![\t\n ]|(?<=\p{Emoji})[\u{FE0E}\u{FE0F}])[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}]/u
 const UNSEEN_ALL = new RegExp(UNSEEN.source, 'gu')
-function visible (s) { return String(s).replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`) }
-function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen}; what is '' if it isn't cc-connect's prompt
+// Letters from another alphabet that look like these: "bob@acme.com" with a Cyrillic "a" (U+0430) is someone else's
+// address. In a word that mixes alphabets whose letters look alike (Latin, Greek, Cyrillic, Armenian, Cherokee), the
+// letters from another alphabet than its first (Latin, if it has any) are marked, "bob@⟨a⟩cme.com", and Home doesn't
+// offer Allow for it. A word is letters and digits, with an address's dots and @ between them: one in one alphabet
+// is as it is, and so is a Russian word with "IT-" before it (two words).
+const ALPHABETS = ['Latin', 'Greek', 'Cyrillic', 'Armenian', 'Cherokee'].map((name) => [name, new RegExp(`\\p{Script=${name}}`, 'u')])
+const WORD = /[\p{L}\p{M}\p{N}]+(?:[.@][\p{L}\p{M}\p{N}]+)*/gu
+const alphabetsOf = (word) => ALPHABETS.filter(([, letter]) => letter.test(word)).map(([name]) => name)
+const mixesAlphabets = (s) => (String(s).match(WORD) || []).some((word) => alphabetsOf(word).length > 1)
+function visible (s) { // what it asks as it's shown, wherever it is: what doesn't show as what it is, marked
+  return String(s).replace(WORD, (word) => {
+    const others = alphabetsOf(word).slice(1)
+    return others.length ? word.replace(new RegExp(`(?:[${others.map((name) => `\\p{Script=${name}}`).join('')}]\\p{M}*)+`, 'gu'), '⟨$&⟩') : word
+  }).replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
+}
+function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen, mixed}; what is '' if it isn't cc-connect's prompt
   const raw = String(text || '')
   const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
   const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
-  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen: UNSEEN.test(raw) }
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen: UNSEEN.test(raw), mixed: mixesAlphabets(raw) }
   const tool = bold[1].trim()
   const input = fence[1].replace(/\n$/, '')
   const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
@@ -1540,8 +1554,8 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
   const body = bodyKey ? args[bodyKey] : ''
   // (in what it asked, or in what's read from its JSON: Go writes U+2028 and the control characters there as \u2028)
-  const unseen = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])].some((s) => UNSEEN.test(s))
-  return { raw, tool, what, via, fields, body, cut, unseen }
+  const all = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])]
+  return { raw, tool, what, via, fields, body, cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets) }
 }
 // In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
 // U+FEFF or U+2028 is a space to \s, and then a space is all it would show.)
@@ -1560,11 +1574,14 @@ function approvalMore (ap) { // what the line says after what it does: who it go
 // command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
 // characters that don't show.
 function approvalWhole (ap) {
-  return !!ap.what && !ap.cut && !ap.unseen && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
+  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
 }
 function approvalView (ap) { // what the card shows above its buttons
-  const odd = ap.unseen ? h('p', { class: 'note warn' }, icon('triangle-alert'), 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.') : null
-  if (!ap.what) return [odd, h('pre', { class: 'approval-text' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
+  const odd = [ // (why Home offers no Allow for it, where that's in what it asks)
+    ap.unseen && 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.',
+    ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.'
+  ].filter(Boolean).map((text) => h('p', { class: 'note warn' }, icon('triangle-alert'), text))
+  if (!ap.what) return [...odd, h('pre', { class: 'approval-text' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
   const clamp = h('div', { class: 'clamp' }, visible(ap.body))
   const body = ap.body ? h('div', { class: 'approval-body' }, clamp) : null
   const more = body && h('button', { type: 'button', class: 'linkish approval-more', 'aria-expanded': 'false', hidden: true, onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all')
@@ -1572,7 +1589,7 @@ function approvalView (ap) { // what the card shows above its buttons
   if (more) new ResizeObserver(() => { if (!body.classList.contains('open')) more.hidden = clamp.scrollHeight <= clamp.clientHeight + 1 }).observe(clamp)
   return [
     h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
-    odd,
+    ...odd,
     ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v]) => h('div', {}, h('dt', {}, visible(label)), h('dd', {}, visible(v))))) : null,
     body,
     more,
