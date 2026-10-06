@@ -1518,19 +1518,29 @@ const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray
 const UNSEEN = /(?![\t\n ]|(?<=\p{Extended_Pictographic})[\u{FE0E}\u{FE0F}])[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}\u{2800}]/u
 const UNSEEN_ALL = new RegExp(UNSEEN.source, 'gu')
 // Letters from another alphabet that look like these: "bob@acme.com" with a Cyrillic "a" (U+0430) is someone else's
-// address. In a word that mixes alphabets whose letters look alike (Latin, Greek, Cyrillic, Armenian, Cherokee), the
-// letters from another alphabet than its first (Latin, if it has any) are marked, "bob@⟨a⟩cme.com", and Home doesn't
-// offer Allow for it. A word is letters and digits, with an address's dots and @ between them: one in one alphabet
-// is as it is, and so is a Russian word with "IT-" before it (two words).
-const ALPHABETS = ['Latin', 'Greek', 'Cyrillic', 'Armenian', 'Cherokee'].map((name) => [name, new RegExp(`\\p{Script=${name}}`, 'u')])
+// address, and so is one with a Lisu "ꓮ" for its "A", or a Coptic "ⲟ" for its "o": nearly every alphabet has a letter
+// or a digit that looks like a Latin one. So in a word with Latin letters, those of any other alphabet are marked,
+// "bob@⟨а⟩cme.com", and Home doesn't offer Allow for it. But for Chinese, Japanese and Korean, written next to Latin
+// letters in one word all the time ("用Python"), whose letters don't pass for Latin ones; and for what every alphabet
+// has (digits 0-9, marks over letters). In a word without Latin letters, it's the same for alphabets whose letters
+// look alike (Greek, Cyrillic, Armenian, Cherokee, Coptic, Lisu): those from another than its first are marked. A word
+// is letters and digits, with an address's dots and @ between them: one in one alphabet is as it is, and so is a
+// Russian word with "IT-" before it (two words).
+const ALPHABETS = ['Greek', 'Cyrillic', 'Armenian', 'Cherokee', 'Coptic', 'Lisu'].map((name) => [name, new RegExp(`\\p{Script=${name}}`, 'u')])
+const LATIN = /\p{Script=Latin}/u
+const NOT_LATIN = '(?![\\p{Script=Latin}\\p{Script=Common}\\p{Script=Inherited}\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\p{Script=Bopomofo}])[\\p{L}\\p{M}\\p{N}]'
+const OTHER = new RegExp(NOT_LATIN, 'u')
+const OTHERS = new RegExp(`(?:${NOT_LATIN}\\p{M}*)+`, 'gu')
 const WORD = /[\p{L}\p{M}\p{N}]+(?:[.@][\p{L}\p{M}\p{N}]+)*/gu
-const alphabetsOf = (word) => ALPHABETS.filter(([, letter]) => letter.test(word)).map(([name]) => name)
-const mixesAlphabets = (s) => (String(s).match(WORD) || []).some((word) => alphabetsOf(word).length > 1)
+function othersIn (word) { // what finds the letters in a word from another alphabet than its own; null if there are none
+  if (LATIN.test(word)) return OTHER.test(word) ? OTHERS : null
+  const others = ALPHABETS.filter(([, letter]) => letter.test(word)).slice(1).map(([name]) => `\\p{Script=${name}}`)
+  return others.length ? new RegExp(`(?:[${others.join('')}]\\p{M}*)+`, 'gu') : null
+}
+const mixesAlphabets = (s) => (String(s).match(WORD) || []).some((word) => othersIn(word))
 function visible (s) { // what it asks as it's shown, wherever it is: what doesn't show as what it is, marked
-  return String(s).replace(WORD, (word) => {
-    const others = alphabetsOf(word).slice(1)
-    return others.length ? word.replace(new RegExp(`(?:[${others.map((name) => `\\p{Script=${name}}`).join('')}]\\p{M}*)+`, 'gu'), '⟨$&⟩') : word
-  }).replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
+  return String(s).replace(WORD, (word) => { const others = othersIn(word); return others ? word.replace(others, '⟨$&⟩') : word })
+    .replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
 }
 function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen, mixed, alike}; what is '' if it isn't cc-connect's prompt
   const raw = String(text || '')
