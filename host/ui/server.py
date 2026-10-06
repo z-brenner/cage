@@ -101,6 +101,20 @@ def finite(s):
     return f if math.isfinite(f) else None
 
 
+DEEPEST = 100   # how deeply nested a line of a chat log may be (cc-connect's deepest, a card's button, is a few levels)
+
+
+def shallow(v, most=DEEPEST):
+    """Is this dict or list (read from JSON) nested at most `most` deep? Python's json reads about a thousand levels
+    (ten thousand from 3.12), but it can't always write as many back: in an answer, a line is a level or two deeper."""
+    level = [v]
+    for _ in range(most):
+        level = [x for c in level for x in (c.values() if isinstance(c, dict) else c) if isinstance(x, (dict, list))]
+        if not level:
+            return True
+    return False
+
+
 def token():
     try:
         with open(TOKEN_FILE) as f:
@@ -509,7 +523,7 @@ class Chat:
                 e = json.loads(line, parse_constant=lambda c: None, parse_float=finite)
             except (ValueError, RecursionError):   # (nested deeper than Python reads: skipped, as a line that isn't JSON)
                 continue
-            if isinstance(e, dict):
+            if isinstance(e, dict) and shallow(e):   # (and one it only just reads, which it may not write back out)
                 out.append((pos, e))
         return out, pos
 

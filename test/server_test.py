@@ -504,6 +504,19 @@ class UsageAnswers(unittest.TestCase):
         self.assertFalse(self.chat.waiting(q["rid"]))
 
 
+def deepest():
+    """How deeply nested a line this Python's json reads, here (deeper, it gives up with RecursionError)."""
+    lo, hi = 1, 1 << 17
+    while lo < hi:
+        n = (lo + hi + 1) // 2
+        try:
+            json.loads(b"[" * n + b"]" * n)
+            lo = n
+        except RecursionError:
+            hi = n - 1
+    return lo
+
+
 def strict(body):
     """JSON as a browser reads it: no NaN or Infinity (Python's json reads and writes them; JSON.parse doesn't)."""
     def refuse(c):
@@ -769,13 +782,16 @@ class Live(unittest.TestCase):
         self.assertEqual(os.listdir(server.APPDIR), ["claude"])
 
     def test_what_a_vm_could_write(self):
-        """An agent's log is its VM's to write. Whatever is in it (huge numbers, NaN and Infinity, nesting deeper than
-        Python reads, bytes that aren't UTF-8, a line of megabytes, half a line, a link, a pipe, a folder, a terabyte),
-        Home gets valid JSON at once, with the other agents' approvals and what that agent's log says after it; and
-        that agent's chat goes on after it too."""
+        """An agent's log is its VM's to write. Whatever is in it (huge numbers, NaN and Infinity, nesting as deep as
+        Python reads or deeper, bytes that aren't UTF-8, a line of megabytes, half a line, a link, a pipe, a folder, a
+        terabyte), Home gets valid JSON at once, with the other agents' approvals and what that agent's log says after
+        it; and that agent's chat goes on after it too."""
         p = self.asks("claude", "Bash(ls)")
         deep = lambda n, o=b"[", c=b"]": o * n + c * n   # noqa: E731
-        near = range(900, 4000, 41)   # (where reading it may just work, or just not, in this Python or another)
+        # where reading it may just work, or just not, in this Python or another; and every depth around where this one
+        # gives up (about a thousand, or ten thousand from 3.12): just short of it, it reads a line it can't write back
+        edge = deepest()
+        near = sorted(set(range(900, 4000, 41)) | set(range(edge - 60, edge + 60)))
         lines = {
             "huge numbers": [b'{"t": "reply", "text": "hi", "at": 1e400}', b'{"t": "typing", "on": true, "at": ' + b"9" * 5000 + b"}",
                              b'{"t": "you", "text": "hi", "at": ' + b"9" * 400 + b"}"],
