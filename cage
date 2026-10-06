@@ -3484,9 +3484,12 @@ mask_terms_copy() { # mask_terms_copy <agent>: your terms as they are now, for i
   return 1
 }
 # Run as root in a VM, before a CLI answers behind its mask (ask_agent): the copy of your terms that guest/mask.py reads
-# becomes exactly the one in /cage-config. Swapped in whole, so a mask reading it meanwhile never gets half of it.
-MASK_TERMS_SYNC='if [ -e /cage-config/mask.terms ]; then install -D -m 644 /cage-config/mask.terms "/etc/cage/.mask.terms.$$" &&
-        mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms; else rm -f /etc/cage/mask.terms; fi || exit 1'
+# becomes exactly the one cage has just written to /cage-config (mask_terms_copy: there even when you have no terms).
+# Swapped in whole, so a mask reading it meanwhile never gets half of it. If that copy is gone by now (`cage up`
+# removes it once the agent no longer needs your terms, as after `cage mask off`), nothing says what your terms are,
+# so the CLI doesn't run.
+MASK_TERMS_SYNC='{ [ -f /cage-config/mask.terms ] && install -D -m 644 /cage-config/mask.terms "/etc/cage/.mask.terms.$$" &&
+        mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms; } || exit 1'
 mask_terms_for() { # mask_terms_for <agent>: does its VM need your terms (its own mask, or a relay from a masked agent)?
   local m
   mask_on "$1" && return 0

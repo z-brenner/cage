@@ -658,10 +658,11 @@ grep -qF "$marker" "$MSB_SENT" || fail "the conversation didn't reach the stand-
 if grep -qF "$marker" "$MSB_LOG" "$MSB_PS"; then fail "the conversation was on a command line"; fi
 [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies" 2>/dev/null)" ] || fail "question files left behind"
 # Before the CLI runs behind the mask, the VM's copy of your terms (which its own setup puts there only once it has
-# installed everything, and only when it wakes up) is made, as root, exactly your terms as they are now
+# installed everything, and only when it wakes up) is made, as root, exactly your terms as they are now; without the
+# copy cage wrote for it, the CLI doesn't run (test/mask-vm.sh runs this)
 [ "$(cat "$CAGE_HOME/agents/codex/mask.terms")" = $'Acme Corp\nBeta Client' ] || fail "codex wasn't given your terms as they are now: $(cat "$CAGE_HOME/agents/codex/mask.terms")"
 flat="$(tr '\n' ' ' < "$MSB_LOG")"
-[[ "$flat" == *'cage-codex | -- | bash | -c | q="$(cat "$1")" || exit 1 '*'if [ -e /cage-config/mask.terms ]; then install -D -m 644 /cage-config/mask.terms "/etc/cage/.mask.terms.$$" && '*'mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms; else rm -f /etc/cage/mask.terms; fi || exit 1 '*'exec runuser -u agent '*'exec python3 /cage/mask.py codex exec'* ]] \
+[[ "$flat" == *'cage-codex | -- | bash | -c | q="$(cat "$1")" || exit 1 '*'{ [ -f /cage-config/mask.terms ] && install -D -m 644 /cage-config/mask.terms "/etc/cage/.mask.terms.$$" && '*'mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms; } || exit 1 '*'exec runuser -u agent '*'exec python3 /cage/mask.py codex exec'* ]] \
   || fail "the stand-in's CLI ran before its VM had your terms: $(cat "$MSB_LOG")"
 : > "$MSB_LOG"
 cage ask "is it $marker?" codex >/dev/null 2>&1

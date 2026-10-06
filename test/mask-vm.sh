@@ -37,6 +37,8 @@ case "$cmd" in
         *) shift ;;   # the VM's name
       esac
     done
+    # a file cage wrote for the VM taken away before the VM reads it, as `cage up` can in between (cage ask, below)
+    if [ -n "${MSB_GONE:-}" ]; then rm -f "$MSB_GONE"; fi
     exec docker exec -i "${args[@]}" "$STANDIN" "$@" ;;
 esac
 exit 0
@@ -142,5 +144,15 @@ grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran wi
 vm sh -c 'rm -f /etc/cage && mv /etc/cage.d /etc/cage'
 [ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
 ok "cage ask: the CLI gets your terms as they are now, masked, even before the VM has its own copy; it doesn't run when they can't be put in place"
+
+# The copy of your terms that cage writes for this ask is gone by the time the VM reads it: `cage up` removes it once
+# the agent no longer needs your terms (say, `cage mask off` and the restart cage offers, while a relay is on its way).
+# With nothing to say what your terms are, the CLI doesn't run, rather than run with none.
+vm rm -f /tmp/asked
+out="$(MSB_GONE="$C/mask.terms" STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
+[ ! -e "$C/mask.terms" ] || fail "the stand-in msb didn't take the copy away"
+grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran with your terms' copy gone: $out / $(vm cat /tmp/asked 2>&1)"
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+ok "cage ask: when the copy of your terms is gone before the VM reads it, the CLI doesn't run"
 
 echo "all $pass mask VM tests passed"
