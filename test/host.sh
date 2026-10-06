@@ -459,6 +459,10 @@ ok "guest/hook.sh: /all and limit notices become requests (with the last turns);
 printf 'cage-claude\ncage-codex\n' > "$T/running"
 export MSB_RUNNING="$T/running" MSB_SENT="$T/sent"
 : > "$MSB_SENT"
+# (one request per agent every 5 seconds: this pass takes the /all one, the oldest, and drops the stand-in request. A
+# request is named <second>-<the hook's pid>-<random>, so two from the same second sort either way, as pids wrap: the
+# /all one is renamed to come first, as it would a second earlier)
+mv "$(dirname "$(grep -lx ask "$O"/*/kind)")" "$O/1-0-0"
 cage _outbox 2>/dev/null
 grep -q "^cage-claude telegram:111:111 <- ↪ Codex:" "$MSB_SENT" || fail "no /all answer delivered: $(cat "$MSB_SENT")"
 grep -qF "answer from cage-codex to: what's the capital of France? \$(touch $T/pwned)" "$MSB_SENT" || fail "question changed on the way: $(cat "$MSB_SENT")"
