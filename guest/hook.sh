@@ -2,6 +2,7 @@
 # cc-connect's hook inside an agent's VM (runs as the agent user, for every message in and out). Hooks can't change
 # messages; this one only leaves requests for cage on your computer, in /cage-outbox:
 #   /all <question> (or @all …)  "ask": your other agents answer in this chat too       (cage ask-all on)
+#                                (the same as /askall: cc-connect makes /all that, after this hook has seen it)
 #   a usage-limit reply          "fallback": another agent answers your last message     (cage fallback <agent> <to>)
 # What's on comes as arguments (from the generated config: hook.sh ask fallback). Everything else arrives in
 # CC_HOOK_* variables, never through a shell.
@@ -38,6 +39,8 @@ remember() { # remember <who> <text>: one line per turn, the last six kept
 }
 
 shopt -s nocasematch
+# /all, /askall or @all, in any case (/all@yourbot: in a Telegram group)
+all_re='^(/askall|[/@]all)(@[A-Za-z0-9_]+)?[[:space:]]+(.+)$'
 # Claude: "5-hour limit reached ∙ resets 3pm", "You've hit your limit", "API Error: 529 Overloaded";
 # Codex: "You've hit your usage limit…", "…429 Too Many Requests"
 limit_re="limit (reached|exceeded|will reset)|hit (your|the) .{0,20}limit|api error: (429|529)|too many requests|out of (credits|usage)|(quota|credits) (exceeded|reached|exhausted)|exceeded (your|the) .{0,20}quota"
@@ -46,8 +49,8 @@ case "${CC_HOOK_EVENT:-}" in
   message.received)
     text="${CC_HOOK_CONTENT:-}"
     [ -n "$text" ] || exit 0
-    if [[ "$text" =~ ^[/@]all(@[A-Za-z0-9_]+)?[[:space:]]+(.+)$ ]]; then
-      text="${BASH_REMATCH[2]}"
+    if [[ "$text" =~ $all_re ]]; then
+      text="${BASH_REMATCH[3]}"
       if on ask; then request ask "$text"; fi
     fi
     if on fallback; then remember User "$text"; fi

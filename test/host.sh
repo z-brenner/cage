@@ -462,7 +462,15 @@ hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="5-hour limit reached ∙ resets
 grep -lx fallback "$O"/*/kind >/dev/null || fail "no fallback request"
 f="$(dirname "$(grep -lx fallback "$O"/*/kind)")/text"
 grep -q '^User: hi there$' "$f" && grep -q '^Agent: Hello! How can I help?$' "$f" && grep -q "^User: what's the capital" "$f" || fail "stand-in context: $(cat "$f")"
-ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't"
+# cc-connect makes /all (in any case) /askall after the hook has seen it; both ask the others, @all and Telegram's
+# /all@yourbot too. Anything else starting with /all doesn't.
+mkdir "$T/outbox-all"
+for m in "/askall Q1" "/ALL Q2" "/aLl Q3" "@all Q4" "/all@cage_claude_bot Q5" "/AskAll Q6" "/allow Q7" "/allQ8" "/askallQ9" "all Q10"; do
+  hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="$m" CAGE_OUTBOX="$T/outbox-all" CC_HOOK_SESSION_KEY=telegram:222:222
+done
+asked="$(for f in "$T"/outbox-all/*/text; do cat "$f"; echo; done | sort | tr '\n' ' ')"
+[ "$asked" = "Q1 Q2 Q3 Q4 Q5 Q6 " ] || fail "/all and /askall asked the others: $asked"
+ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't; /askall is /all"
 
 # cage relays them: other awake agents answer into the asking chat; nothing in a request is ever run
 printf 'cage-claude\ncage-codex\n' > "$T/running"
