@@ -745,22 +745,30 @@ function approvalRow (a, p, pos, placed) {
     const li = b.closest('li')
     const had = li.contains(document.activeElement)   // (the keyboard's, or a click's)
     li.querySelectorAll('button').forEach((x) => { x.disabled = true })
+    // Once the row is gone, the focus goes to the top of what needs you (not onto the next Allow, where a second Enter
+    // would say yes to that), and a screen reader is told it went (the toasts are a status)
+    const after = (said, tone) => {
+      render()
+      const head = !li.isConnected && ([...document.querySelectorAll('#main h2')].find((x) => x.textContent === 'Needs you') || document.querySelector('#main h1'))
+      if (had && head) { head.tabIndex = -1; head.focus({ preventScroll: true }) } else if (had && b.isConnected) b.focus()
+      toast(said, tone)
+    }
     try {
       await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action], pending: { text: p.text, at: p.at } } })
       ANSWERED[a.name] = p.at
-      render()
-      // The row is gone: the focus goes to the top of what needs you (not onto the next Allow, where a second Enter
-      // would say yes to that), and a screen reader is told it went (the toasts are a status)
-      if (had) {
-        const head = [...document.querySelectorAll('#main h2')].find((x) => x.textContent === 'Needs you') || document.querySelector('#main h1')
-        if (head) { head.tabIndex = -1; head.focus({ preventScroll: true }) }
-      }
-      toast(`${action === 'perm:deny' ? 'Denied' : 'Allowed'}: ${a.label}, ${line}`, action === 'perm:deny' ? 'info' : 'ok')
+      after(`${action === 'perm:deny' ? 'Denied' : 'Allowed'}: ${a.label}, ${line}`, action === 'perm:deny' ? 'info' : 'ok')
     } catch (err) {
-      if (err.status === 409 && /^It stopped/.test(err.message)) { forgot(a.name, p); render() }   // (for good, and on its card too)
-      toast(err.message)
       li.querySelectorAll('button').forEach((x) => { x.disabled = false })
-      if (had && b.isConnected) b.focus()
+      // Refused, and nothing was sent: it can't be answered (any more). Home looks again at once (what the agent waits
+      // for now, if anything, and whether it's up), not at its next look in 6 s; and the row of one that stopped while
+      // waiting (for good, and on its card too), or that was answered already (in another window), goes now.
+      if (err.status === 409) {
+        if (/^It stopped/.test(err.message)) forgot(a.name, p)
+        else if (/^You answered/.test(err.message)) ANSWERED[a.name] = p.at
+        refresh()
+        return after(/^It stopped/.test(err.message) ? stoppedWaiting(a.name) : err.message)
+      }
+      after(err.message)
     }
     activitySoon()
   }

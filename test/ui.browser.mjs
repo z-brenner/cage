@@ -1223,6 +1223,43 @@ const kept = await page.evaluate(async () => {
   return !!ACTIVITY.claude
 })
 if (!kept) fail('an older look at what the agents are doing, come in after a newer one, replaced it')
+// One refused (nothing was sent) leaves at once, and Home looks again right away, not at its next look in 6 s (held
+// back here: the page is out of sight, so it looks only when something makes it): one answered already in another
+// window, which the agent has yet to take, and one whose agent's VM stopped while the page still showed it up
+fs.writeFileSync(process.env.STUB_AWAKE, '')
+await codexUp(true)
+const codexAsks = (input) => { // (and the Allow on its row, once it counts)
+  const at = Date.now()
+  fs.appendFileSync(codexLog, JSON.stringify({ at, t: 'buttons', session: 'you', buttons: permButtons, text: permText('Bash', input) }) + '\n')
+  return { at, allow: page.locator(`.attn-list li.approval-row button[aria-label="Allow: Codex, Run a command on its own computer: ${input}"]:not([aria-disabled])`) }
+}
+const codexActions = () => (fs.existsSync(codexIn) ? fs.readdirSync(codexIn) : []).filter((n) => n.endsWith('.json') && JSON.parse(fs.readFileSync(path.join(codexIn, n), 'utf8')).type === 'action')
+const tmpAsked = codexAsks('rm -rf tmp')
+await tmpAsked.allow.waitFor({ timeout: 15000 })
+const elsewhere = await fetch(base + '/api/chat/codex/action', { method: 'POST', headers: { 'X-Cage-Token': token, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ action: 'perm:deny', label: 'Deny', pending: { text: permText('Bash', 'rm -rf tmp'), at: tmpAsked.at } }) })
+if (elsewhere.status !== 200 || codexActions().length !== 1) fail('Deny in another window: ' + elsewhere.status + ' ' + JSON.stringify(codexActions()))
+await page.evaluate(() => { Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true }) })
+const errorsRefused = errors.length
+await tmpAsked.allow.click()
+await page.locator('#toasts .toast', { hasText: 'You answered that already.' }).waitFor({ timeout: 5000 })
+await codexWaits.waitFor({ state: 'detached', timeout: 1000 })
+  .catch(async () => fail('Home still offers an approval answered in another window, once its Allow was refused: ' + await codexWaits.innerText()))
+for (const n of codexActions()) fs.rmSync(path.join(codexIn, n))
+const cacheAsked = codexAsks('rm -rf cache')
+await cacheAsked.allow.waitFor({ timeout: 15000 })
+fs.rmSync(process.env.STUB_AWAKE)   // (the page doesn't know)
+await cacheAsked.allow.click()
+await page.locator('#toasts .toast', { hasText: 'Codex stopped while waiting for your OK, so it won’t go ahead.' }).waitFor({ timeout: 5000 })
+await codexWaits.waitFor({ state: 'detached', timeout: 1000 })
+  .catch(async () => fail('Home still offers an approval Allow was refused for, as its agent had stopped: ' + await codexWaits.innerText()))
+await page.waitForFunction(() => STATE.agents.find((a) => a.name === 'codex').state !== 'ready', null, { timeout: 5000 })
+  .catch(() => fail('Home didn’t look again after an Allow was refused: it still shows Codex up'))
+await codexRow.locator('.status', { hasText: 'Asleep' }).waitFor({ timeout: 5000 }).catch(async () => fail('Codex’s row, once Home looked again: ' + await codexRow.innerText()))
+errors.splice(errorsRefused, errors.length, ...errors.slice(errorsRefused).filter((m) => !/status of 409/.test(m)))   // (refused: that's the point)
+if (codexActions().length) fail('an Allow refused on Home reached the agent: ' + JSON.stringify(codexActions()))
+await page.evaluate(() => { delete document.visibilityState })
+await codexUp(false)
 const wontSend = () => (fs.readFileSync(claudeLog, 'utf8').match(/Okay, I won’t send it\./g) || []).length
 const wontSendBefore = wontSend()
 await waits.getByRole('button', { name: 'Deny' }).click()
