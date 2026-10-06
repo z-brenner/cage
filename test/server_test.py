@@ -287,6 +287,9 @@ class Logs(unittest.TestCase):
 
     def tearDown(self):
         self.chat.close()
+        self.clear()
+
+    def clear(self):
         for name in ("log.jsonl", "log.1.jsonl"):
             try:
                 os.unlink(os.path.join(server.APPDIR, "claude", name))
@@ -336,7 +339,7 @@ class Logs(unittest.TestCase):
 
 class Activity(unittest.TestCase):
     """What Home shows of each agent, from the end of its chat log."""
-    setUp, tearDown, write = Logs.setUp, Logs.tearDown, Logs.write
+    setUp, tearDown, clear, write = Logs.setUp, Logs.tearDown, Logs.clear, Logs.write
     PERM = [[{"text": "Allow", "data": "perm:allow"}, {"text": "Deny", "data": "perm:deny"}]]
 
     def test_waiting_for_you(self):
@@ -451,6 +454,23 @@ class Activity(unittest.TestCase):
         self.assertIsNone(a["pending"])
         self.assertLess(a["today"]["answers"], 600)
 
+    def test_after_a_new_log(self):
+        """The VM starts a new log at 8 MB, while an approval may wait: what's said after it in the new one (or nothing
+        yet) leaves it waiting, as the chat shows it, and an answer there ends the wait. Only while the new log is
+        shorter than what Home reads of the end."""
+        for after, waits in (([], True), ([{"t": "you", "text": "What does it delete?", "at": 9}], True), ([{"t": "you", "text": "yes", "at": 9}], False)):
+            self.write(*[{"t": "reply", "text": "x" * 1000, "at": 2}] * 100, {"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, name="log.1.jsonl")
+            self.write(*after)
+            a = server.activity(self.chat, 0)
+            self.assertEqual(a["pending"], {"text": "May I?", "at": 7} if waits else None, after)
+            self.clear()
+        self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, {"t": "you", "text": "no", "at": 8}, name="log.1.jsonl")
+        self.assertIsNone(server.activity(self.chat, 0)["pending"])   # (answered before the new log)
+        self.clear()
+        self.write({"t": "buttons", "text": "long ago", "buttons": self.PERM, "at": 1}, name="log.1.jsonl")
+        self.write(*[{"t": "reply", "text": "x" * 1000, "at": 2}] * 600)
+        self.assertIsNone(server.activity(self.chat, 0)["pending"])   # (the new log is long enough: the one before isn't read)
+
     def test_a_link_is_not_read(self):
         other = os.path.join(HOME, "elsewhere.jsonl")
         with open(other, "w") as f:
@@ -538,7 +558,7 @@ class Usages(unittest.TestCase):
 
 class UsageAnswers(unittest.TestCase):
     """The answer to a /usage question, in the agent's chat log: only to that question, and found later too."""
-    setUp, tearDown, write = Logs.setUp, Logs.tearDown, Logs.write
+    setUp, tearDown, clear, write = Logs.setUp, Logs.tearDown, Logs.clear, Logs.write
 
     def test_late_answer(self):
         self.write({"t": "reply", "text": "before", "at": 1})
@@ -871,6 +891,17 @@ class Live(unittest.TestCase):
         self.assertEqual(self.sent("claude"), [])
         self.assertIsNone(strict(self.call("GET", "/api/activity?agents=claude")[2])["agents"]["claude"]["pending"])
         self.assertTrue(strict(self.call("GET", "/api/chat/claude/history")[2])["entries"][-1].get("ends"))
+
+    def test_after_a_new_log(self):
+        """An approval asked just before the VM started a new log still waits: Home shows it, and its card's Allow
+        goes."""
+        p = self.asks("claude", "Bash(rm -rf ~/work/old)")
+        d = os.path.join(server.APPDIR, "claude")
+        os.rename(os.path.join(d, "log.jsonl"), os.path.join(d, "log.1.jsonl"))
+        self.log("claude", {"t": "you", "session": "you", "text": "What does it delete?", "at": self.AT[0] + 1})
+        self.assertEqual(strict(self.call("GET", "/api/activity?agents=claude")[2])["agents"]["claude"]["pending"], p)
+        self.assertEqual(self.answer("claude", "perm:allow", self.card("claude"))[0], 200)
+        self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
 
     def test_one_answer_per_approval(self):
         """cc-connect's buttons say allow or deny, not to what: an answer goes to whatever waits when it gets there.

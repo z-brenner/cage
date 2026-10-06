@@ -758,10 +758,18 @@ def activity(c, since):
     """What an agent is doing, from the end of its chat log (read like the chat: no links followed): an approval
     waiting for you (cc-connect's "perm:" buttons, until something ends the wait, see ends()),
     since when it's been working (typing on, until it answers), what it said last, and how many questions, answers
-    and files there were from `since` on (ms: the page's midnight). The log is the VM's, so every value is checked."""
+    and files there were from `since` on (ms: the page's midnight). The log is the VM's, so every value is checked.
+    A log shorter than that end is read after the end of the one before it (the VM starts a new one at 8 MB), as the
+    chat shows them: an approval asked just before still waits."""
     size, _ = c.size()
     start = c.line_start(size - TAIL) if size > TAIL else 0
     entries, _ = c.read_log(start, TAIL + (1 << 20))
+    if size < TAIL:
+        osize, ino = c.size("log.1.jsonl")
+        ostart = max(0, osize - (TAIL - size))
+        if ostart:
+            ostart = c.line_start(ostart, "log.1.jsonl")
+        entries = (c.read_log(ostart, TAIL + (1 << 20), "log.1.jsonl", ino)[0] if osize else []) + entries
     pending, typing, last, today = None, None, None, {"asked": 0, "answers": 0, "files": 0}
     for _, e in entries:
         if (e.get("session") or "you") != "you":
