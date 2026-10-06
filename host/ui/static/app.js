@@ -765,7 +765,11 @@ function approvalRow (a, p, pos, placed) {
   let end = 0
   const parts = ap.what ? lineParts(ap).map(([t, prose]) => { const s = line.slice(end, end += t.length); return s ? h('span', prose ? {} : { class: 'exact' }, s) : null }) : [h('span', { class: 'exact' }, line)]
   const sub = [h('span', { dir: 'ltr' }, parts), p.at ? ' · ' + when(p.at) : '']
-  if (!approvalWhole(ap)) return row([...sub, ap.unseen ? '. It has characters that don’t show: open it to see where.' : ap.mixed ? '. It mixes letters from different alphabets: open it to see where.' : '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
+  if (!approvalWhole(ap)) {
+    const why = ap.unseen ? 'It has characters that don’t show: open it to see where.' : ap.mixed ? 'It mixes letters from different alphabets: open it to see where.'
+      : ap.rtl ? 'Some of it is written right to left: open it to see it in the order it’s sent.' : 'Only part of it fits here: open it to see all it asks.'
+    return row([...sub, '. ' + why], open(true), answer('perm:deny', 'sm'))
+  }
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
 }
 function when (at) { // 8:21 AM today; Mon 8:21 AM this week; Oct 3 before that
@@ -1469,6 +1473,9 @@ const APPROVAL_BODY = ['body', 'text', 'message', 'content', 'instructions']
 // Words to read, drawn as written words are; the rest (what runs, or where it goes) is drawn in the order it's written,
 // letter by letter (.exact)
 const PROSE = ['subject', 'title', 'instructions']
+// Letters written right to left (Hebrew, Arabic and others): drawn as written words are, what's next to them may be
+// drawn in another order than it's sent ("Pay invoice א 100 900" shows as "Pay invoice 900 100 א")
+const RTL = /(?=[\p{L}\p{N}])[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFE\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u
 function words (name) { return String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[\s_.-]+/g, ' ').trim().toLowerCase() }
 function capital (s) { return s ? s[0].toUpperCase() + s.slice(1) : s }
 function toolWords (tool, path) { // what a tool does: {what: 'Gmail: send email', via: 'Zapier'}
@@ -1579,7 +1586,9 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const body = bodyKey ? args[bodyKey] : ''
   // (in what it asked, or in what's read from its JSON: Go writes U+2028 and the control characters there as \u2028)
   const all = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])]
-  return { raw, tool, what, via, fields, body, bodyKey, inWhat, keys: Object.keys(args), cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0 }
+  // (words to read, written partly right to left: the text, a subject, a title, instructions)
+  const rtl = [body, ...fields.filter(([, , k]) => PROSE.includes(k)).map(([, v]) => v)].some((s) => RTL.test(s))
+  return { raw, tool, what, via, fields, body, bodyKey, inWhat, keys: Object.keys(args), cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0, rtl }
 }
 // In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
 // U+FEFF or U+2028 is a space to \s, and then a space is all it would show.) A question not in cc-connect's words is
@@ -1612,19 +1621,22 @@ function moreOf (ap) {
 // ("assignees": [] can take everyone off an issue). And not when it isn't cc-connect's question, when cc-connect cut
 // what it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end
 // of a command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
-// characters that don't show, letters from another alphabet that look like these, or names that read alike. Nor when
+// characters that don't show, letters from another alphabet that look like these, or names that read alike; nor when
+// words on it are written partly right to left (Home draws them as written words are, and what's next to them, a
+// number say, may be drawn in another order than it's sent: the card has it in order). Nor when
 // it's as long as what Home has of it: server.py's activity() keeps the first 4,000 characters, and a "```" in a
 // longer one would end what Home reads of it there.
 function approvalWhole (ap) {
   const shown = new Set([ap.inWhat, ...moreOf(ap).keys].filter(Boolean))   // ("": nothing; not a field named "")
-  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && [...ap.raw].length < 4000 &&
+  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && !ap.rtl && [...ap.raw].length < 4000 &&
     approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap)) && ap.keys.every((k) => shown.has(k))
 }
 function approvalView (ap) { // what the card shows above its buttons
   const odd = [ // (why Home offers no Allow for it, where that's in what it asks)
     ap.unseen && 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.',
     ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.',
-    ap.alike && 'Some names in this read the same, like “to” and “TO”. The app may use either one, so each is shown with the name it was sent with.'
+    ap.alike && 'Some names in this read the same, like “to” and “TO”. The app may use either one, so each is shown with the name it was sent with.',
+    ap.rtl && 'Some of the words in this are written right to left, as Hebrew and Arabic are, so what’s next to them, a number say, may be drawn in another order than it’s sent. Exactly what it asked, at the end, has all of it in the order it’s sent.'
   ].filter(Boolean).map((text) => h('p', { class: 'note warn' }, icon('triangle-alert'), text))
   if (!ap.what) return [...odd, h('pre', { class: 'approval-text exact' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
   const clamp = h('div', { class: 'clamp' }, visible(ap.body))

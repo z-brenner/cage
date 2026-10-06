@@ -1488,6 +1488,15 @@ const rtl = 'cat \u{5D0}>\u{5D1} && rm -rf ~/\u{5D2}'
 r = await asked(permText('Bash', rtl))
 shownAsIs('a command written partly right to left', r)
 check('a command written partly right to left', field(r, 'Command') === rtl && r.home.line === command(rtl), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.line]))
+// Words to read written partly right to left are drawn as written words are, on Home too, where what's next to them may
+// be drawn in another order than it's sent ("Pay invoice 900 100 א"): so Home offers no Allow, and says why, and the
+// card says so, and has all of it in order at its end
+for (const words of ['Pay invoice \u{5D0} 100 900 today', 'Wire \u{628} 100 to account 900 \u{628} now']) {
+  r = await asked(permText('mcp__zapier__gmail_send_email', JSON.stringify({ instructions: words, to: 'bob@acme.com' })))
+  check('instructions written partly right to left: ' + words, r.home.line === 'Gmail: send email to bob@acme.com: ' + words && r.card.body === words, 'shown as ' + JSON.stringify([r.home.line, r.card.body]))
+  check('instructions written partly right to left: ' + words, !r.card.swapped.length, 'the card draws what it asked in another order than it’s sent: ' + JSON.stringify(r.card.swapped))
+  notAtOnce('instructions written partly right to left: ' + words, r, /Some of it is written right to left: open it to see it in the order it’s sent\.$/, /right to left/)
+}
 
 // Characters that don't show: zero-width ones, U+2060, U+FEFF, a soft hyphen and other format characters (a tag
 // character, U+E0041, is a way to hide text from people and show it to a model), a carriage return; a variation
