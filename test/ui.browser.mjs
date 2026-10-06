@@ -1436,9 +1436,10 @@ const asked = async (text) => { // what Home's row and the card show for a reque
   return { home, card: shown }
 }
 // What doesn't show as what it is: control and format characters (U+202E…), what's drawn as nothing (U+200B, a
-// variation selector, U+FEFF…), and spaces that aren't the space (U+00A0: to a shell, part of a word); but for a
-// newline, a tab, and the variation selector that makes an emoji one (cc-connect's ⚠️). Each one is shown marked.
-const HIDDEN = /(?![\t\n ]|(?<=\p{Emoji})\u{FE0F})[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}]/gu
+// variation selector, U+FEFF…), and spaces that aren't the space (U+00A0: to a shell, part of a word), or that look
+// like one (U+2800, blank braille); but for a newline, a tab, and the variation selector that makes a picture an
+// emoji (cc-connect's ⚠️), not a digit a keycap. Each one is shown marked.
+const HIDDEN = /(?![\t\n ]|(?<=\p{Extended_Pictographic})\u{FE0F})[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}\u{2800}]/gu
 const marked = (s) => s.replace(HIDDEN, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
 const command = (s) => 'Run a command on its own computer: ' + s
 const lineOf = (s) => s.length <= 160 ? s : s.slice(0, 159) + '…'   // (Home's line, cut)
@@ -1510,6 +1511,13 @@ shownAsIs('a command with a variation selector, and spaces that aren\'t the spac
 check('a command with a variation selector, and spaces that aren\'t the space', field(r, 'Command') === marked(quiet), 'the card shows ' + JSON.stringify(field(r, 'Command')))
 check('a command with a variation selector, and spaces that aren\'t the space', r.home.line === lineOf(command(marked(quiet))), 'Home shows ' + JSON.stringify(r.home.line))
 notAtOnce('a command with a variation selector, and spaces that aren\'t the space', r, hiddenWhy, /characters that don’t show/)
+// (U+2800 is drawn as a space; and U+FE0F after a digit makes it a keycap, which is no emoji in a file's name)
+const blankish = 'rm -rf ~/old\u{2800}~ && cat notes1\u{FE0F}.md'
+r = await asked(permText('Bash', blankish))
+shownAsIs('a command with blank braille, and a digit made a keycap', r)
+check('a command with blank braille, and a digit made a keycap', field(r, 'Command') === 'rm -rf ~/old⟨U+2800⟩~ && cat notes1⟨U+FE0F⟩.md' &&
+  r.home.line === command('rm -rf ~/old⟨U+2800⟩~ && cat notes1⟨U+FE0F⟩.md'), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.line]))
+notAtOnce('a command with blank braille, and a digit made a keycap', r, hiddenWhy, /characters that don’t show/)
 r = await asked(permText('mcp__zapier__gmail_send_email', JSON.stringify({ subject: 'Hi', to: 'bob@acme.com\u{3000}' })))
 shownAsIs('a recipient with a wide space', r)
 check('a recipient with a wide space', field(r, 'To') === 'bob@acme.com⟨U+3000⟩' && r.home.line === 'Gmail: send email to bob@acme.com⟨U+3000⟩', 'shown as ' + JSON.stringify([field(r, 'To'), r.home.line]))

@@ -1512,9 +1512,10 @@ const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray
 // control and format characters, ones that turn the text after them around (U+202E), and spaces that aren't the
 // space (to a shell, "rm -rf ~/old ~" with U+00A0 for its second space is one word). With one, a command or an
 // address can look like it says what it doesn't. Shown as what they are (⟨U+202E⟩), and Home doesn't offer Allow for
-// them. (But for a newline and a tab; and for the variation selector that makes an emoji one: cc-connect's ⚠️ is ⚠
-// and U+FE0F.)
-const UNSEEN = /(?![\t\n ]|(?<=\p{Emoji})[\u{FE0E}\u{FE0F}])[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}]/u
+// them. So is U+2800, the blank braille pattern, drawn as a space but none. (But for a newline and a tab; and for the
+// variation selector that makes a picture an emoji: cc-connect's ⚠️ is ⚠ and U+FE0F. Not after a digit, "#" or "*",
+// which are emoji too, to make a keycap: "notes1️.md" isn't "notes1.md".)
+const UNSEEN = /(?![\t\n ]|(?<=\p{Extended_Pictographic})[\u{FE0E}\u{FE0F}])[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}\u{2800}]/u
 const UNSEEN_ALL = new RegExp(UNSEEN.source, 'gu')
 // Letters from another alphabet that look like these: "bob@acme.com" with a Cyrillic "a" (U+0430) is someone else's
 // address. In a word that mixes alphabets whose letters look alike (Latin, Greek, Cyrillic, Armenian, Cherokee), the
