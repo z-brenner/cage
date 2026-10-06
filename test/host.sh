@@ -426,6 +426,14 @@ grep -q "claude couldn't reach example.com (2×" "$T/sec" && grep -q 'cage allow
 cage 2>"$T/home.out" >/dev/null || true
 if grep -q 'blocked since you last looked' "$T/home.out"; then fail "still flagged after cage security"; fi
 [ "$(wc -l < "$CAGE_HOME/events.log")" = 3 ] || fail "events collected twice: $(cat "$CAGE_HOME/events.log")"
+# harvests at once (the helper, each open page's state, cage security): each new line is still logged once
+for i in $(seq 30); do
+  echo "2026-10-01T10:01:$(printf %02d "$i").000Z DEBUG microsandbox_network::engine::dns::forwarder: DNS query denied by network policy domain=h$i.example"
+done >> "$T/syslog"
+for i in 1 2 3 4; do cage security >/dev/null 2>&1 & done
+wait
+[ "$(wc -l < "$CAGE_HOME/events.log")" = 33 ] || fail "harvests at once logged an event twice: $(wc -l < "$CAGE_HOME/events.log") lines for 33"
+[ ! -e "$CAGE_HOME/events/.harvest.lock" ] || fail "a harvest left its lock behind"
 unset MSB_SYSLOG
 cage secret rm NET_KEY 2>/dev/null
 cage network open </dev/null 2>/dev/null
