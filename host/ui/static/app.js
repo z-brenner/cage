@@ -233,12 +233,24 @@ async function refresh () {
     console.warn(e)
   }
 }
-async function loadActivity () { // what each agent is doing (Home, the title): read from the end of its chat log
-  const names = STATE ? agentsOn().map((a) => a.name) : []
-  const midnight = new Date()
-  midnight.setHours(0, 0, 0, 0)
-  try { ACTIVITY = names.length ? (await api(`/api/activity?agents=${names.join(',')}&since=${midnight.getTime()}`)).agents || {} : {} } catch (e) { return }
-  render()
+// What each agent is doing (Home, the title): read from the end of its chat log. Two looks can overlap (the refresh,
+// and something that happened in a chat): only the newest one's answer counts, as an older one that comes in later
+// would show what was true before. ACT_LOAD is the newest look, until it has drawn what it found.
+let ACT_SEQ = 0
+let ACT_LOAD = Promise.resolve()
+function loadActivity () {
+  const n = ++ACT_SEQ
+  ACT_LOAD = (async () => {
+    const names = STATE ? agentsOn().map((a) => a.name) : []
+    const midnight = new Date()
+    midnight.setHours(0, 0, 0, 0)
+    let got
+    try { got = names.length ? (await api(`/api/activity?agents=${names.join(',')}&since=${midnight.getTime()}`)).agents || {} : {} } catch (e) { return }
+    if (n !== ACT_SEQ) return
+    ACTIVITY = got
+    render()
+  })()
+  return ACT_LOAD
 }
 let ACT_SOON = 0
 function activitySoon () { clearTimeout(ACT_SOON); ACT_SOON = setTimeout(loadActivity, 400) }   // something happened in a chat
@@ -683,7 +695,9 @@ function attention () {
   const S = STATE
   const out = []
   const item = (tone, ic, text, action) => h('li', { class: 'attn ' + tone }, h('span', { class: 'attn-icon' }, icon(ic)), h('span', { class: 'grow' }, text), action)
-  for (const a of agentsOn()) { const p = askingOf(a); if (p) out.push(approvalRow(a, p)) }
+  const placed = new Map()
+  for (const a of agentsOn()) { const p = askingOf(a); if (p) out.push(approvalRow(a, p, placed.size, placed)) }
+  PLACED = placed
   for (const a of agentsOn()) {
     const s = statusOf(a)
     if (s === 'login') out.push(item('warn', 'log-in', `${a.label} needs you to sign in to ${a.plan}`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')))
@@ -700,13 +714,23 @@ function attention () {
 // here, or Open to see it in the conversation first. Allow only when that line is all it asks (approvalWhole); else
 // Open shows the rest. The answer goes with the approval it's for, so it answers that one or none (server.py refuses
 // it once the agent has moved on).
-function approvalRow (a, p) {
+// An Allow that has only just come to where it is doesn't count yet: a row drawn there a moment ago (one above it
+// answered or gone, or one asked anew) would be allowed by a click or an Enter meant for what was there before. As
+// browsers do with their own permission prompts, it waits a little first (aria-disabled, so it keeps the focus).
+const SETTLE = 600
+let PLACED = new Map()   // the approval rows on Home: where each one is, and since when (by agent and when it was asked)
+function approvalRow (a, p, pos, placed) {
   const ap = approvalOf(p.text)
   const line = approvalLine(ap)
+  const key = a.name + '\n' + p.at
+  const was = PLACED.get(key)
+  const since = was && was.pos === pos ? was.since : Date.now()
+  if (placed) placed.set(key, { pos, since })
   const open = (main) => h('a', { class: 'btn sm ' + (main ? 'primary' : 'ghost'), href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label + '’s chat' }, 'Open')
   const row = (sub, ...acts) => h('li', { class: 'attn warn approval-row' }, h('span', { class: 'attn-icon' }, icon('hand')),
     h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, sub)), h('span', { class: 'attn-acts' }, acts))
   const decide = (action) => async (e) => {
+    if (e.currentTarget.getAttribute('aria-disabled') === 'true') return   // (not yet)
     const li = e.currentTarget.closest('li')
     li.querySelectorAll('button').forEach((b) => { b.disabled = true })
     try {
@@ -717,7 +741,12 @@ function approvalRow (a, p) {
     activitySoon()
   }
   // (what a screen reader says for each, out of context: two agents may be waiting)
-  const answer = (action, cls) => h('button', { type: 'button', class: 'btn ' + cls, 'aria-label': `${PERM_LABEL[action]}: ${a.label}, ${line}`, onclick: decide(action) }, PERM_LABEL[action])
+  const answer = (action, cls) => {
+    const b = h('button', { type: 'button', class: 'btn ' + cls, 'aria-label': `${PERM_LABEL[action]}: ${a.label}, ${line}`, onclick: decide(action) }, PERM_LABEL[action])
+    const wait = since + SETTLE - Date.now()
+    if (action === 'perm:allow' && wait > 0) { b.setAttribute('aria-disabled', 'true'); setTimeout(() => b.removeAttribute('aria-disabled'), wait) }
+    return b
+  }
   const sub = [line, p.at ? ' · ' + when(p.at) : '']
   if (!approvalWhole(ap)) return row([...sub, '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))

@@ -253,7 +253,7 @@ body.is-locked .shell, body.unconfigured .shell { grid-template-columns: minmax(
 }
 .btn:hover { background: var(--hover); border-color: var(--input); }
 .btn:active { transform: translateY(.5px); }
-.btn:disabled { opacity: .5; cursor: default; }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: .5; cursor: default; }
 .btn .i { width: 15px; height: 15px; }
 .btn.primary { background: var(--primary); border-color: transparent; color: var(--primary-fg); box-shadow: 0 1px 2px rgb(0 0 0 / 12%), inset 0 1px 0 rgb(255 255 255 / 8%); }
 .btn.primary:hover { background: var(--primary-hover); }

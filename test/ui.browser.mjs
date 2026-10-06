@@ -1034,18 +1034,58 @@ const askedFor = () => { // the approval the fake VM asked for, once it has: its
 for (let i = 0; i < 100 && !askedFor(); i++) await page.waitForTimeout(100)
 await page.waitForFunction((at) => (waitingOf('claude') || {}).at === at, askedFor(), { timeout: 15000 })   // Home shows that one
 await waits.getByText('Gmail: send email to bob@acme.com').waitFor({ timeout: 5000 })
-await page.evaluate(() => { window.__loadActivity = loadActivity; window.loadActivity = async () => {} })   // Home doesn't look again yet
+// (Home doesn't look again yet; and a look already under way, from the page's refresh, has drawn what it found)
+await page.evaluate(async () => { window.__loadActivity = loadActivity; window.loadActivity = async () => {}; await ACT_LOAD })
 const askedNow = '⚠️ **Permission Request**\n\nAgent wants to use **Bash**:\n\n```\nrm -rf ~/work/old\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).'
 fs.appendFileSync(claudeLog, [{ t: 'action', session: 'you', action: 'perm:deny', label: 'Deny' },
   { t: 'buttons', session: 'you', text: askedNow, buttons: [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }]] }].map((e) => JSON.stringify({ at: Date.now(), ...e }) + '\n').join(''))
 const allowedThen = allowed()
 const before409 = errors.length
+if ((await page.evaluate(() => (waitingOf('claude') || {}).at)) !== askedFor()) fail('Home was drawn again before Allow was clicked: this test can’t tell which approval it answers')
 await waits.getByRole('button', { name: 'Allow' }).click()
 await page.locator('#toasts .toast', { hasText: 'It isn’t waiting for that any more. Open its chat to see what it’s doing.' }).waitFor({ timeout: 5000 })
 errors.splice(before409, errors.length, ...errors.slice(before409).filter((m) => !/status of 409/.test(m)))   // (refused: that's the point)
 await page.evaluate(() => { window.loadActivity = window.__loadActivity; return loadActivity() })   // (not at the next refresh, in 6 s)
 await waits.getByText('Run a command on its own computer: rm -rf ~/work/old').waitFor({ timeout: 10000 })
 if (allowed() !== allowedThen) fail('Allow on Home said yes to something it did not show')
+// an Allow that has only just come to where it is doesn't count yet: a click (or an Enter) meant for the row that was
+// there a moment before. Here an approval asked anew is drawn in its place, and clicked at once.
+const hasty = await page.evaluate(async () => {
+  const real = window.api
+  let sent = 0
+  window.api = (p, o) => { if (/\/action$/.test(p)) sent++; return real(p, o) }
+  window.loadActivity = async () => {}
+  const p = ACTIVITY.claude.pending
+  ACTIVITY.claude.pending = { ...p, at: p.at + 1 }
+  render()
+  const b = document.querySelector('.approval-row button[aria-label^="Allow: Claude Code"]')
+  b.click()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  const said = b.getAttribute('aria-disabled')
+  ACTIVITY.claude.pending = p
+  render()
+  window.api = real
+  window.loadActivity = window.__loadActivity
+  return { sent, said }
+})
+if (hasty.sent || hasty.said !== 'true') fail('an Allow drawn a moment ago counts at once: ' + JSON.stringify(hasty))
+// and two looks at what the agents are doing that overlap (the refresh, something in a chat): the older one's answer,
+// come in after the newer one's, is old news
+const kept = await page.evaluate(async () => {
+  const real = window.api
+  let looks = 0
+  window.api = async (p, o) => {
+    if (!p.startsWith('/api/activity') || looks++) return real(p, o)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    return { agents: {} }
+  }
+  const older = loadActivity()
+  await loadActivity()
+  await older
+  window.api = real
+  return !!ACTIVITY.claude
+})
+if (!kept) fail('an older look at what the agents are doing, come in after a newer one, replaced it')
 const wontSend = () => (fs.readFileSync(claudeLog, 'utf8').match(/Okay, I won’t send it\./g) || []).length
 const wontSendBefore = wontSend()
 await waits.getByRole('button', { name: 'Deny' }).click()
