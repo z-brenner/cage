@@ -319,8 +319,8 @@ if ! bx grep -qF 'carol@example.org' /home/agent/.cage/mask/map.json; then unask
 bx grep -qF 'Acme Corp' /home/agent/.cage/mask/map.json || fail "your terms didn't reach $B's mask"
 cage ask "and is dave@example.net?" "$A" >/dev/null 2>"$CAGE_HOME/ask.err" || fail "cage ask: $(cat "$CAGE_HOME/ask.err")"
 gx grep -qF 'dave@example.net' /home/agent/.cage/mask/map.json || fail "cage ask didn't run $A's CLI behind its mask"
-left="$(find "$CAGE_HOME/agents/$A/replies" "$CAGE_HOME/agents/$B/replies" -name '*.q' 2>/dev/null || true)"
-[ -z "$left" ] || fail "a question stayed on disk: $left"
+left="$(find "$CAGE_HOME/agents/$A/replies" "$CAGE_HOME/agents/$B/replies" \( -name '*.q' -o -name '*.terms' \) 2>/dev/null || true)"
+[ -z "$left" ] || fail "a question, or the terms that went with it, stayed on disk: $left"
 cage destroy "$B" --yes >/dev/null 2>&1; B=""
 cage ask-all off </dev/null 2>/dev/null; cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
 ok "asking other agents keeps the mask: /all from a masked agent's chat, and cage ask, reach each CLI through its VM's mask"

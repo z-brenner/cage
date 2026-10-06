@@ -634,11 +634,11 @@ port = \"9830\"
   fi
   # Your terms go to a masked agent, and to one that /all or a stand-in can pass what you told a masked agent: its
   # own mask.py hides them there (ask_agent, which also brings them as they are then). Nowhere else: they'd tell that
-  # AI company who you keep private.
+  # AI company who you keep private. (That includes what an ask stopped before it could clean up left of them.)
   if mask_terms_for "$a"; then
     mask_terms_copy "$a" || die "couldn't pass your privacy mask's terms on to $a ($dir/mask.terms)"
   else
-    rm -f "$dir/mask.terms"
+    rm -f "$dir/mask.terms" "$dir"/replies/*.terms
   fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
   if [ "$a" = claude ] && [ "$(cvar APPROVE "$a")" = on ] && [ "$CAGE_MODE" = yolo ]; then
@@ -3150,13 +3150,14 @@ ask_agent() { # ask_agent <from> <to> <question>: <to>'s answer on stdout (empty
   # /all or a stand-in passes it on. The target's mask.py hides it, with that VM's map, and unmasks the answer.
   if mask_on "$from" || mask_on "$to"; then
     m="$(mask_cmd)" || m="python3 /cage/mask.py"
-    script="exec $m ${script#exec }"
+    script="$MASK_TERMS_FD exec $m ${script#exec }"
     # mask.py hides your own terms only with the VM's copy of them in place. The VM's setup (guest/entry.sh) puts
     # them there once it has installed everything, and as they were when it woke up; this can come sooner, or after
     # `cage mask add`. So your terms as they are now go with the question, in a file of their own next to it, and
-    # the VM puts them in place, as root, before the CLI runs (MASK_TERMS_SYNC); if it can't, the CLI doesn't run. A
-    # name the VM has never looked up can't come from what it cached, and `cage up` (which removes mask.terms once an
-    # agent no longer needs your terms) can't take it away meanwhile.
+    # the VM puts them in place, as root, before the CLI runs (MASK_TERMS_SYNC); if it can't, the CLI doesn't run.
+    # The CLI's mask reads that very copy (MASK_TERMS_FD), whatever replaces the VM's copy meanwhile. A name the VM
+    # has never looked up can't come from what it cached, and `cage up` can't take it away meanwhile (it removes
+    # leftovers only from an agent that no longer needs your terms, render_config).
     t="/cage-config/replies/$id.terms"
     ( umask 077; if [ -e "$MASK_TERMS" ]; then cat "$MASK_TERMS"; fi > "$d/$id.terms" ) 2>/dev/null \
       || { rm -f "$f" "$d/$id.terms"; return 0; }
@@ -3497,8 +3498,12 @@ mask_terms_copy() { # mask_terms_copy <agent>: your terms as they are now, for i
 # Run as root in a VM, before a CLI answers behind its mask (ask_agent): the copy of your terms that guest/mask.py reads
 # becomes exactly the file cage wrote for this ask ($3, empty when you have no terms), swapped in whole, so a mask
 # reading it meanwhile never gets half of it. If that file can't be read or put in place, the CLI doesn't run.
-MASK_TERMS_SYNC='again install -D -m 644 "$3" "/etc/cage/.mask.terms.$$" &&
+# The CLI's own mask reads this copy through fd 9, opened before the swap (MASK_TERMS_FD, for the agent's side): the
+# VM's copy can be replaced again before that mask gets to it (the VM's setup, still waking up, putting in the terms it
+# woke up with; an ask that started earlier, with the terms you had then), which leaves this one's terms as they are.
+MASK_TERMS_SYNC='again install -D -m 644 "$3" "/etc/cage/.mask.terms.$$" && exec 9<"/etc/cage/.mask.terms.$$" &&
         mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms || exit 1'
+MASK_TERMS_FD='CAGE_MASK_TERMS=/proc/self/fd/9'
 mask_terms_for() { # mask_terms_for <agent>: does its VM need your terms (its own mask, or a relay from a masked agent)?
   local m
   mask_on "$1" && return 0

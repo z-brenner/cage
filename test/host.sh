@@ -656,12 +656,16 @@ cage mask add "Beta Client" </dev/null >/dev/null 2>&1
 grep -qx 'Beta Client' "$CAGE_HOME/agents/codex/mask.terms" && fail "codex's copy of your terms changed without a restart"
 printf 'cage-claude\ncage-codex\n' > "$T/running"
 # the VM's own part of an ask runs here (the stub msb, above), and runuser, which would run the CLI as the agent there,
-# notes what the CLI was asked and the terms in place for it
+# notes what the CLI was asked and the terms its mask would read (CAGE_MASK_TERMS in the CLI's script, else the VM's
+# copy). MSB_SWAP: the VM's copy is replaced with other terms first, as its setup or an earlier ask could meanwhile.
 mkdir -p "$T/vmbin"
 cat > "$T/vmbin/runuser" <<'EOF'
 #!/usr/bin/env bash
-printf '%s' "${!#}" > "$MSB_CLI"   # what the CLI was asked (its last argument), and the terms it would have
-rm -f "$MSB_CLI.terms"; cp "$MSB_VM_ETC/mask.terms" "$MSB_CLI.terms" 2>/dev/null || :
+if [ -n "${MSB_SWAP:-}" ]; then printf 'Other Corp\n' > "$MSB_VM_ETC/.other" && mv -f "$MSB_VM_ETC/.other" "$MSB_VM_ETC/mask.terms"; fi
+printf '%s' "${!#}" > "$MSB_CLI"   # what the CLI was asked (its last argument)
+p="$MSB_VM_ETC/mask.terms"; prev=""; re='CAGE_MASK_TERMS=([^ ;]+)'
+for x in "$@"; do if [ "$prev" = -c ] && [[ "$x" =~ $re ]]; then p="${BASH_REMATCH[1]}"; fi; prev="$x"; done
+rm -f "$MSB_CLI.terms"; cat "$p" > "$MSB_CLI.terms" 2>/dev/null || rm -f "$MSB_CLI.terms"
 EOF
 chmod +x "$T/vmbin/runuser"
 export MSB_RUNNING="$T/running" MSB_SENT="$T/sent" MSB_PS="$T/ps" MSB_VM_ETC="$T/vm-etc" MSB_VM_BIN="$T/vmbin" MSB_CLI="$T/cli"
@@ -706,8 +710,21 @@ for h in q terms; do
     && [ "$(cat "$MSB_CLI.terms")" = $'Acme Corp\nBeta Client' ] || fail "with its .$h file late, the CLI didn't run: $out"
 done
 [ -z "$(ls -A "$CAGE_HOME/agents/claude/replies" 2>/dev/null)" ] || fail "files left behind: $(ls -A "$CAGE_HOME/agents/claude/replies")"
+# the VM's copy replaced after this ask put its terms in place, before the CLI's mask reads it (the VM's setup, still
+# waking up, putting in the terms it woke up with; an ask that started earlier): the mask reads this ask's terms
+rm -f "$MSB_CLI"
+out="$(MSB_SWAP=1 cage ask "is Acme Corp in?" claude 2>/dev/null)"
+[ "$(cat "$MSB_VM_ETC/mask.terms")" = "Other Corp" ] && [ "$(cat "$MSB_CLI" 2>/dev/null)" = 'is Acme Corp in?' ] \
+  && [ "$(cat "$MSB_CLI.terms" 2>/dev/null)" = $'Acme Corp\nBeta Client' ] \
+  || fail "with the VM's copy replaced before the CLI ran, its mask would read: $(cat "$MSB_CLI.terms" 2>&1)"
 unset MSB_VM_ETC MSB_VM_BIN MSB_CLI
-cage fallback claude off </dev/null 2>/dev/null; cage mask rm "Beta Client" </dev/null 2>/dev/null
+# an ask that was stopped before it could clean up (the web app's Stop ends `cage ask` and all it runs) leaves its
+# files: once that agent no longer needs your terms, `cage up` takes them out of what its VM sees too
+mkdir -p "$CAGE_HOME/agents/codex/replies"; printf 'Acme Corp\n' > "$CAGE_HOME/agents/codex/replies/1-1-1.terms"
+cage fallback claude off </dev/null 2>/dev/null; cage up codex 2>/dev/null
+[ ! -e "$CAGE_HOME/agents/codex/mask.terms" ] && [ -z "$(ls -A "$CAGE_HOME/agents/codex/replies")" ] \
+  || fail "codex kept your terms once it no longer needed them: $(ls -A "$CAGE_HOME/agents/codex" "$CAGE_HOME/agents/codex/replies")"
+cage mask rm "Beta Client" </dev/null 2>/dev/null
 ok "relays keep the mask: your terms go where a masked agent's words can, a stand-in answers behind it with your terms as they are now (in a file for that ask; without it, no answer), never via ps"
 
 # an answer is the VM's text: printed here, it can't carry terminal control codes (to rewrite the screen, set the clipboard)

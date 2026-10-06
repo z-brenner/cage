@@ -8,7 +8,8 @@
 #   cage ask: the CLI runs as the agent, behind the mask, with the question from a file that is then removed (also
 #             when the CLI fails), and the answer comes back unmasked; your terms as they are now are in place first,
 #             from a file of their own for that ask, even before the VM's own setup has put them there and whatever
-#             happens to the copy it reads when it wakes up; the CLI doesn't run when they can't be
+#             happens to the copy it reads when it wakes up, or to the VM's copy before the CLI's mask reads it; the
+#             CLI doesn't run when they can't be
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -174,5 +175,24 @@ grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" && [ "$(vm cat /etc
 [ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
 cp "$CAGE_HOME/mask.terms" "$C/mask.terms"
 ok "cage ask: with the copy of your terms the VM woke up with replaced meanwhile, the CLI still gets your terms as they are now"
+
+# After the VM has put this ask's terms in place, and before the CLI's mask reads them, something else replaces them
+# with other terms (the VM's own setup, still waking up, putting in the ones it woke up with; or an ask that started
+# earlier, with the terms you had then): here, a runuser that does that first. The CLI's mask still reads the terms
+# put in place for this ask.
+printf '#!/bin/sh\nprintf "Other Corp\\n" > /etc/cage/.other && chmod 644 /etc/cage/.other && mv -f /etc/cage/.other /etc/cage/mask.terms\nexec %s "$@"\n' \
+  "$(vm sh -c 'command -v runuser')" > "$T/runuser"
+chmod 755 "$T/runuser"
+docker cp "$T/runuser" "$NAME:/usr/local/bin/runuser" >/dev/null
+vm rm -f /tmp/asked
+out="$(STANDIN="$NAME" cage ask "ask Acme Corp and Zeta Partners" claude 2>/dev/null)"
+[ "$(vm cat /etc/cage/mask.terms)" = "Other Corp" ] || fail "the VM's copy wasn't replaced before the CLI ran: $(vm cat /etc/cage/mask.terms)"
+asked="$(vm cat /tmp/asked)"
+grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" && ! grep -qiE 'acme|zeta' <<<"$asked" \
+  || fail "with the VM's copy replaced before its mask read it, the CLI didn't get your terms masked: $asked"
+grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" || fail "cage ask, the VM's copy replaced: $out"
+vm rm -f /usr/local/bin/runuser
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+ok "cage ask: the CLI's mask reads the terms put in place for its ask, even when they're replaced before it gets there"
 
 echo "all $pass mask VM tests passed"
