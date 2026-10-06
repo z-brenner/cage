@@ -761,7 +761,7 @@ function approvalRow (a, p, pos, placed) {
     return b
   }
   const sub = [line, p.at ? ' · ' + when(p.at) : '']
-  if (!approvalWhole(ap)) return row([...sub, '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
+  if (!approvalWhole(ap)) return row([...sub, ap.unseen ? '. It has characters that don’t show: open it to see where.' : '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
 }
 function when (at) { // 8:21 AM today; Mon 8:21 AM this week; Oct 3 before that
@@ -1499,11 +1499,17 @@ function shown (v) { // a value as text: a list as "a, b", anything else as JSON
 // card would show what a part of it says, not what runs.
 const RAW_INPUT = /^(Bash|Shell|Read|Edit|Write|Grep|Glob)$/i
 const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
-function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut}; what is '' if it isn't cc-connect's prompt
+// Characters that don't show, or that turn the text after them around (U+202E): with one, a command or an address
+// can look like it says what it doesn't. Shown as what they are (⟨U+202E⟩), and Home doesn't offer Allow for them.
+const UNSEEN = /(?![\n\t])[\p{C}\u2028\u2029\u115F\u1160\u3164\uFFA0]/u
+const UNSEEN_ALL = new RegExp(UNSEEN.source, 'gu')
+function visible (s) { return String(s).replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`) }
+function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen}; what is '' if it isn't cc-connect's prompt
   const raw = String(text || '')
+  const unseen = UNSEEN.test(raw)
   const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
   const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
-  if (!bold) return { raw, tool: '', what: '', fields: [], body: '' }
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen }
   const tool = bold[1].trim()
   const input = fence[1].replace(/\n$/, '')
   const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
@@ -1529,11 +1535,11 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   }
   // (cut by cc-connect: JSON closed off where it was cut, or input as it is that's 800 characters and "...")
   const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
-  return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut }
+  return { raw, tool, what, via, fields, body: bodyKey ? args[bodyKey] : '', cut, unseen }
 }
 function approvalLine (ap, all) { // in one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut
-  if (!ap.what) return ap.raw.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)
-  const line = (ap.what + approvalMore(ap)).replace(/\s+/g, ' ')
+  if (!ap.what) return visible(ap.raw.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()).slice(0, 160)
+  const line = visible((ap.what + approvalMore(ap)).replace(/\s+/g, ' '))
   return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
 }
 function approvalMore (ap) { // what the line says after what it does: who it goes to (all of them), or what it runs, opens…
@@ -1543,24 +1549,27 @@ function approvalMore (ap) { // what the line says after what it does: who it go
 }
 // Is that line all it asks, as far as saying yes goes? Not when it isn't cc-connect's question, when cc-connect cut what
 // it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end of a
-// command is what matters), or when it puts a command's lines on one (each one runs).
+// command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
+// characters that don't show.
 function approvalWhole (ap) {
-  return !!ap.what && !ap.cut && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
+  return !!ap.what && !ap.cut && !ap.unseen && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
 }
 function approvalView (ap) { // what the card shows above its buttons
-  if (!ap.what) return [h('pre', { class: 'approval-text' }, ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim())]
-  const clamp = h('div', { class: 'clamp' }, ap.body)
+  const odd = ap.unseen ? h('p', { class: 'note warn' }, icon('triangle-alert'), 'This has characters that don’t show, which can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.') : null
+  if (!ap.what) return [odd, h('pre', { class: 'approval-text' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
+  const clamp = h('div', { class: 'clamp' }, visible(ap.body))
   const body = ap.body ? h('div', { class: 'approval-body' }, clamp) : null
   const more = body && h('button', { type: 'button', class: 'linkish approval-more', 'aria-expanded': 'false', hidden: true, onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all')
   // "Show all" when the text is cut, which only its laid-out lines can tell (a long line takes two, a narrow window more)
   if (more) new ResizeObserver(() => { if (!body.classList.contains('open')) more.hidden = clamp.scrollHeight <= clamp.clientHeight + 1 }).observe(clamp)
   return [
     h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
-    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v]) => h('div', {}, h('dt', {}, label), h('dd', {}, v)))) : null,
+    odd,
+    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v]) => h('div', {}, h('dt', {}, visible(label)), h('dd', {}, visible(v))))) : null,
     body,
     more,
     ap.cut ? h('p', { class: 'small muted' }, 'Only the start of this was shown here. Allow lets it do all of it.') : null,
-    h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', {}, ap.raw))
+    h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', {}, visible(ap.raw)))
   ]
 }
 // Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons).
