@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Every fast check, one after another: what CI's "lint + host tests" job runs through this script. That job also runs
+# Every fast check, one after another: what CI's "lint + host tests" job runs through this script (its "web app" job
+# runs the ui suite, the longest, on its own). That job also runs
 # the host, setup, sign-in and mask suites under bash 3.2 (what macOS ships) and checks install.ps1 with PowerShell,
 # which this doesn't; for bash 3.2 here, run the docker command in .github/workflows/ci.yml's "bash 3.2" step.
 # Shows each suite's output as it goes, then a summary with how long each took.

@@ -33,9 +33,11 @@ cat > "$T/bin/msb" <<'STUB'
 cmd="$1"; shift
 case "$cmd" in
   inspect) exit 0 ;;
-  ps) echo cage-claude; if [ -e "${STUB_AWAKE:-/nonexistent}" ]; then echo cage-codex; fi ;;
+  ps) echo cage-claude; if [ -e "${STUB_AWAKE:-/nonexistent}" ]; then echo cage-codex; fi
+      if [ -e "${STUB_RUNNING:-/nonexistent}" ]; then cat "$STUB_RUNNING"; fi ;;   # (more VMs that run)
   run) if [ -e "${STUB_NOWAKE:-/nonexistent}" ]; then echo "msb: no room for another VM" >&2; exit 1; fi ;;
   exec) case "$*" in
+    *cage-codex*cage:ready*) if [ -e "${STUB_LOGIN:-/nonexistent}" ]; then echo cage:login; else echo cage:ready; fi ;;   # (signed out)
     *cage:ready*) echo cage:ready ;;
     *strict-mcp-config*) echo 'Paris, says **the stub**' ;;
     *skip-git-repo-check*) echo 'Lyon, says *the other* stub (snake_case_ok)' ;;
@@ -61,7 +63,7 @@ cat > "$T/bin/xdg-open" <<'STUB'
 printf '%s\n' "$*" >> "$OPENED"
 STUB
 chmod +x "$T/bin/xdg-open"
-export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake" STUB_EVIL="$T/evil-signin" STUB_NOWAKE="$T/no-wake" CAGE_BACKUP_DIR="$T/backups" OPENED="$T/opened"
+export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake" STUB_EVIL="$T/evil-signin" STUB_NOWAKE="$T/no-wake" STUB_RUNNING="$T/running" STUB_LOGIN="$T/codex-login" CAGE_BACKUP_DIR="$T/backups" OPENED="$T/opened"
 export PATH="$T/bin:$PATH" DISPLAY="${DISPLAY:-:99}"
 unset SSH_CONNECTION WSL_DISTRO_NAME
 "$ROOT/cage" init 2>/dev/null
@@ -99,6 +101,7 @@ ok "only this computer, with the token, and only cage's own commands; a strict c
 # A leaked token can't do the worst things: delete an agent, skip a question with a flag, restore a planted backup.
 # And other websites get nothing at all, not even a picture, so they can't tell that cage runs here.
 H=(-H "X-Cage-Token: $TOK")
+J=("${H[@]}" -H "Content-Type: application/json")   # and a body in JSON, as the page sends one to a chat
 job() { curl --noproxy '*' -s -o "$T/job.out" -w '%{http_code}' "${H[@]}" -X POST --data-binary "$1" "$B/api/jobs"; }
 jid() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$T/job.out"; }
 for args in '["destroy","claude","--yes"]' '["status"]' '["version"]' '["onboard"]' '[""]' '["up","--refresh"]' '["up","nobody"]' \
@@ -266,10 +269,84 @@ ln -s "$T/elsewhere" "$A/cursor/in"
 [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=files/../../cage.env")" = 404 ] && [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=../cage.env")" = 404 ] || fail "a path out of the chat folder"
 head_of "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-page.html" | grep -qi '^content-disposition: attachment' || fail "an agent's page shown in the app"
 head_of "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^content-type: image/png' || fail "pictures are shown"
-[ "$(code "${H[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
+[ "$(code "${J[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
 [ "$(code "${H[@]}" "$B/api/chat/evil/history")" = 400 ] || fail "not an agent"
 rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
 ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
+
+# Home reads the end of each agent's chat: an approval waiting for you, whether it's working, what it said last and
+# today's counts. The VM writes those logs, so they're read as the chat is: a log that's a link isn't read at all.
+python3 - "$A" > "$T/since" <<'PY'
+import json, os, sys, time
+A, now = sys.argv[1], int(time.time() * 1000)
+perm = [[{"text": "Allow", "data": "perm:allow"}, {"text": "Deny", "data": "perm:deny"}]]
+def log(agent, *entries):
+    os.makedirs(os.path.join(A, agent), exist_ok=True)
+    with open(os.path.join(A, agent, "log.jsonl"), "w") as f:
+        f.write("".join(json.dumps(e) + "\n" for e in entries))
+log("antigravity", {"t": "you", "text": "yesterday", "at": now - 86400000}, {"t": "reply", "text": "**Yesterday's** answer", "at": now - 86400000},
+    {"t": "you", "text": "email bob", "at": now - 60000}, {"t": "typing", "on": True, "at": now - 59000},
+    {"t": "buttons", "text": "May I send it?", "buttons": perm, "at": now - 50000},
+    {"t": "buttons", "session": "usage", "text": "not in your chat", "buttons": perm, "at": now - 40000})
+log("cursor", {"t": "you", "text": "a", "at": now - 9000}, {"t": "buttons", "text": "May I?", "buttons": perm, "at": now - 8000},
+    {"t": "action", "action": "perm:allow", "at": now - 7000}, {"t": "reply", "text": "Done", "at": now - 6000},
+    {"t": "file", "name": "notes.md", "at": now - 5000}, {"t": "you", "text": "b", "at": now - 4000}, {"t": "typing", "on": True, "at": now - 3000})
+log("codex")
+os.remove(os.path.join(A, "codex", "log.jsonl"))
+os.symlink(os.path.join(A, "antigravity", "log.jsonl"), os.path.join(A, "codex", "log.jsonl"))   # what a VM could plant
+print(now - 3600000)
+PY
+activity() { curl --noproxy '*' -s "${H[@]}" "$B/api/activity?agents=$1&since=$(cat "$T/since")"; }
+activity antigravity,cursor,codex,evil > "$T/activity.json"
+python3 - "$T/activity.json" <<'PY' || fail "what Home reads from the chats: $(cat "$T/activity.json")"
+import json, sys
+a = json.load(open(sys.argv[1]))["agents"]
+assert sorted(a) == ["antigravity", "codex", "cursor"], a
+g, c, x = a["antigravity"], a["cursor"], a["codex"]
+assert g["pending"]["text"] == "May I send it?" and not g["working"] and g["stopped"] is False, g   # waiting for you isn't working
+assert g["last"]["text"] == "**Yesterday's** answer" and g["today"] == {"asked": 1, "answers": 0, "files": 0}, g
+assert c["pending"] is None and c["working"] and c["last"]["t"] == "file" and c["today"] == {"asked": 2, "answers": 1, "files": 1}, c
+assert x == {"pending": None, "stopped": False, "last": None, "today": {"asked": 0, "answers": 0, "files": 0}, "working": False}, x   # the planted link
+PY
+# Allow on Home goes with the approval Home showed: one the agent isn't waiting for any more is refused, and nothing is sent
+python3 - "$T/activity.json" "$T/allow" <<'PY'
+import json, sys
+pending = json.load(open(sys.argv[1]))["agents"]["antigravity"]["pending"]
+for name, p in (("now", pending), ("old", dict(pending, at=pending["at"] - 1)), ("other", dict(pending, text="May I delete it?"))):
+    with open(f"{sys.argv[2]}-{name}.json", "w") as f:
+        json.dump({"action": "perm:allow", "label": "Allow", "pending": p}, f)
+PY
+allow() { curl --noproxy '*' -s -o "$T/allowed.json" -w '%{http_code}' "${J[@]}" -X POST --data-binary @"$T/allow-$1.json" "$B/api/chat/antigravity/action"; }
+for was in old other; do
+  [ "$(allow $was)" = 409 ] && grep -q "waiting for that any more" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
+    || fail "Home's Allow for an approval it isn't waiting for ($was): $(cat "$T/allowed.json")"
+done
+# ...and only while the agent's VM runs: one that stopped (asleep) has forgotten what it asked, and would drop the answer
+# without a word once it wakes. So it's refused then too, until its chat says the wait is over; one asked after goes.
+[ "$(allow now)" = 409 ] && grep -q "It stopped while waiting for your OK" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
+  || fail "Home's Allow for an agent whose VM isn't running: $(cat "$T/allowed.json")"
+echo cage-antigravity > "$STUB_RUNNING"
+[ "$(allow now)" = 409 ] && grep -q "It stopped while waiting for your OK" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
+  || fail "Home's Allow, with the VM up again, for what it was waiting for while it wasn't: $(cat "$T/allowed.json")"
+[ "$(activity antigravity | python3 -c 'import json,sys; print(json.load(sys.stdin)["agents"]["antigravity"]["stopped"])')" = True ] \
+  || fail "Home isn't told it can't be answered: $(activity antigravity)"
+python3 - "$A/antigravity/log.jsonl" "$T/allow-anew.json" <<'PY'
+import json, sys, time
+e = {"t": "buttons", "text": "May I send it now?", "buttons": [[{"text": "Allow", "data": "perm:allow"}]], "at": int(time.time() * 1000)}
+with open(sys.argv[1], "a") as f:
+    f.write(json.dumps(e) + "\n")
+with open(sys.argv[2], "w") as f:
+    json.dump({"action": "perm:allow", "label": "Allow", "pending": {"text": e["text"], "at": e["at"]}}, f)
+PY
+[ "$(allow anew)" = 200 ] && grep -q '"action": "perm:allow"' "$A"/antigravity/in/*.json || fail "Home's Allow for the approval it waits for: $(cat "$T/allowed.json")"
+rm "$STUB_RUNNING"
+rm -rf "$A/cursor" "$A/codex/log.jsonl"
+ln -s "$A/antigravity" "$A/cursor"   # a chat folder that is itself a link: skipped, not followed
+[ "$(activity cursor,antigravity | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["agents"]))')" = "['antigravity']" ] \
+  || fail "a chat folder that's a link was read"
+rm -rf "$A/cursor" "$A/antigravity"
+[ "$(activity cursor)" = '{"agents": {}}' ] && [ ! -e "$A/cursor" ] || fail "an agent with no chat yet: $(activity cursor)"
+ok "Home reads the end of each chat: an approval waiting for you, working, the last answer, today's counts; no links followed"
 
 # Any file name downloads, under its own name; a file too big to send whole isn't sent at all
 curl --noproxy '*' -s "${H[@]}" -X POST --data-binary 'PDF bytes' "$B/api/chat/claude/upload?name=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("отчёт 報告.pdf"))')" > "$T/up.json"
@@ -408,10 +485,18 @@ node "$ROOT/test/fixtures/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
 
 # A work-folder file keeps its whole name when you download it (the VM hands it over as files/<time>-<random>-<name>)
 for _ in $(seq 50); do [ -d "$A/claude/out" ] && break; sleep 0.1; done
-curl --noproxy '*' -s "${H[@]}" -X POST -d '{"type":"fetch","path":"reports/q3-results.txt"}' "$B/api/chat/claude/request" > "$T/fetch.json"
+curl --noproxy '*' -s "${J[@]}" -X POST -d '{"type":"fetch","path":"reports/q3-results.txt"}' "$B/api/chat/claude/request" > "$T/fetch.json"
 p="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$T/fetch.json")" || fail "fetch: $(cat "$T/fetch.json")"
 head_of "${H[@]}" "$B/api/chat/claude/file?p=$p&dl=1" | grep -qi "filename=\"q3-results.txt\"; filename\*=UTF-8''q3-results.txt" || fail "q3-results.txt lost part of its name"
 ok "a work-folder file downloads under its own name"
+
+# Plan usage on Home asks the agent (/usage) at most every 10 minutes, however often the page asks, also with "fresh"
+for body in '{}' '{}' '{"fresh":true}'; do
+  curl --noproxy '*' -s "${J[@]}" -X POST -d "$body" "$B/api/chat/claude/usage" > "$T/usage.json"
+done
+python3 -c 'import json,sys,time; u=json.load(open(sys.argv[1])); assert "Remaining: 58%" in u["card"]["elements"][0]["content"] and time.time() - u["asked"] < 60, u' "$T/usage.json" \
+  && [ "$(grep -c '"t":"card","session":"usage"' "$A/claude/log.jsonl")" = 1 ] || fail "plan usage, asked three times: $(cat "$T/usage.json"); $(grep -c usage "$A/claude/log.jsonl")"
+ok "plan usage: the agent is asked once, however often the page asks"
 
 # An installed release (a VERSION file), for updating while the app is open: the server restarts itself with the new
 # code once nothing is running, and the page reloads to get the new page

@@ -28,6 +28,9 @@ let SEEN = ''      // the state last drawn, to redraw only when something change
 let LATEST = ''
 let page = 'home'
 let ASK = null     // the last question you asked from Home, and its answers (kept in this tab only)
+let ACTIVITY = {}  // what each agent is doing, from the end of its chat (server.py's activity()): {pending, working, last, today}
+const ANSWERED = {}   // approvals answered from Home, by when they were asked: gone at once, not at the next look
+const FORGOTTEN = {}  // approvals that can't be answered any more, though an agent's chat says it waits for them (forgot())
 
 // --- tiny DOM helpers: text always goes in as text, never as HTML ------------------------------------------------
 function h (tag, attrs, ...kids) {
@@ -133,9 +136,40 @@ function newer (latest, current) { // is release `latest` (v1.2.3) newer than wh
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]
   return false
 }
-function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB' }
+function size (n) { return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' kB' : plural(n, 'byte') }
+function plainLine (text, max) { // an agent's words on one line, without markdown's marks
+  const t = String(text || '').replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, '$1').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
+  return t.length > max ? t.slice(0, max - 1) + '…' : t
+}
 function plural (n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')) }
 function hostOf (url) { try { return new URL(url).hostname } catch (e) { return url } }
+
+// The page's own messages and questions, in the page instead of the browser's alert() and confirm() boxes (which stop
+// everything, look like the browser's own warnings, and can't be read out where they belong): a message that goes by
+// itself (role=status), and a small sheet with two answers. The safe answer has the focus, and Esc means it.
+function toast (text, tone) {
+  const t = h('div', { class: 'toast ' + (tone || 'bad') }, icon(tone === 'ok' ? 'circle-check' : tone === 'info' ? 'info' : 'circle-alert'), h('span', { class: 'grow' }, text),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => t.remove() }, icon('x')))
+  document.getElementById('toasts').append(t)
+  setTimeout(() => t.remove(), 8000)
+}
+function confirmSheet (text, yes, no) { // → true for yes; false for no, Esc, or while another question is open
+  const d = document.getElementById('confirm')
+  if (d.open) return Promise.resolve(false)
+  const yesB = document.getElementById('confirm-yes')
+  const noB = document.getElementById('confirm-no')
+  document.getElementById('confirm-text').textContent = text
+  yesB.textContent = yes
+  noB.textContent = no
+  return new Promise((resolve) => {
+    let answer = false
+    yesB.onclick = () => { answer = true; d.close() }
+    noB.onclick = () => d.close()
+    d.addEventListener('close', () => resolve(answer), { once: true })
+    d.showModal()
+    noB.focus()
+  })
+}
 
 // --- talking to the server ---------------------------------------------------------------------------------------
 const NOT_ANSWERING = 'cage isn’t answering. Open the cage shortcut, or run cage ui.'
@@ -190,6 +224,9 @@ async function refresh () {
     render()
     if (CHAT) drawChatState(CHAT)
     liveConnect()
+    loadActivity()
+    // plan usage, wherever it's shown: asked for when a page is drawn, and again while it sits there unchanged
+    document.querySelectorAll('[data-usage]').forEach((el) => { const a = agentOf(el.dataset.usage); if (a) wantUsage(a) })
   } catch (e) {
     if (e.message === 'locked') return
     if (!e.down) { FAILS = 0; notice('slow') }   // the web app answers, but cage behind it was too slow (or failed)
@@ -197,6 +234,43 @@ async function refresh () {
     console.warn(e)
   }
 }
+// What each agent is doing (Home, the title): read from the end of its chat log. Two looks can overlap (the refresh,
+// and something that happened in a chat): only the newest one's answer counts, as an older one that comes in later
+// would show what was true before. ACT_LOAD is the newest look, until it has drawn what it found.
+let ACT_SEQ = 0
+let ACT_LOAD = Promise.resolve()
+function loadActivity () {
+  const n = ++ACT_SEQ
+  ACT_LOAD = (async () => {
+    const names = STATE ? agentsOn().map((a) => a.name) : []
+    const midnight = new Date()
+    midnight.setHours(0, 0, 0, 0)
+    let got
+    try { got = names.length ? (await api(`/api/activity?agents=${names.join(',')}&since=${midnight.getTime()}`)).agents || {} : {} } catch (e) { return }
+    if (n !== ACT_SEQ) return
+    for (const [name, x] of Object.entries(got)) if (x.stopped && x.pending) forgot(name, x.pending)
+    ACTIVITY = got
+    render()
+    if (CHAT) drawAsking(CHAT)
+  })()
+  return ACT_LOAD
+}
+let ACT_SOON = 0
+function activitySoon () { clearTimeout(ACT_SOON); ACT_SOON = setTimeout(loadActivity, 400) }   // something happened in a chat
+function waitingOf (name) { // the approval an agent waits for, unless you answered it from here already
+  const p = (ACTIVITY[name] || {}).pending
+  return p && ANSWERED[name] !== p.at ? p : null
+}
+// ...and can still be answered: cc-connect forgets an approval when it stops (asleep, say), and drops an answer to one
+// it forgot without a word, so an Allow would seem to work and do nothing
+function askingOf (a) { const p = a.state === 'ready' ? waitingOf(a.name) : null; return p && !forgotten(a.name, p) ? p : null }
+// Nor once it's up again, for one it was waiting for while its VM wasn't running: the cc-connect that started when it
+// woke never asked it, though its chat says it waits until the relay registers with that one, a while later. Kept
+// here for each agent, by what it asked and when, from what server.py says of it ("stopped" in /api/activity, or its
+// refusal of an answer). The page doesn't tell by itself: cage's state, which says an agent is asleep, can be seconds
+// older than what its chat says, so an approval asked just after it woke up would look like one asked before.
+function forgot (name, p) { FORGOTTEN[name] = { text: p.text, at: p.at } }
+function forgotten (name, p) { const f = FORGOTTEN[name]; return !!f && !!p && f.text === p.text && (f.at || 0) === (p.at || 0) }
 // The line at the top when cage itself is in the way: not answering at all (dots greyed, sending off), or slow
 function notice (kind) {
   const el = document.getElementById('notice')
@@ -270,7 +344,11 @@ function showJob () {
   if (!job) return
   job.hidden = false
   drawPill()
-  if (!dlg.open) dlg.showModal()
+  if (!dlg.open) {
+    dlg.showModal()
+    const box = logEl.querySelector('.ask-box:not(.skip-box) input, .ask-box:not(.skip-box) button')   // a question still waiting
+    if (box) box.focus(); else logEl.focus()
+  }
   if (job.fitTerm && !document.getElementById('job-term').hidden) setTimeout(job.fitTerm, 220)
   scrollDown()
 }
@@ -382,6 +460,7 @@ async function runJob (args, title, onDone, text) {
   title = title || ('cage ' + args.join(' '))
   sheet(title)
   dlg.showModal()
+  logEl.focus()
   let id
   try { id = (await api('/api/jobs', { method: 'POST', body: { args, title, text, cols: assisted(args) ? 400 : 100 } })).id } catch (e) {
     BUSY = ''
@@ -542,8 +621,10 @@ const STOP_ASK = {
 }
 document.getElementById('job-cancel').addEventListener('click', () => {
   if (!running()) return
-  if (STOP_ASK[job.args[0]] && !confirm(STOP_ASK[job.args[0]])) return
-  api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }).catch(() => {})
+  const J = job
+  const stop = () => { if (job === J && running()) api(`/api/jobs/${J.id}/cancel`, { method: 'POST' }).catch(() => {}) }
+  if (!STOP_ASK[J.args[0]]) return stop()
+  confirmSheet(STOP_ASK[J.args[0]], 'Stop', 'Keep going').then((yes) => { if (yes) stop() })
 })
 document.getElementById('job-close').addEventListener('click', () => dlg.close())
 document.getElementById('job-hide').addEventListener('click', () => dlg.close())
@@ -624,6 +705,9 @@ function attention () {
   const S = STATE
   const out = []
   const item = (tone, ic, text, action) => h('li', { class: 'attn ' + tone }, h('span', { class: 'attn-icon' }, icon(ic)), h('span', { class: 'grow' }, text), action)
+  const placed = new Map()
+  for (const a of agentsOn()) { const p = askingOf(a); if (p) out.push(approvalRow(a, p, placed.size, placed)) }
+  PLACED = placed
   for (const a of agentsOn()) {
     const s = statusOf(a)
     if (s === 'login') out.push(item('warn', 'log-in', `${a.label} needs you to sign in to ${a.plan}`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')))
@@ -634,6 +718,84 @@ function attention () {
   if (S.memory.inbox > 0) out.push(item('info', 'brain', `Your agents want to remember ${plural(S.memory.inbox, 'new thing')}`, btn('Review', () => runJob(['memory'], 'What your agents want to remember'), 'sm')))
   if (newer(LATEST, S.version)) out.push(item('info', 'download', `cage ${LATEST} is available (you have ${S.version})`, btn('Update', () => runJob(['update'], 'Updating cage'), 'sm')))
   return out
+}
+
+// An agent waiting for your OK, though you're not in its chat: the same words as its card there, Allow and Deny right
+// here, or Open to see it in the conversation first. Allow only when that line is all it asks (approvalWhole); else
+// Open shows the rest. The answer goes with the approval it's for, so it answers that one or none (server.py refuses
+// it once the agent has moved on).
+// An Allow that has only just come to where it is doesn't count yet: a row drawn there a moment ago (one above it
+// answered or gone, or one asked anew) would be allowed by a click or an Enter meant for what was there before. As
+// browsers do with their own permission prompts, it waits a little first (aria-disabled, so it keeps the focus).
+const SETTLE = 600
+let PLACED = new Map()   // the approval rows on Home: where each one is, and since when (by agent and when it was asked)
+function approvalRow (a, p, pos, placed) {
+  const ap = approvalOf(p.text)
+  const line = approvalLine(ap)
+  const key = a.name + '\n' + p.at
+  const was = PLACED.get(key)
+  const since = was && was.pos === pos ? was.since : Date.now()
+  if (placed) placed.set(key, { pos, since })
+  const open = (main) => h('a', { class: 'btn sm ' + (main ? 'primary' : 'ghost'), href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label + '’s chat' }, 'Open')
+  const row = (sub, ...acts) => h('li', { class: 'attn warn approval-row' }, h('span', { class: 'attn-icon' }, icon('hand')),
+    h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, sub)), h('span', { class: 'attn-acts' }, acts))
+  const decide = (action) => async (e) => {
+    if (e.currentTarget.getAttribute('aria-disabled') === 'true') return   // (not yet)
+    const b = e.currentTarget
+    const li = b.closest('li')
+    const had = li.contains(document.activeElement)   // (the keyboard's, or a click's)
+    li.querySelectorAll('button').forEach((x) => { x.disabled = true })
+    // Once the row is gone, the focus goes to the top of what needs you (not onto the next Allow, where a second Enter
+    // would say yes to that), and a screen reader is told it went (the toasts are a status)
+    const after = (said, tone) => {
+      render()
+      const head = !li.isConnected && ([...document.querySelectorAll('#main h2')].find((x) => x.textContent === 'Needs you') || document.querySelector('#main h1'))
+      if (had && head) { head.tabIndex = -1; head.focus({ preventScroll: true }) } else if (had && b.isConnected) b.focus()
+      toast(said, tone)
+    }
+    try {
+      await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action], pending: { text: p.text, at: p.at } } })
+      ANSWERED[a.name] = p.at
+      after(`${action === 'perm:deny' ? 'Denied' : 'Allowed'}: ${a.label}, ${line}`, action === 'perm:deny' ? 'info' : 'ok')
+    } catch (err) {
+      li.querySelectorAll('button').forEach((x) => { x.disabled = false })
+      // Refused, and nothing was sent: it can't be answered (any more). Home looks again at once (what the agent waits
+      // for now, if anything, and whether it's up), not at its next look in 6 s; and the row of one that stopped while
+      // waiting (for good, and on its card too), or that was answered already (in another window), goes now.
+      if (err.status === 409) {
+        if (/^It stopped/.test(err.message)) forgot(a.name, p)
+        else if (/^You answered/.test(err.message)) ANSWERED[a.name] = p.at
+        refresh()
+        return after(/^It stopped/.test(err.message) ? stoppedWaiting(a.name) : err.message)
+      }
+      after(err.message)
+    }
+    activitySoon()
+  }
+  // (what a screen reader says for each, out of context: two agents may be waiting)
+  const answer = (action, cls) => {
+    const b = h('button', { type: 'button', class: 'btn ' + cls, 'aria-label': `${PERM_LABEL[action]}: ${a.label}, ${line}`, onclick: decide(action) }, PERM_LABEL[action])
+    const wait = since + SETTLE - Date.now()
+    if (action === 'perm:allow' && wait > 0) { b.setAttribute('aria-disabled', 'true'); setTimeout(() => b.removeAttribute('aria-disabled'), wait) }
+    return b
+  }
+  // (on its own, so the time after it can't be drawn into it; what runs or where it goes in the order it's written, and
+  // words to read, a subject or instructions, as written words are, each in a part of its own)
+  let end = 0
+  const parts = ap.what ? lineParts(ap).map(([t, prose]) => { const s = line.slice(end, end += t.length); return s ? h('span', prose ? {} : { class: 'exact' }, s) : null }) : [h('span', { class: 'exact' }, line)]
+  const sub = [h('span', { dir: 'ltr' }, parts), p.at ? ' · ' + when(p.at) : '']
+  if (!approvalWhole(ap)) {
+    const why = ap.unseen ? 'It has characters that don’t show: open it to see where.' : ap.mixed ? 'It mixes letters from different alphabets: open it to see where.'
+      : ap.rtl ? 'Some of it is written right to left: open it to see it in the order it’s sent.' : ap.blind ? 'It doesn’t say what it would write in the file.'
+        : 'Only part of it fits here: open it to see all it asks.'
+    return row([...sub, '. ' + why], open(true), answer('perm:deny', 'sm'))
+  }
+  return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
+}
+function when (at) { // 8:21 AM today; Mon 8:21 AM this week; Oct 3 before that
+  const d = new Date(at)
+  const days = (new Date().setHours(0, 0, 0, 0) - new Date(at).setHours(0, 0, 0, 0)) / 864e5
+  return days < 1 ? clock(at) : days < 7 ? d.toLocaleDateString([], { weekday: 'short' }) + ' ' + clock(at) : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
 function composer () {
@@ -776,12 +938,18 @@ function agentRow (a) {
   if (s === 'off') action = btn('Add', () => runJob(['add', a.name], 'Adding ' + a.label), 'sm')
   else if (s === 'login') action = btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm')
   else action = h('a', { class: 'btn sm', href: '#agent/' + a.name }, icon('message-circle'), 'Chat')
+  const act = a.enabled && ACTIVITY[a.name]
+  const last = act && act.last
+  const doing = !act ? null : askingOf(a) ? h('span', { class: 'agent-act warn' }, dot('warn'), 'Waiting for your OK')
+    : waitingOf(a.name) ? h('span', { class: 'agent-act' }, 'It stopped while waiting for your OK, so it won’t go ahead')
+    : act.working ? h('span', { class: 'agent-act busy' }, dot('busy'), 'Working…')
+      : last ? h('span', { class: 'agent-act' }, 'Last: ', last.t === 'file' ? 'sent ' + last.text : plainLine(last.text, 80), last.at ? ' · ' + when(last.at) : '') : null
   return h('li', { class: 'agent' + (a.enabled ? '' : ' off'), style: { '--c': AGENT[a.name].color } },
     h('a', { class: 'agent-main', href: '#agent/' + a.name },
       avatar(a.name, 36),
       h('span', { class: 'agent-text' }, h('span', { class: 'agent-name' }, a.label),
         h('span', { class: 'agent-sub' }, h('span', { class: 'status ' + st.tone }, dot(st.tone), st.label),
-          a.enabled ? ' · Chat ' + chats.join(', ').replace(/, ([^,]*)$/, ' and $1') : ' · uses ' + a.plan))),
+          a.enabled ? ' · Chat ' + chats.join(', ').replace(/, ([^,]*)$/, ' and $1') : ' · uses ' + a.plan), doing)),
     action, h('a', { class: 'chev', href: '#agent/' + a.name, 'aria-label': 'Open ' + a.label }, icon('chevron-right')))
 }
 
@@ -790,13 +958,16 @@ function pageHome () {
   if (!S.configured) return pageWelcome()
   const todo = attention()
   const sleepy = agentsOn().filter((a) => a.reachable && ['asleep', 'none'].includes(a.state))
-  return h('div', { class: 'page' },
+  return h('div', { class: 'page' }, h('h1', { class: 'sr-only' }, 'Home'),
     todo.length ? section('Needs you', '', h('ul', { class: 'list attn-list' }, todo)) : null,
     h('section', { class: 'section hero' }, h('div', { class: 'section-head' }, h('h2', {}, 'Ask your agents'),
-      h('p', {}, 'Each awake agent answers on its own, side by side. When they agree, you can be fairly sure; when they don’t, that’s the part worth a closer look.')), composer(), answers()),
+      h('p', {}, 'Each awake agent answers on its own, side by side. When they agree, you can be fairly sure; when they don’t, that’s the part worth a closer look.')), composer(),
+    h('p', { class: 'small muted plan-note' }, 'Each agent you ask uses its own plan.'), answers()),
     section('Your agents', '', h('div', { class: 'section-tools' }, sleepy.length ? btn('Wake everyone', () => runJob(['up'], 'Waking your agents'), 'sm ghost', 'power') : null),
       h('ul', { class: 'list agents' }, S.agents.slice().sort((a, b) => b.enabled - a.enabled).map(agentRow)),
-      h('p', { class: 'small muted foot' }, S.settings.ask_all === 'on' ? 'In any chat, start a message with /all to ask all of them from there too.' : 'Tip: turn on “Ask everyone from chat” in Settings to do this from your phone too.')))
+      h('p', { class: 'small muted foot' }, S.settings.ask_all === 'on' ? 'In any chat, start a message with /all to ask all of them from there too.' : 'Tip: turn on “Ask everyone from chat” in Settings to do this from your phone too.')),
+    agentsOn().length ? section('Plan left', 'How much each one has left before its plan’s limit. Checked every 10 minutes.',
+      h('ul', { class: 'list boxed plans' }, agentsOn().map((a) => { wantUsage(a); return h('li', {}, avatar(a.name, 24), h('b', { class: 'plan-who' }, a.label), h('div', { class: 'grow usage', 'data-usage': a.name, 'data-offer': '1' }, usageView(a, true))) }))) : null)
 }
 
 function pageWelcome () {
@@ -940,7 +1111,7 @@ function setupAbout () {
         const text = aboutText('about-setup').trim()
         if (text && text !== ABOUT.saved) {
           const body = /^# About me/.test(text) ? text + '\n' : '# About me\n\n' + text + '\n'
-          try { await api('/api/memory/about', { method: 'PUT', body: { text: body } }); ABOUT.saved = body } catch (e) { alert(e.message); return }
+          try { await api('/api/memory/about', { method: 'PUT', body: { text: body } }); ABOUT.saved = body } catch (e) { toast(e.message); return }
         }
         setupGo('done')
       }, 'primary'))
@@ -976,6 +1147,127 @@ const STARTERS = [
 ]
 let CHAT = null   // the open chat (one at a time): its element stays put while the page around it is redrawn
 
+// Recipes: ready-made tasks for knowledge work, to run now from the chat or on a schedule. Each says what it needs, as
+// honestly as can be told from here: Zapier connected is no proof that Gmail is added to your Zapier server, so the
+// tile names the apps too. A {blank} is yours to fill in (it's selected for you, and nothing goes until it's filled).
+const RECIPES = [
+  { id: 'briefing', title: 'Morning briefing', blurb: 'Today’s meetings and the emails that need you, before you start.',
+    prompt: 'Give me my morning briefing: today’s meetings (who, when, and what to prepare) and the emails from the last day that need me, most important first. Keep it short, and don’t send or change anything.',
+    schedule: { kind: 'weekdays', time: '07:45' }, needs: ['zapier'], apps: 'Gmail and Google Calendar, through Zapier' },
+  { id: 'triage', title: 'Inbox triage', blurb: 'What needs a reply, what’s for your information, what can wait. With drafts.',
+    prompt: 'Go through my inbox from the last day. Sort it into: needs a reply from me, for my information, and can wait. Write short replies for the first group as drafts in Gmail, but don’t send anything.',
+    schedule: { kind: 'weekdays', time: '12:00' }, needs: ['zapier'], apps: 'Gmail, through Zapier' },
+  { id: 'meetings', title: 'Prep for tomorrow’s meetings', blurb: 'Who’s coming, what it’s about, and what to ask.',
+    prompt: 'Look at tomorrow’s meetings in my calendar. For each one: who’s coming, what it’s about, my recent emails with them, and two or three questions I could ask.',
+    schedule: { kind: 'weekdays', time: '17:00' }, needs: ['zapier'], apps: 'Google Calendar and Gmail, through Zapier' },
+  { id: 'status', title: 'Friday status draft', blurb: 'Your week in five bullets, ready to send.',
+    prompt: 'Draft my weekly status update for {who it’s for}: what I got done this week (from my sent emails and my calendar), what’s next, and anything I’m stuck on. Five bullets at most, and don’t send it.',
+    schedule: { kind: 'weekly', time: '15:00', day: 5 }, needs: ['zapier'], apps: 'Gmail and Google Calendar, through Zapier' },
+  { id: 'contract', title: 'Contract or NDA first pass', blurb: 'The terms that matter and what to push back on.',
+    prompt: 'Read the attached contract. List the parties, the term and renewal, payment, liability caps, termination rights, confidentiality, and anything unusual or one-sided, with the clause numbers. Then say what I should push back on, and why. This is a first pass for me to check, not legal advice.',
+    attach: true, needs: [], apps: 'the contract you attach' },
+  { id: 'news', title: 'News watch on {topic}', blurb: 'The day’s five most important stories, with links.',
+    prompt: 'Look for news from the last day about {topic}. Give me the five most important stories, one line each, with a link to each source. Leave out anything you told me about before.',
+    schedule: { kind: 'daily', time: '08:00' }, needs: ['web'], apps: 'the web' },
+  { id: 'followups', title: 'Follow-ups I owe', blurb: 'What you promised, or still owe a reply on.',
+    prompt: 'Go through the emails I sent and got in the last two weeks. List what I promised to do or still owe a reply on: to whom, what, and since when, the most overdue first. Don’t send anything.',
+    schedule: { kind: 'weekly', time: '09:00', day: 1 }, needs: ['zapier'], apps: 'Gmail, through Zapier' },
+  { id: 'receipts', title: 'Receipts into a spreadsheet', blurb: 'Attach receipts; get back a spreadsheet with totals.',
+    prompt: 'Read the attached receipts and put them in a spreadsheet: date, shop or company, what it was for, amount, currency and tax, with a total for each currency. Send it back to me as a .csv file, which Excel and Google Sheets open.',
+    attach: true, needs: [], apps: 'the receipts you attach (PDFs or photos)' }
+]
+const BLANK = /\{[^{}\n]{1,40}\}/g
+const RECIPE_BLANKS = new Set(RECIPES.flatMap((r) => (r.title + r.prompt).match(BLANK) || []))
+function hasApp (name, agent) { // connected for this agent, and signed in
+  const c = STATE.connectors.find((x) => x.name === name)
+  return !!c && !c.broken && (!c.agents || c.agents === 'all' || c.agents.split(/[ ,]+/).includes(agent))
+}
+// What a recipe may need: an app (for this agent), or the web. Claude Code searches the web on its own; the others
+// read it best with their web browser (Apps).
+const NEEDS = {
+  zapier: { label: 'Zapier', has: (a) => hasApp('zapier', a) },
+  github: { label: 'GitHub', has: (a) => hasApp('github', a) },
+  browser: { label: 'the web browser', has: (a) => hasApp('browser', a) },
+  web: { label: 'the web browser', has: (a) => a === 'claude' || hasApp('browser', a) }
+}
+function blanked (text) { return text.split(/(\{[^{}\n]{1,40}\})/).map((p, i) => i % 2 ? h('mark', { class: 'blank' }, p) : p) }   // {blanks} marked
+function blanksLeft (text) { return (text.match(BLANK) || []).filter((b) => RECIPE_BLANKS.has(b)) }
+function pickBlank (ta) { // select the first blank still to fill in, so typing replaces it; false if there's none
+  const b = blanksLeft(ta.value)[0]
+  if (!b) return false
+  const i = ta.value.indexOf(b)
+  ta.focus()
+  ta.setSelectionRange(i, i + b.length)
+  return true
+}
+function recipeTiles (a, where) { // where: 'chat' (fills in the message) or 'schedule' (adds the task, or fills in the form)
+  return h('div', { class: 'recipes' }, RECIPES.filter((r) => where === 'chat' || r.schedule).map((r) => {
+    const missing = r.needs.filter((n) => !NEEDS[n].has(a.name))
+    const blanks = blanksLeft(r.prompt).length
+    return h('div', { class: 'recipe' },
+      h('b', {}, blanked(r.title)), h('p', {}, r.blurb),
+      h('span', { class: 'small muted' }, 'Uses ' + r.apps + (where === 'schedule' ? ' · ' + cronText(cronOf(r.schedule.kind, r.schedule.time, r.schedule.day)) : '')),
+      missing.length ? h('a', { class: 'btn sm', href: '#apps' }, `Connect ${NEEDS[missing[0]].label} first`) : h('button', {
+        type: 'button', class: 'btn sm', onclick: (e) => useRecipe(a, r, where, e.currentTarget), 'aria-label': (where === 'chat' ? 'Use: ' : 'Add: ') + r.title
+      }, icon('plus'), where === 'chat' ? (r.attach ? 'Use, and attach' : 'Use') : blanks ? 'Fill in and add' : 'Add'))
+  }))
+}
+async function useRecipe (a, r, where, button) {
+  if (where === 'chat') {
+    const C = CHAT
+    if (!C || C.agent !== a.name) return
+    recipesBy(C, false)
+    C.ta.value = r.prompt
+    grow(C.ta)
+    blanksHint(C)
+    if (!pickBlank(C.ta)) C.ta.focus()
+    if (r.attach) C.form.querySelector('input[type=file]').click()
+    return
+  }
+  const sched = r.schedule
+  if (blanksLeft(r.prompt).length) { // the form, filled in, with the blank to fill selected
+    SCHED[a.name].draft = { prompt: r.prompt, title: r.title, needs: r.needs }
+    const set = (k, v) => { const el = document.querySelector(`[data-keep="${k}"]`); if (el) { el.value = v; el.dispatchEvent(new Event('kept')) } }
+    set('sched-kind', sched.kind)
+    set('sched-time', sched.time)
+    set('sched-day', String(sched.day ?? 1))
+    set('sched-what', r.prompt)
+    const ta = document.querySelector('[data-keep="sched-what"]')
+    if (ta) { ta.scrollIntoView({ block: 'center' }); pickBlank(ta) }
+    return
+  }
+  if (!(await addUnwatched(a, r))) return
+  // as it is: the same task the form below would add (cc-connect's cron, through the agent's VM)
+  const expr = cronOf(sched.kind, sched.time, sched.day)
+  button.disabled = true   // (once: a second click would add it twice)
+  try {
+    await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: expr, prompt: r.prompt, description: r.title })
+    toast(`Added: ${r.title}, ${cronText(expr).replace(/^Every/, 'every')}.`, 'ok')
+    SCHED[a.name].jobs = null
+    render(true)
+  } catch (e) { toast('Couldn’t add it: ' + e.message) }
+  button.disabled = false
+}
+// A task runs by itself, with nobody watching. One that reads your email (anyone can send you one) on an agent that
+// doesn't ask before acting in your apps: what an email says could get it to send or change things there. Say so
+// first, and add it only if you still want to. Codex never asks: working read-only (its switch) may not stop it in your
+// apps, so it's said for Codex either way. recipe: what it is, when it's one ({title, needs}), else it's what you
+// wrote, which may read your email whenever Zapier is there for that agent. → true to add it.
+async function addUnwatched (a, recipe) {
+  if (a.approve && a.name !== 'codex') return true
+  if (recipe ? !recipe.needs.includes('zapier') : !hasApp('zapier', a.name)) return true
+  const how = a.name === 'codex'
+    ? 'Codex can’t ask before acting in your apps, and working read-only may not stop it there, so an email could get it to send or change something. To be safer, add it to another agent, with “Ask before acting” on.'
+    : `${a.label} doesn’t ask before acting in your apps now, so an email could get it to send or change something there. To be safer, turn on “Ask before acting” in its settings first.`
+  const what = recipe ? `${recipe.title} runs by itself and reads your email, which anyone can send you.`
+    : 'This task runs by itself, with nobody watching, and through Zapier it may read your email, which anyone can send you.'
+  return confirmSheet(`${what} ${how}`, 'Add it anyway', 'Not now')
+}
+function blanksHint (C) { // under the message: what's still to fill in
+  const left = blanksLeft(C.ta.value)
+  C.hint.replaceChildren(...(left.length ? ['Fill in ', ...left.flatMap((b, i) => [i ? ', ' : '', h('mark', { class: 'blank' }, b)]), ', then send'] : ['Enter to send · Shift+Enter for a new line']))
+}
+
 function agentOf (name) { return STATE.agents.find((x) => x.name === name) }
 function fileUrl (a, p, dl) { return `/api/chat/${a}/file?p=${encodeURIComponent(p)}${dl ? '&dl=1' : ''}&token=${encodeURIComponent(TOKEN)}` }
 const isPicture = (name) => /\.(png|jpe?g|gif|webp)$/i.test(name || '')
@@ -983,35 +1275,62 @@ const isPicture = (name) => /\.(png|jpe?g|gif|webp)$/i.test(name || '')
 function chatOpen (a) {
   if (CHAT && CHAT.agent === a) return CHAT
   chatClose()
-  const C = { agent: a, offset: 0, previews: new Map(), shared: [], waking: false, attached: [], connected: null, lastWho: '' }
+  const C = { agent: a, offset: 0, previews: new Map(), shared: [], waking: false, attached: [], connected: null, lastWho: '', asking: null }
   C.list = h('div', { class: 'chat-list', role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation with ' + nameOf(a) })
-  C.typing = h('div', { class: 'typing', hidden: true }, h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('span', {}, nameOf(a) + ' is working…'))
+  C.typing = h('div', { class: 'typing', hidden: true }, h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('span', {}, nameOf(a) + ' is working…'),
+    h('button', { type: 'button', class: 'btn sm ghost', title: 'Stop it (Esc)', onclick: () => chatSend(C, '/stop') }, icon('square'), 'Stop'))
   C.empty = h('div', { class: 'chat-empty' },
     h('p', { class: 'chat-hello' }, 'What can ', nameOf(a), ' do for you?'),
     h('div', { class: 'starters' }, STARTERS.map(([t, text]) => h('button', { type: 'button', class: 'starter', onclick: () => { C.ta.value = text; C.ta.focus(); grow(C.ta) } }, t))),
-    h('p', { class: 'small muted' }, 'Attach files with the paperclip, or drop them here. It works on its own computer, so it can’t see yours unless you send something.'))
+    h('p', { class: 'small muted' }, 'Attach files with the paperclip, or drop them here. It works on its own computer, so it can’t see yours unless you send something.'),
+    C.recipes = h('div', { class: 'recipes-wrap' }))
   C.ta = h('textarea', { rows: 1, placeholder: 'Message ' + nameOf(a) + '…', 'aria-label': 'Message ' + nameOf(a) })
   C.chips = h('div', { class: 'attached' })
   const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => { attach(C, picker.files); picker.value = '' } })
   C.sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send', title: 'Send (Enter)', disabled: DOWN }, icon('arrow-up'))
+  // the recipes, by the message box once the chat isn't empty any more (an empty one shows them itself)
+  C.recipePanel = h('div', { class: 'chat-recipes', id: 'chat-recipes', hidden: true })
+  C.recipeBtn = h('button', { type: 'button', class: 'icon-btn', title: 'Start from a recipe', 'aria-label': 'Recipes', 'aria-expanded': 'false', 'aria-controls': 'chat-recipes', hidden: true,
+    onclick: () => recipesBy(C, C.recipePanel.hidden) }, icon('list-checks'))
   C.form = h('form', { class: 'composer chat-composer' }, C.chips, C.ta, h('div', { class: 'composer-bar' },
-    h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker,
-    h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
+    h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker, C.recipeBtn,
+    C.hint = h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
   C.form.addEventListener('submit', (e) => { e.preventDefault(); chatSend(C) })
   C.ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(C) } })
-  C.ta.addEventListener('input', () => grow(C.ta))
+  C.ta.addEventListener('input', () => { grow(C.ta); if (C.hint.querySelector('mark') || blanksLeft(C.ta.value).length) blanksHint(C) })
   C.ta.addEventListener('paste', (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); attach(C, fs) } })
   C.banner = h('div', { class: 'chat-banner', hidden: true })
-  C.el = h('div', { class: 'chat' }, C.empty, C.list, C.typing, h('div', { class: 'chat-dock' }, C.banner, C.form))
+  C.el = h('div', { class: 'chat' }, C.empty, C.list, C.typing, h('div', { class: 'chat-dock' }, C.banner, C.recipePanel, C.form))
   C.el.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); C.el.classList.add('drop') } })
   C.el.addEventListener('dragleave', (e) => { if (!C.el.contains(e.relatedTarget)) C.el.classList.remove('drop') })
   C.el.addEventListener('drop', (e) => { e.preventDefault(); C.el.classList.remove('drop'); attach(C, e.dataTransfer.files) })
+  const draft = DRAFTS[a]   // what you wrote here and didn't send, before you looked at another agent
+  if (draft) {
+    delete DRAFTS[a]
+    C.ta.value = draft.text
+    C.attached = draft.attached
+    drawAttached(C)
+    requestAnimationFrame(() => { grow(C.ta); if (blanksLeft(C.ta.value).length) blanksHint(C) })   // (once it's on the page)
+  }
   CHAT = C
   chatLoad(C)
   return C
 }
+function recipesBy (C, show) { // the recipes by the message box: shown (drawn afresh: what's connected may have changed), or not
+  C.recipePanel.hidden = !show
+  C.recipeBtn.setAttribute('aria-expanded', String(show))
+  const a = agentOf(C.agent)
+  if (!show || !a) return
+  C.recipePanel.replaceChildren(h('div', { class: 'recipes-head' }, h('p', { class: 'recipes-title' }, 'Start from a recipe'),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close the recipes', onclick: () => { recipesBy(C, false); C.recipeBtn.focus() } }, icon('x'))), recipeTiles(a, 'chat'))
+}
+// What you wrote to an agent and didn't send yet stays its own while you look at another one (in this page only):
+// the text, and the files that finished going up
+const DRAFTS = {}
 function chatClose () {
   if (!CHAT) return
+  const attached = CHAT.attached.filter((f) => !f.uploading && f.path)
+  if (CHAT.ta.value.trim() || attached.length) DRAFTS[CHAT.agent] = { text: CHAT.ta.value, attached }
   clearTimeout(CHAT.retry)
   CHAT = null
 }
@@ -1025,6 +1344,7 @@ async function chatLoad (C, again) { // the end of the conversation; what comes 
   } catch (e) { if (CHAT === C) C.retry = setTimeout(() => chatLoad(C, again), 3000); return }
   const near = nearEnd()
   C.list.replaceChildren()
+  C.asking = null
   C.previews.clear()
   C.shared = []
   C.lastWho = ''
@@ -1032,6 +1352,7 @@ async function chatLoad (C, again) { // the end of the conversation; what comes 
   for (const e of d.entries) chatAdd(C, e, true)
   C.offset = d.o
   LIVE.offsets[C.agent] = Math.max(LIVE.offsets[C.agent] ?? -1, d.o)
+  if (looking(C.agent)) saw(C.agent)
   C.loaded = true
   for (const w of C.waiting || []) chatLive(C, w)   // what the live stream brought while this was loading
   C.waiting = []
@@ -1059,6 +1380,7 @@ function chatAdd (C, e, history) {
       C.typing.hidden = history && !recent
       const text = (e.text || '').trim()
       if (text === '/new' || text === '/reset') { add(C, h('div', { class: 'chat-divider' }, h('span', {}, 'New conversation')), ''); break }
+      if (text === '/stop') { add(C, h('div', { class: 'chat-divider' }, h('span', {}, 'You stopped it')), ''); break }
       for (const f of e.files || []) C.shared.push({ ...f, from: 'you', at: e.at })
       add(C, h('div', { class: 'msg-you' }, h('div', { class: 'bubble' },
         (e.files || []).length ? h('div', { class: 'bubble-files' }, e.files.map((f) => fileChip(C.agent, f))) : null,
@@ -1066,16 +1388,23 @@ function chatAdd (C, e, history) {
       h('time', {}, clock(e.at))), 'you')
       break
     }
-    case 'preview': { const m = agentMsg(C, md(e.text || '…'), 'streaming', e.at); m.dataset.ctx = e.ctx || ''; C.previews.set(e.handle, m); add(C, m, 'agent'); break }
+    case 'preview': { // still being written: a screen reader waits for it (aria-busy) instead of reading it out at every update
+      const m = agentMsg(C, md(e.text || '…'), 'streaming', e.at)
+      m.dataset.ctx = e.ctx || ''
+      m.setAttribute('aria-busy', 'true')
+      C.previews.set(e.handle, m)
+      add(C, m, 'agent')
+      break
+    }
     case 'update': { const m = C.previews.get(e.handle); if (m) m.querySelector('.agent-body').replaceChildren(md(e.text || '')); break }
     case 'delete': { const m = C.previews.get(e.handle); if (m) { m.remove(); C.previews.delete(e.handle); whoLast(C) } break }
     case 'reply':
       for (const [k, m] of C.previews) if (!e.ctx || m.dataset.ctx === e.ctx) { m.remove(); C.previews.delete(k) }
       whoLast(C)
       C.typing.hidden = true
-      add(C, agentMsg(C, md(e.text || ''), '', e.at), 'agent')
+      add(C, agentMsg(C, md(e.text || ''), '', e.at, e.text), 'agent')
       break
-    case 'buttons': C.typing.hidden = true; add(C, buttonsMsg(C, e), 'agent'); break
+    case 'buttons': C.typing.hidden = true; settled(C); add(C, buttonsMsg(C, e), 'agent'); break
     case 'card': C.typing.hidden = true; add(C, agentMsg(C, cardOf(C, e.card), 'card-msg', e.at), 'agent'); break
     case 'file':
       C.shared.push({ ...e, from: 'agent' })
@@ -1087,9 +1416,13 @@ function chatAdd (C, e, history) {
       if (q) answered(q, e.label || e.action)
       break
     }
-    case 'error': C.typing.hidden = true; add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
+    case 'error': C.typing.hidden = true; settled(C); add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
     case 'status': C.connected = e.connected; break
   }
+  if (e.ends) over(C, e.t === 'you' && !String(e.text || '').trim().startsWith('/') ? 'You answered it in a message.' : '')
+}
+function settled (C) { // what was being written stays as it is (cc-connect keeps it when it stops to ask, or on an error)
+  for (const m of C.previews.values()) { m.removeAttribute('aria-busy'); m.classList.remove('streaming') }
 }
 function whoLast (C) { // who spoke last, once a preview is gone
   const last = C.list.lastElementChild
@@ -1100,11 +1433,34 @@ function add (C, el, who) {
   C.lastWho = who
 }
 function clock (t) { return t ? new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
-function agentMsg (C, body, cls, at) {
+function agentMsg (C, body, cls, at, text) { // text: an answer's own words, to copy or save
   const first = C.lastWho !== 'agent'
   return h('div', { class: 'msg-agent' + (cls ? ' ' + cls : '') + (first ? ' first' : '') },
     first ? h('div', { class: 'agent-who' }, avatar(C.agent, 20), h('b', {}, nameOf(C.agent)), at ? h('time', {}, clock(at)) : null) : null,
-    h('div', { class: 'agent-body' }, body))
+    h('div', { class: 'agent-body' }, body),
+    text ? h('div', { class: 'msg-tools' },
+      h('button', { type: 'button', class: 'icon-btn', title: 'Copy', 'aria-label': 'Copy this answer', onclick: (e) => copyAnswer(text, e.currentTarget) }, icon('copy')),
+      h('button', { type: 'button', class: 'icon-btn', title: 'Save as a file', 'aria-label': 'Save this answer as a file', onclick: () => saveAnswer(C.agent, text, at) }, icon('download'))) : null)
+}
+async function copyAnswer (text, button) { // with its formatting (a list stays a list in Word or an email), and as plain text
+  try {
+    if (window.ClipboardItem && navigator.clipboard.write) {
+      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }), 'text/html': new Blob([md(text).outerHTML], { type: 'text/html' }) })])
+    } else await navigator.clipboard.writeText(text)
+    button.replaceChildren(icon('check'))
+    button.setAttribute('aria-label', 'Copied')
+    setTimeout(() => { button.replaceChildren(icon('copy')); button.setAttribute('aria-label', 'Copy this answer') }, 1500)
+  } catch (e) { toast('Couldn’t copy it: ' + e.message) }
+}
+function saveAnswer (agent, text, at) { // as a Markdown file: "claude 2026-10-05 0821.md"
+  const d = new Date(at || Date.now())
+  const two = (n) => String(n).padStart(2, '0')
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown' }))
+  const link = h('a', { href: url, download: `${agent} ${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}${two(d.getMinutes())}.md` })
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 function fileChip (a, f) {
   const name = f.name || (f.path || '').split('/').pop()
@@ -1114,28 +1470,302 @@ function fileChip (a, f) {
   return h('a', { class: 'file-chip', href: f.path ? fileUrl(a, f.path, true) : null, download: name }, h('span', { class: 'file-ic' }, icon('file-text')),
     h('span', { class: 'grow' }, h('b', {}, name), f.size ? h('span', { class: 'sub' }, size(f.size)) : null), f.path ? icon('download') : null)
 }
-// Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons).
+// Asking before acting, in words. cc-connect (v1.5.0) asks "⚠️ **Permission Request**\n\nAgent wants to use **<tool>**:
+// \n\n```\n<input>\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session)." (or the
+// same in one of its other languages), with the buttons perm:allow, perm:deny and perm:allow_all. <input> is the
+// command for Bash, the file for Read, Edit and Write, the address for Cursor's WebFetch, and otherwise the tool's
+// input as one line of JSON, cut at 800 characters with "...". The card says what the agent would do, shows the
+// details that matter first, and keeps exactly what it asked one click away. (1.5.1-beta.3 asks in the same words.)
+// perm:allow_all stops all asking in that chat: for every tool and app, the scheduled tasks that run in it too (they
+// share its session), until /new. Its button says "everything", not just "this kind of thing".
+const PERM_LABEL = { 'perm:allow': 'Allow', 'perm:deny': 'Deny', 'perm:allow_all': 'Allow everything until a new conversation' }
+// Zapier's tools are named after the app first: gmail_send_email, google_calendar_find_event…
+const ZAPIER_APPS = [['google_calendar', 'Google Calendar'], ['google_sheets', 'Google Sheets'], ['google_docs', 'Google Docs'],
+  ['google_drive', 'Google Drive'], ['google_contacts', 'Google Contacts'], ['microsoft_outlook', 'Outlook'], ['microsoft_teams', 'Microsoft Teams'],
+  ['microsoft_excel', 'Excel'], ['microsoft_onedrive', 'OneDrive'], ['jira_software_cloud', 'Jira'], ['gmail', 'Gmail'], ['slack', 'Slack'],
+  ['notion', 'Notion'], ['hubspot', 'HubSpot'], ['salesforce', 'Salesforce'], ['trello', 'Trello'], ['asana', 'Asana'], ['airtable', 'Airtable'],
+  ['dropbox', 'Dropbox'], ['zoom', 'Zoom'], ['calendly', 'Calendly'], ['linkedin', 'LinkedIn'], ['todoist', 'Todoist'], ['docusign', 'DocuSign']]
+// The details shown first, with their names in words; then everything else it would send, and the text (a message's
+// body, say) last, cut to a few lines
+const APPROVAL_FIELDS = [['to', 'To'], ['cc', 'Cc'], ['bcc', 'Bcc'], ['subject', 'Subject'], ['title', 'Title'], ['file_path', 'File'],
+  ['notebook_path', 'File'], ['path', 'File'], ['url', 'Address'], ['query', 'Search for'], ['command', 'Command']]
+const APPROVAL_BODY = ['body', 'text', 'message', 'content', 'instructions']
+// Words to read, drawn as written words are; the rest (what runs, or where it goes) is drawn in the order it's written,
+// letter by letter (.exact)
+const PROSE = ['subject', 'title', 'instructions']
+// Letters written right to left (Hebrew, Arabic and others): drawn as written words are, what's next to them may be
+// drawn in another order than it's sent ("Pay invoice א 100 900" shows as "Pay invoice 900 100 א")
+const RTL = /(?=[\p{L}\p{N}])[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFE\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u
+function words (name) { return String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[\s_.-]+/g, ' ').trim().toLowerCase() }
+function capital (s) { return s ? s[0].toUpperCase() + s.slice(1) : s }
+function toolWords (tool, path) { // what a tool does: {what: 'Gmail: send email', via: 'Zapier'}
+  const parts = tool.split('__')
+  if (parts[0] === 'mcp' && parts.length >= 3) { // an app you connected: mcp__<server>__<action>
+    const server = parts[1]
+    const action = parts.slice(2).join(' ')
+    const app = server === 'zapier' && ZAPIER_APPS.find(([p]) => action === p || action.startsWith(p + '_'))
+    if (app) return { what: `${app[1]}: ${words(action.slice(app[0].length)) || 'use it'}`, via: 'Zapier' }
+    return { what: `${pretty(server)}: ${words(action) || 'use it'}` }
+  }
+  const file = path ? ': ' + path : ''
+  if (/^(Bash|Shell)$/i.test(tool)) return { what: 'Run a command on its own computer' }
+  if (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(tool)) return { what: 'Change a file' + file }
+  if (/^(Read|NotebookRead)$/.test(tool)) return { what: 'Read a file' + file }
+  if (/^Web(Fetch|Search)$/.test(tool)) return { what: 'Look something up online' }
+  return { what: capital(words(tool)) || tool }
+}
+function looseJSON (text) { // the tool's input as {args, cut, open}: JSON, or JSON that cc-connect cut short ("..."); else null
+  const t = text.trim()
+  if (!t.startsWith('{')) return null
+  const obj = (s) => { try { const o = JSON.parse(s); return o && typeof o === 'object' && !Array.isArray(o) ? o : null } catch (e) { return null } }
+  const whole = obj(t)
+  if (whole) return { args: whole, cut: false }
+  if (!t.endsWith('...')) return null
+  // closed off where it was cut (half an escape and a dangling comma dropped first), as far as it goes; and which value
+  // that closed off (open): cut right after "cc": or "cc":", it's null or "" only because it was cut there. (Which one
+  // that is: the one that changes when it's closed off with something in it instead; for a list cut after an item,
+  // "cc":["", one more item in it.)
+  const cut = t.slice(0, -3).replace(/\\+$/, (s) => s.length % 2 ? s.slice(1) : s).replace(/,\s*$/, '')
+  for (const end of ['"}', '}', '":null}', 'null}', '"]}', ']}', '"}}', '}}', '"}]}']) {
+    const o = obj(cut + end)
+    if (!o) continue
+    const alt = obj(cut + (end.includes('null') ? end.replace('null', '0') : /^["\]]/.test(end) ? '0' + end : end)) ||
+      (end[0] === ']' && obj(cut + ',0' + end)) || o
+    return { args: o, cut: true, open: Object.keys(o).find((k) => JSON.stringify(o[k]) !== JSON.stringify(alt[k])) }
+  }
+  return null
+}
+function shown (v) { // a value as text: a list as "a, b", anything else as JSON. All of it: cc-connect cuts the whole input at
+  // 800 characters already, and the end of a command ("… && curl … | sh") is what matters most.
+  return typeof v === 'string' ? v : Array.isArray(v) && v.every((x) => typeof x !== 'object') ? v.join(', ') : JSON.stringify(v)
+}
+// Tools whose input cc-connect sends as it is, never as JSON (claudecode's summarizeInput: a command, a file, a pattern;
+// Codex and Cursor send a command as it is too). A command that looks like JSON is still a command: read as JSON, the
+// card would show what a part of it says, not what runs.
+const RAW_INPUT = /^(Bash|Shell|Read|Edit|Write|Grep|Glob)$/i
+const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
+// Characters that don't show as what they are: ones that don't show at all (U+200B, U+FEFF, a variation selector),
+// control and format characters, ones that turn the text after them around (U+202E), and spaces that aren't the
+// space (to a shell, "rm -rf ~/old ~" with U+00A0 for its second space is one word). With one, a command or an
+// address can look like it says what it doesn't. Shown as what they are (⟨U+202E⟩), and Home doesn't offer Allow for
+// them. So is U+2800, the blank braille pattern, drawn as a space but none. (But for a newline and a tab; and for the
+// variation selector that makes a picture an emoji: cc-connect's ⚠️ is ⚠ and U+FE0F. Not after a digit, "#" or "*",
+// which are emoji too, to make a keycap: "notes1️.md" isn't "notes1.md".)
+const UNSEEN = /(?![\t\n ]|(?<=\p{Extended_Pictographic})[\u{FE0E}\u{FE0F}])[\p{C}\p{Default_Ignorable_Code_Point}\p{Z}\u{2800}]/u
+const UNSEEN_ALL = new RegExp(UNSEEN.source, 'gu')
+// Letters from another alphabet that look like these: "bob@acme.com" with a Cyrillic "a" (U+0430) is someone else's
+// address, and so is one with a Lisu "ꓮ" for its "A", or a Coptic "ⲟ" for its "o": nearly every alphabet has a letter
+// or a digit that looks like a Latin one. So in a word with Latin letters, those of any other alphabet are marked,
+// "bob@⟨а⟩cme.com", and Home doesn't offer Allow for it. But for Chinese, Japanese and Korean, written next to Latin
+// letters in one word all the time ("用Python"), whose letters don't pass for Latin ones; and for what every alphabet
+// has (digits 0-9, marks over letters). In a word without Latin letters, it's the same for alphabets whose letters
+// look alike (Greek, Cyrillic, Armenian, Cherokee, Coptic, Lisu): those from another than its first are marked. A word
+// is letters and digits, with an address's dots and @ between them: one in one alphabet is as it is, and so is a
+// Russian word with "IT-" before it (two words).
+const ALPHABETS = ['Greek', 'Cyrillic', 'Armenian', 'Cherokee', 'Coptic', 'Lisu'].map((name) => [name, new RegExp(`\\p{Script=${name}}`, 'u')])
+const LATIN = /\p{Script=Latin}/u
+const NOT_LATIN = '(?![\\p{Script=Latin}\\p{Script=Common}\\p{Script=Inherited}\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\p{Script=Bopomofo}])[\\p{L}\\p{M}\\p{N}]'
+const OTHER = new RegExp(NOT_LATIN, 'u')
+const OTHERS = new RegExp(`(?:${NOT_LATIN}\\p{M}*)+`, 'gu')
+const WORD = /[\p{L}\p{M}\p{N}]+(?:[.@][\p{L}\p{M}\p{N}]+)*/gu
+function othersIn (word) { // what finds the letters in a word from another alphabet than its own; null if there are none
+  if (LATIN.test(word)) return OTHER.test(word) ? OTHERS : null
+  const others = ALPHABETS.filter(([, letter]) => letter.test(word)).slice(1).map(([name]) => `\\p{Script=${name}}`)
+  return others.length ? new RegExp(`(?:[${others.join('')}]\\p{M}*)+`, 'gu') : null
+}
+const mixesAlphabets = (s) => (String(s).match(WORD) || []).some((word) => othersIn(word))
+function visible (s) { // what it asks as it's shown, wherever it is: what doesn't show as what it is, marked
+  return String(s).replace(WORD, (word) => { const others = othersIn(word); return others ? word.replace(others, '⟨$&⟩') : word })
+    .replace(UNSEEN_ALL, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
+}
+function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, key]], body, cut, unseen, mixed, alike}; what is '' if it isn't cc-connect's prompt
+  const raw = String(text || '')
+  const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
+  const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', keys: [], unseen: UNSEEN.test(raw), mixed: mixesAlphabets(raw), alike: false }
+  const tool = bold[1].trim()
+  const input = fence[1].replace(/\n$/, '')
+  const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
+  const args = parsed ? parsed.args : {}
+  if (!parsed && input) { // not JSON: a command, a file or an address
+    if (/^(Bash|Shell)$/i.test(tool)) args.command = input
+    else if (/^Web(Fetch|Search)$/.test(tool)) args[/^https?:\/\//.test(input) ? 'url' : 'query'] = input
+    else if (/^(Write|Edit|MultiEdit|Read|NotebookEdit|NotebookRead)$/.test(tool)) args.path = input
+    else args.input = input
+  }
+  // its file, in what it does (of two, which would that be? Both are shown, below)
+  const paths = ['file_path', 'notebook_path', 'path'].filter((k) => typeof args[k] === 'string' && args[k])
+  const { what, via } = toolWords(tool, paths.length === 1 ? args[paths[0]] : '')
+  const inWhat = /^(Change|Read) a file:/.test(what) ? paths[0] : ''
+  const bodyKey = APPROVAL_BODY.find((k) => typeof args[k] === 'string' && args[k].trim())
+  const known = (k) => APPROVAL_FIELDS.some(([f]) => f === k)
+  // Each field it sends, an empty one too ("cc": "", null or []: it's on no line, so Home offers no Allow for it, and
+  // the card shows why), as "" (which the card says is empty); but for one that would say so only because it was cut
+  // there ([""] too, which shows as "")
+  const said = (v) => blank(v) ? '' : shown(v)
+  const sent = (k) => Object.prototype.hasOwnProperty.call(args, k) && !(k === (parsed && parsed.open) && said(args[k]) === '')
+  const fields = APPROVAL_FIELDS.filter(([k]) => sent(k) && k !== inWhat).map(([k, label]) => [label, said(args[k]), k])
+  for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
+    if (k !== bodyKey && !known(k) && sent(k)) fields.push([capital(words(k)) || JSON.stringify(k), said(v), k])   // (a name of no letters, "" say, as sent)
+  }
+  // Names that read alike ("TO" next to "to", two files, or a name like one of the card's own, "Command"): the app it
+  // goes to may use either one, so each is shown with its name as it was sent ("TO"), and Home doesn't offer Allow
+  const own = new Set(APPROVAL_FIELDS.map(([, label]) => label.toLowerCase()))
+  const named = {}
+  for (const name of [...fields.map(([label]) => label.toLowerCase()), bodyKey && words(bodyKey)]) if (name) named[name] = (named[name] || 0) + 1
+  const alike = fields.filter(([label, , k]) => named[label.toLowerCase()] > 1 || (!known(k) && own.has(label.toLowerCase())))
+  for (const f of alike) f[0] = JSON.stringify(f[2])
+  // (cut by cc-connect: JSON closed off where it was cut, or input as it is that's 800 characters and "...")
+  const cut = parsed ? parsed.cut : [...input].length === 803 && input.endsWith('...')
+  const body = bodyKey ? args[bodyKey] : ''
+  // (in what it asked, or in what's read from its JSON: Go writes U+2028 and the control characters there as \u2028)
+  const all = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])]
+  // (words to read, written partly right to left: the text, a subject, a title, instructions)
+  const rtl = [body, ...fields.filter(([, , k]) => PROSE.includes(k)).map(([, v]) => v)].some((s) => RTL.test(s))
+  // (a file to write or change, of which cc-connect sends only the name: not what it would write)
+  const blind = /^(Write|Edit)$/i.test(tool)
+  return { raw, tool, what, via, fields, body, bodyKey, inWhat, keys: Object.keys(args), cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0, rtl, blind }
+}
+// In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
+// U+FEFF or U+2028 is a space to \s, and then a space is all it would show.) A question not in cc-connect's words is
+// as it is, but for its bold ("**delete**"): its "*", ">" and "`" may be what runs.
+function approvalLine (ap, all) {
+  if (!ap.what) return visible(ap.raw.replace(/\*\*([^*\n]+)\*\*/g, '$1')).replace(/[\t\n ]+/g, ' ').trim().slice(0, 160)
+  const line = lineParts(ap).map(([t]) => t).join('')
+  return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
+}
+// ...in parts, each marked and on one line: [text, words to read], what it does first
+function lineParts (ap) { return [[ap.what, false], ...moreOf(ap).parts].map(([t, prose]) => [visible(t).replace(/[\t\n ]+/g, ' '), prose]) }
+function approvalMore (ap) { return moreOf(ap).parts.map(([t]) => t).join('') }
+// What the line says after what it does: who it goes to (all of them), or else what it runs, opens, looks for or is
+// about. After whoever it goes to: Zapier's instructions, the words its AI acts on, or else the subject ("to
+// bob@acme.com, subject: Lunch on Friday"). As parts, [text, words to read (a subject, a title, instructions) or
+// not], with the names of what it asks that they show.
+const ON_LINE = ['command', 'url', 'file_path', 'notebook_path', 'path', 'query', 'subject', 'title', 'instructions', 'input']
+function moreOf (ap) {
+  const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
+  if (ap.bodyKey) f[ap.bodyKey] = ap.body
+  const to = [['to', ''], ['cc', 'cc '], ['bcc', 'bcc ']].filter(([k]) => f[k])
+  const k = to.length ? (f.instructions ? 'instructions' : f.subject ? 'subject' : '') : ON_LINE.find((x) => f[x])
+  const parts = to.length ? [[' to ' + to.map(([x, w]) => w + f[x]).join(', '), false]] : []
+  if (k) parts.push([(to.length && k === 'subject' ? ', subject: ' : ': ') + f[k], PROSE.includes(k)])
+  return { parts, keys: [...to.map(([x]) => x), k].filter(Boolean) }
+}
+// Is that line all it asks, as far as saying yes goes? Only when it shows all of what it would send: every field, by
+// name. None may be left off: each is something the app acts on, and what it does may hang on any of them (an email's
+// body, a calendar event's guests, a search's limit). An app may read words in any field as what to do, as Zapier's
+// tools read their instructions, filling in from them whatever they weren't given. Nor is an empty one left off
+// ("assignees": [] can take everyone off an issue). And not when it isn't cc-connect's question, when cc-connect cut
+// what it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end
+// of a command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
+// characters that don't show, letters from another alphabet that look like these, or names that read alike; nor when
+// words on it are written partly right to left (Home draws them as written words are, and what's next to them, a
+// number say, may be drawn in another order than it's sent: the card has it in order). Nor for a file to write or
+// change, of which cc-connect sends only the name: what it would write in it is in no request. Nor when
+// it's as long as what Home has of it: server.py's activity() keeps the first 4,000 characters, and a "```" in a
+// longer one would end what Home reads of it there.
+function approvalWhole (ap) {
+  const shown = new Set([ap.inWhat, ...moreOf(ap).keys].filter(Boolean))   // ("": nothing; not a field named "")
+  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && !ap.rtl && !ap.blind && [...ap.raw].length < 4000 &&
+    approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap)) && ap.keys.every((k) => shown.has(k))
+}
+function approvalView (ap) { // what the card shows above its buttons
+  const odd = [ // (why Home offers no Allow for it, where that's in what it asks)
+    ap.unseen && 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.',
+    ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.',
+    ap.alike && 'Some names in this read the same, like “to” and “TO”. The app may use either one, so each is shown with the name it was sent with.',
+    ap.blind && 'It doesn’t say what it would write in the file, only which file it is.',
+    ap.rtl && 'Some of the words in this are written right to left, as Hebrew and Arabic are, so what’s next to them, a number say, may be drawn in another order than it’s sent. Exactly what it asked, at the end, has all of it in the order it’s sent.'
+  ].filter(Boolean).map((text) => h('p', { class: 'note warn' }, icon('triangle-alert'), text))
+  if (!ap.what) return [...odd, h('pre', { class: 'approval-text exact' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
+  const clamp = h('div', { class: 'clamp' }, visible(ap.body))
+  const body = ap.body ? h('div', { class: 'approval-body' }, clamp) : null
+  const more = body && h('button', { type: 'button', class: 'linkish approval-more', 'aria-expanded': 'false', hidden: true, onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all')
+  // "Show all" when the text is cut, which only its laid-out lines can tell (a long line takes two, a narrow window more)
+  if (more) new ResizeObserver(() => { if (!body.classList.contains('open')) more.hidden = clamp.scrollHeight <= clamp.clientHeight + 1 }).observe(clamp)
+  return [
+    h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
+    ...odd,
+    // (an empty one says so, in words of the card's own: not what it sent, which could say "(empty)" itself)
+    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v, k]) => h('div', {}, h('dt', {}, visible(label)),
+      v === '' ? h('dd', { class: 'empty' }, '(empty)') : h('dd', PROSE.includes(k) ? {} : { class: 'exact' }, visible(v))))) : null,
+    body,
+    more,
+    ap.cut ? h('p', { class: 'small muted' }, 'Only the start of this was shown here. Allow lets it do all of it.') : null,
+    h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', { class: 'exact' }, visible(ap.raw)))
+  ]
+}
+// Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons). cc-connect's
+// buttons say allow or deny, not to what, so an answer from a card goes with the approval it shows: what it asked and
+// when, as its line in the log says them (cut as server.py's approval() cuts them: the first 4,000 characters, counted
+// by code point as Python counts them, not in UTF-16 units as slice() would). The server sends it only while that's
+// the approval the agent waits for. Only the newest one waits, until a line ends the wait ("ends", as server.py reads
+// it: a message that answers it, /stop, /new, cc-connect restarted); then its card says so, and offers nothing.
 function buttonsMsg (C, e) {
   const all = (e.buttons || []).flat()
   const perm = all.some((b) => /^perm:/.test(b.data))
   const box = h('div', { class: 'choices' + (perm ? ' approval' : '') })
   box.dataset.values = all.map((b) => b.data).join('\n')
-  const body = perm
-    ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants to go ahead')), h('pre', { class: 'approval-what' }, (e.text || '').trim())]
+  const body = perm ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants your OK')), approvalView(approvalOf(e.text))]
     : [md(e.text || '')]
-  box.append(...body, h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) =>
-    h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, b.text) }, b.text)))))
+  const pending = perm ? { text: [...String(e.text || '')].slice(0, 4000).join(''), at: e.at ?? null } : undefined
+  box.pending = pending
+  box.append(...body.flat().filter(Boolean), h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) => {
+    const label = (perm && PERM_LABEL[b.data]) || b.text
+    return h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, label, pending) }, label)
+  }))))
+  if (perm) { over(C); C.asking = box }   // (one asked before it isn't waited for any more)
   return agentMsg(C, box, '', e.at)
 }
-function choose (C, box, value, label) {
-  answered(box, label)
-  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label } }).catch((err) => { box.classList.remove('is-answered'); alert(err.message) })
-}
-function answered (box, label) {
-  box.classList.add('is-answered')
-  box.querySelectorAll('button').forEach((b) => { b.disabled = true })
+function choose (C, box, value, label, pending) {
   const row = box.querySelector('.choice-row')
-  if (row) row.replaceWith(h('div', { class: 'chosen' }, icon('check'), 'You chose: ', h('b', {}, label.replace(/^[^\p{L}\p{N}]+/u, ''))))
+  answered(box, label)
+  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label, pending } }).catch((err) => {
+    if (err.status === 409 && pending) { // the agent has moved on, it was answered already, or its VM stopped: nothing was sent
+      if (/^It stopped/.test(err.message)) forgot(C.agent, pending)   // (for good, and on Home too)
+      answered(box, '', /^You answered/.test(err.message) ? 'You answered it already.' : /^It stopped/.test(err.message) ? stoppedWaiting(C.agent)
+        : nameOf(C.agent) + ' isn’t waiting for this any more.')
+      return
+    }
+    // it didn't go (cage isn't answering, say): its buttons again, to answer once it can
+    box.classList.remove('is-answered')
+    const chosen = box.querySelector('.chosen')
+    if (row && chosen) chosen.replaceWith(row)
+    box.querySelectorAll(ANSWERS).forEach((b) => { b.disabled = false })
+    drawAsking(C)   // (unless its agent isn't up any more)
+    toast(err.message)
+  })
+}
+// cc-connect forgets an approval when it stops (asleep, say), and drops an answer to one it forgot without a word: so
+// while its agent isn't up, the card that waits offers no answers, and says why, as Home offers none (askingOf). Up
+// again, it offers them only if its VM didn't stop meanwhile (it only looked away: cage's state said it was signing
+// in, say): one it was waiting for while its VM wasn't running, it never offers again (forgotten()).
+// (server.py refuses an answer while the agent's VM isn't running, for when this page doesn't know yet.)
+function stoppedWaiting (agent) { return nameOf(agent) + ' stopped while waiting for your OK, so it won’t go ahead.' }
+function drawAsking (C) {
+  const box = C.asking
+  if (!box || box.classList.contains('is-answered')) return
+  const a = agentOf(C.agent)
+  const row = box.querySelector('.choice-row')
+  const note = box.querySelector('.chosen')
+  if (forgotten(C.agent, box.pending)) answered(box, '', stoppedWaiting(C.agent))
+  else if (a && a.state === 'ready') { if (note && note.row) note.replaceWith(note.row) }
+  else if (row) row.replaceWith(Object.assign(h('div', { class: 'chosen over' }, icon('info'), stoppedWaiting(C.agent)), { row }))   // (its buttons kept for then)
+}
+// What a card says once it's answered (what you chose), or once it can't be (why), instead of its buttons. Only its
+// answers are off: what it shows can still be read (an email's body, with Show all)
+const ANSWERS = '.choice-row button, .list-item button'
+function answered (box, label, why) {
+  box.classList.add('is-answered')
+  box.querySelectorAll(ANSWERS).forEach((b) => { b.disabled = true })
+  const row = box.querySelector('.choice-row, .chosen')
+  if (row) row.replaceWith(why ? h('div', { class: 'chosen over' }, icon('info'), why) : h('div', { class: 'chosen' }, icon('check'), 'You chose: ', h('b', {}, label.replace(/^[^\p{L}\p{N}]+/u, ''))))
+}
+// The approval card that waited no longer does (answered, ended, or asked anew): it says so, if nothing answered it here
+function over (C, why) {
+  const box = C.asking
+  C.asking = null
+  if (box && !box.classList.contains('is-answered')) answered(box, '', why || nameOf(C.agent) + ' isn’t waiting for this any more.')
 }
 // cc-connect's cards (/help, /usage, model pickers…): headers, text, notes and buttons
 function cardOf (C, card) {
@@ -1162,7 +1792,7 @@ function cardOf (C, card) {
 
 async function attach (C, files) {
   for (const f of [...files]) {
-    if (f.size > 25 * 1024 * 1024) { alert(`${f.name} is bigger than 25 MB`); continue }
+    if (f.size > 25 * 1024 * 1024) { toast(`${f.name} is bigger than 25 MB, so it can’t be sent.`); continue }
     const item = { name: f.name, uploading: true }
     C.attached.push(item)
     drawAttached(C)
@@ -1171,7 +1801,7 @@ async function attach (C, files) {
       const d = await res.json()
       if (!res.ok) throw new Error(d.error || res.statusText)
       Object.assign(item, d, { uploading: false })
-    } catch (e) { C.attached.splice(C.attached.indexOf(item), 1); alert(`Couldn’t attach ${f.name}: ${e.message}`) }
+    } catch (e) { C.attached.splice(C.attached.indexOf(item), 1); toast(`Couldn’t attach ${f.name}: ${e.message}`) }
     drawAttached(C)
   }
 }
@@ -1179,17 +1809,20 @@ function drawAttached (C) {
   C.chips.replaceChildren(...C.attached.map((f) => h('span', { class: 'chip' + (f.uploading ? ' busy' : '') }, f.uploading ? h('span', { class: 'spinner' }) : icon(isPicture(f.name) ? 'image' : 'paperclip'), f.name,
     h('button', { type: 'button', class: 'chip-x', 'aria-label': 'Remove ' + f.name, onclick: () => { C.attached.splice(C.attached.indexOf(f), 1); drawAttached(C) } }, icon('x')))))
 }
+// What you wrote, with the files you attached; or `text` (a command: /stop, /new) on its own, which leaves what you're
+// writing as it is. With a picture, cc-connect wouldn't even read "/stop" as a command: it would go to the agent.
 async function chatSend (C, text) {
   const a = agentOf(C.agent)
   const msg = text !== undefined ? text : C.ta.value
-  const files = C.attached.filter((f) => !f.uploading && f.path)
+  const files = text === undefined ? C.attached.filter((f) => !f.uploading && f.path) : []
   if (!msg.trim() && !files.length) return
-  if (C.attached.some((f) => f.uploading) || DOWN) return
+  if ((text === undefined && C.attached.some((f) => f.uploading)) || DOWN) return
+  if (text === undefined && pickBlank(C.ta)) { toast(`Fill in ${blanksLeft(msg)[0]} first.`, 'info'); return }
   if (!a.enabled || a.state === 'login') { drawChatState(C, true); return }
   try {
     await api(`/api/chat/${C.agent}/send`, { method: 'POST', body: { text: msg, files: files.map(({ path, name, mime }) => ({ path, name, mime })) } })
-  } catch (e) { alert(e.message); return }
-  if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C) }
+  } catch (e) { toast(e.message); return }
+  if (text === undefined) { C.ta.value = ''; grow(C.ta); C.attached = []; drawAttached(C); blanksHint(C) }
   C.typing.hidden = false
   if (['asleep', 'none'].includes(a.state) && !C.waking) wake(C)   // it waits in its folder until the agent is up
   drawChatState(C)
@@ -1207,13 +1840,22 @@ async function wake (C) { // wake the chat's agent up, and say so if that doesn'
     })
   } catch (e) { C.waking = false; C.woke = 'none'; C.typing.hidden = true; drawChatState(C) }
 }
-// The line above the message box: what's in the way of a reply, if anything
+// The line above the message box: what's in the way of a reply, if anything (and the approval waiting, if any, offers
+// answers only while its agent is up)
 function drawChatState (C, nudge) {
   const a = agentOf(C.agent)
   if (!a) return
+  drawAsking(C)
   if (a.state === 'ready' || a.state === 'installing') { C.waking = false; C.woke = null }   // it's up (after all)
   const ban = (tone, ic, text, action) => { C.banner.className = 'chat-banner ' + tone; C.banner.replaceChildren(icon(ic), h('span', { class: 'grow' }, text), action || ''); C.banner.hidden = false }
   C.empty.hidden = C.list.childElementCount > 0 || !C.loaded
+  C.recipeBtn.hidden = !C.loaded || !C.empty.hidden
+  if (C.recipeBtn.hidden && !C.recipePanel.hidden) recipesBy(C, false)
+  const needs = RECIPES.map((r) => r.needs.filter((n) => !NEEDS[n].has(a.name)).join()).join('|')
+  if (!C.empty.hidden && C.recipesFor !== needs) {
+    C.recipesFor = needs
+    C.recipes.replaceChildren(h('p', { class: 'recipes-title' }, 'Or start from a recipe'), recipeTiles(a, 'chat'))
+  }
   if (DOWN) ban('bad', 'circle-alert', 'cage isn’t answering, so messages can’t go out right now.')
   else if (!a.enabled) ban('info', 'sparkles', `Add ${a.label} to chat with it. It uses ${a.plan}.`, btn('Add ' + a.label, () => runJob(['add', a.name], 'Adding ' + a.label), 'sm primary'))
   else if (a.state === 'login') ban('warn', 'log-in', `Sign ${a.label} in first (it uses ${a.plan}).`, btn('Sign in', () => runJob(['login', a.name], 'Sign ' + a.label + ' in'), 'sm primary'))
@@ -1265,6 +1907,12 @@ function cronOf (kind, time, day) {
   if (kind === 'weekly') return `${mm} ${hh} * * ${day}`
   return `${mm} ${hh} * * *`
 }
+function filledTitle (draft, prompt) { // a recipe's title with its blanks as you filled them in its prompt ('' if you changed more)
+  const names = draft.prompt.match(BLANK) || []
+  const m = new RegExp('^' + draft.prompt.split(BLANK).map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('([\\s\\S]+?)') + '$').exec(prompt)
+  return m ? draft.title.replace(BLANK, (b) => m[names.indexOf(b) + 1] ?? b) : ''
+}
+function blanksNote (text) { const left = blanksLeft(text); return left.length ? ['Fill in ', ...left.flatMap((b, i) => [i ? ', ' : '', h('mark', { class: 'blank' }, b)]), ' first.'] : [] }
 function cronText (expr) { // "0 8 * * 1-5" → "Every weekday at 8:00 AM"; anything unusual stays as it is
   const f = String(expr || '').trim().split(/\s+/)
   if (f.length === 6) f.shift()
@@ -1296,29 +1944,40 @@ function pageSchedule (a) {
     render(true)
   }
   if (awake && !S.loading && ((S.jobs === null && !S.error) || ARRIVED)) load()
-  const what = h('textarea', { rows: 3, placeholder: 'e.g. Summarize what came into my inbox overnight, most important first.', 'aria-label': 'What should it do?', 'data-keep': 'sched-what' })
-  const kind = h('select', { 'aria-label': 'How often', onchange: () => { day.hidden = kind.value !== 'weekly'; time.hidden = kind.value === 'hourly' } },
+  const sync = () => { day.hidden = kind.value !== 'weekly'; time.hidden = kind.value === 'hourly'; hint.replaceChildren(...blanksNote(what.value)) }
+  // (what you choose here is kept through a redraw, like what you type: data-keep)
+  const what = h('textarea', { rows: 3, placeholder: 'e.g. Summarize what came into my inbox overnight, most important first.', 'aria-label': 'What should it do?', 'data-keep': 'sched-what', oninput: () => sync(), onkept: () => sync() })
+  const kind = h('select', { 'aria-label': 'How often', 'data-keep': 'sched-kind', onchange: () => sync(), onkept: () => sync() },
     [['weekdays', 'Every weekday'], ['daily', 'Every day'], ['weekly', 'Every week on'], ['hourly', 'Every hour']].map(([v, t]) => h('option', { value: v }, t)))
-  const day = h('select', { 'aria-label': 'Day', hidden: true }, DAYS.map((d, i) => h('option', { value: String(i), selected: i === 1 }, d)))
-  const time = h('input', { type: 'time', value: '08:00', 'aria-label': 'Time', class: 'time' })
-  const form = h('form', { class: 'stack sched-form' }, field('What should it do?', what),
+  const day = h('select', { 'aria-label': 'Day', 'data-keep': 'sched-day' }, DAYS.map((d, i) => h('option', { value: String(i), selected: i === 1 }, d)))
+  const time = h('input', { type: 'time', value: '08:00', 'aria-label': 'Time', class: 'time', 'data-keep': 'sched-time' })
+  const hint = h('span', { class: 'field-hint' })   // a recipe's blanks still to fill in
+  const form = h('form', { class: 'stack sched-form' }, h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'What should it do?'), what, hint),
     h('div', { class: 'row' }, kind, day, h('span', { class: 'muted' }, 'at'), time, h('span', { class: 'grow' }), h('button', { type: 'submit', class: 'btn primary' }, icon('plus'), 'Add')))
+  sync()
   form.addEventListener('submit', async (e) => {
     e.preventDefault()
     const prompt = what.value.trim()
     if (!prompt) return what.focus()
+    if (pickBlank(what)) return toast(`Fill in ${blanksLeft(prompt)[0]} first.`, 'info')
+    const title = S.draft ? filledTitle(S.draft, prompt) : ''   // (a recipe still, filled in; '' once it's what you wrote)
+    if (!(await addUnwatched(a, title ? { title, needs: S.draft.needs } : null))) return
     try {
-      await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: prompt.split('\n')[0].slice(0, 80) })
+      await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: (title || prompt.split('\n')[0]).slice(0, 80) })
       what.value = ''
+      S.draft = null
       await load()
-    } catch (err) { alert('Couldn’t add it: ' + err.message) }
+    } catch (err) { toast('Couldn’t add it: ' + err.message) }
   })
   const rowsOf = (S.jobs || []).map((j) => h('li', {}, h('span', { class: 'chat-mark' }, icon('calendar-clock')),
     h('span', { class: 'grow' }, h('b', {}, j.description || j.prompt || j.exec || 'A task'),
       h('span', { class: 'sub' }, [cronText(j.cron_expr), j.last_run && !/^0001/.test(j.last_run) ? 'last ran ' + ago(Date.parse(j.last_run) / 1000) : 'hasn’t run yet', j.enabled === false ? 'paused' : ''].filter(Boolean).join(' · ')),
       j.last_error ? h('span', { class: 'sub bad' }, j.last_error) : null),
-    btn('Run now', async () => { try { await cronApi(a.name, 'POST', `/api/v1/cron/${j.id}/exec`); go('agent/' + a.name) } catch (e) { alert(e.message) } }, 'sm ghost', 'play'),
-    btn('Delete', async () => { if (!confirm('Delete this scheduled task?')) return; try { await cronApi(a.name, 'DELETE', '/api/v1/cron/' + j.id); await load() } catch (e) { alert(e.message) } }, 'sm ghost danger')))
+    btn('Run now', async () => { try { await cronApi(a.name, 'POST', `/api/v1/cron/${j.id}/exec`); go('agent/' + a.name) } catch (e) { toast(e.message) } }, 'sm ghost', 'play'),
+    btn('Delete', async () => {
+      if (!(await confirmSheet(`Delete “${j.description || j.prompt || 'this task'}”? ${a.label} won’t do it any more.`, 'Delete', 'Keep it'))) return
+      try { await cronApi(a.name, 'DELETE', '/api/v1/cron/' + j.id); await load() } catch (e) { toast(e.message) }
+    }, 'sm ghost danger')))
   const tz = STATE.settings.tz
   return [
     section('Scheduled tasks', `Things ${a.label} does on its own, on a schedule. What it says shows up in the chat. They run while it’s awake${STATE.settings.autostart ? '' : ' (turn on Start at login so it is)'}${tz ? `, at your time (${tz.replace(/_/g, ' ')})` : ''}.`,
@@ -1327,6 +1986,7 @@ function pageSchedule (a) {
           : S.error ? h('p', { class: 'empty' }, 'Couldn’t read its schedule: ' + S.error)
             : S.jobs === null ? h('p', { class: 'empty' }, 'Opening…')
               : rows(rowsOf, 'Nothing scheduled yet.'))),
+    awake ? section('Start from a recipe', 'Ready-made tasks. Add one as it is, or fill in its blanks first.', recipeTiles(a, 'schedule')) : null,
     awake ? section('Add a task', 'Or just ask in the chat, like “every weekday at 8am, summarize my inbox”.', h('div', { class: 'card sched-card' }, form)) : null
   ]
 }
@@ -1351,7 +2011,7 @@ function pageFiles (a) {
       if (!d.ok) throw new Error(d.error)
       const link = h('a', { href: fileUrl(a.name, d.path, true), download: d.name })
       document.body.append(link); link.click(); link.remove()
-    } catch (e) { alert(e.message) }
+    } catch (e) { toast(e.message) }
     btnEl.disabled = false
   }
   const up = h('input', { type: 'file', multiple: true, hidden: true, onchange: async () => {
@@ -1362,7 +2022,7 @@ function pageFiles (a) {
         if (!res.ok) throw new Error(d.error)
         const r = await api(`/api/chat/${a.name}/request`, { method: 'POST', body: { type: 'put', from: d.path, dir: FILES.path, name: f.name } })
         if (!r.ok) throw new Error(r.error)
-      } catch (e) { alert(`Couldn’t upload ${f.name}: ${e.message}`) }
+      } catch (e) { toast(`Couldn’t upload ${f.name}: ${e.message}`) }
     }
     up.value = ''
     load(FILES.path)
@@ -1391,8 +2051,83 @@ function pageFiles (a) {
   ]
 }
 
-// Settings for one agent: chat apps, asking first, plan usage, privacy, stand-in, troubleshooting
-let USAGE = {}
+// Plan usage, as each agent's /usage card says it: "5h limit\nRemaining: 58%\nResets: 2h 13m", for each window.
+// cage's web app asks the agent at most every 10 minutes (server.py's Usage); this page asks the web app every minute.
+// Only Claude Code and Codex can tell.
+let USAGE = {}   // agent → its last answer (with "asked", and "stale" if a newer one wasn't good), or {error}
+const USAGE_ASKING = {}
+const TELLS_USAGE = ['claude', 'codex']
+const WINDOWS = { '5h': '5-hour', '7d': 'Weekly' }
+function usageOf (u) { // [{label, left, reset}]: what's left in each window; [] if the answer says something else
+  const card = u && u.card && typeof u.card === 'object' ? u.card : null
+  const text = card ? (card.elements || []).filter((e) => e && e.type === 'markdown').map((e) => String(e.content || '')).join('\n') : String((u && u.text) || '')
+  return [...text.matchAll(/(\S+) limit\s*\n\s*Remaining:\s*(\d+)%[\s\S]*?Resets:\s*([^\n]+)/g)]
+    .map(([, w, left, reset]) => ({ label: WINDOWS[w] || w + ' limit', left: Math.min(100, +left), reset: reset.trim() }))
+}
+// When a window starts afresh, from what cc-connect said when it was asked ("2h 13m", "3d 4h 0m"): as a time, which
+// stays true while the page sits there (and the answer may be minutes old: the web app keeps one for 10 minutes)
+function resetsAt (reset, asked) {
+  const m = /^(?:(\d+)d\s*)?(?:(\d+)h\s*)?(\d+)m$/.exec(reset)
+  if (!m || !asked) return 'resets in ' + reset
+  const at = asked * 1000 + ((+(m[1] || 0) * 24 + +(m[2] || 0)) * 60 + +m[3]) * 60000
+  if (at <= Date.now()) return 'has reset since it was checked'
+  const days = (new Date(at).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5
+  return 'resets ' + (days < 1 ? 'at ' + clock(at) : days < 2 ? 'tomorrow at ' + clock(at)
+    : days < 7 ? new Date(at).toLocaleDateString([], { weekday: 'long' }) + ' at ' + clock(at) : 'on ' + new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }))
+}
+function wantUsage (a) { // ask again if it's been a minute (the web app answers from what it has)
+  const u = USAGE[a.name]
+  if (a.state === 'ready' && TELLS_USAGE.includes(a.name) && !USAGE_ASKING[a.name] && (!u || Date.now() - u.got > 60000)) loadUsage(a.name)
+}
+async function loadUsage (name, fresh) {
+  if (USAGE_ASKING[name]) return
+  USAGE_ASKING[name] = true
+  try { USAGE[name] = { ...(await api(`/api/chat/${name}/usage`, { method: 'POST', body: fresh ? { fresh: true } : {} })), got: Date.now() } } catch (e) { USAGE[name] = { error: e.message, got: Date.now() } }
+  USAGE_ASKING[name] = false
+  drawUsage(name)
+}
+function drawUsage (name) { // wherever its usage is shown (Home, its settings), without drawing the whole page again
+  const a = STATE && agentOf(name)
+  if (a) document.querySelectorAll(`[data-usage="${name}"]`).forEach((el) => el.replaceChildren(...[usageView(a, el.dataset.offer === '1')].flat().filter(Boolean)))
+}
+function usageView (a, offer) { // bars, or why there are none; offer: a stand-in, for an agent that has used it all up
+  const say = (text) => h('p', { class: 'muted small' }, text)
+  if (!TELLS_USAGE.includes(a.name)) return say('Not reported')
+  if (a.state !== 'ready') return say(a.state === 'login' ? 'Sign it in to see how much is left.' : 'Wake it up to see how much is left.')
+  const u = USAGE[a.name]
+  if (!u || (USAGE_ASKING[a.name] && !u.got)) return say('Checking…')
+  if (u.error) return say(u.error)
+  const windows = usageOf(u)
+  if (!windows.length) return say(plainLine(u.text || (u.card && u.card.elements || []).map((e) => (e && (e.content || e.text)) || '').join(' '), 200) || 'It didn’t say.')
+  const others = agentsOn().filter((b) => b.name !== a.name)
+  return [
+    h('div', { class: 'usage-bars' }, windows.map((w) => h('div', { class: 'usage-bar ' + (w.left <= 0 ? 'bad' : w.left < 20 ? 'warn' : 'ok') },
+      h('span', { class: 'usage-label' }, h('b', {}, w.label + ': '), `${w.left}% left` + (w.reset && w.reset !== '-' ? ', ' + resetsAt(w.reset, u.asked) : '')),
+      h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { style: { width: w.left + '%' } }))))),
+    u.stale ? say('It didn’t answer the last time; this is from ' + when(u.asked * 1000) + '.') : null,
+    offer && windows.some((w) => w.left <= 0) && !a.fallback && others.length
+      ? h('div', { class: 'plan-out' }, h('span', {}, `${a.label} has used up its plan for now. Until it resets, another agent can answer its messages:`), fallbackSelect(a, others))
+      : null
+  ]
+}
+
+// Asking first (cage approve): Claude Code asks before it uses your apps, Cursor and Antigravity before every action.
+// Codex can't ask at all: with it on, cc-connect runs Codex in its read-only sandbox and never asks (approval_policy
+// never), so its switch is called what it does, and nothing says it asks.
+function askingFirst (a) {
+  if (a.name === 'codex') {
+    return section('Working read-only', '', h('div', { class: 'card' },
+      setting('Work read-only', 'Codex can’t ask you before it acts. With this on, it works read-only instead: it can read and answer, but not change files. Apps you connected for it may still let it act, so to be sure, don’t connect apps to Codex.',
+        toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Working read-only'), 'Work read-only'))))
+  }
+  return section('Asking first', '', h('div', { class: 'card' },
+    setting('Ask before acting in your apps', a.name === 'claude'
+      ? 'Before it sends an email, books a meeting or changes anything in an app you connected, it asks you in the chat. Work on its own computer goes ahead.'
+      : `${a.label} can only ask before every action, so expect more questions. It asks in the chat, with Allow and Deny buttons.`,
+    toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Asking first'), 'Ask before acting'))))
+}
+
+// Settings for one agent: chat apps, asking first (or working read-only), plan usage, privacy, stand-in, troubleshooting
 function agentSettings (a) {
   const s = statusOf(a)
   const meta = AGENT[a.name]
@@ -1417,28 +2152,13 @@ function agentSettings (a) {
       h('span', { class: 'grow' }, h('b', {}, label), h('span', { class: 'sub' + (on ? ' on' : '') }, detail)), open, acts)
   }
   const others = agentsOn().filter((b) => b.name !== a.name)
-  const usageBox = h('div', { class: 'usage' })
-  const showUsage = () => {
-    const u = USAGE[a.name]
-    usageBox.replaceChildren(!u ? h('p', { class: 'muted small' }, 'Checking…')
-      : u.error ? h('p', { class: 'muted small' }, u.error)
-        : u.card ? cardOf({ agent: a.name }, u.card) : md(u.text || ''))
-  }
-  const checkUsage = async () => {
-    USAGE[a.name] = null
-    showUsage()
-    try { USAGE[a.name] = await api(`/api/chat/${a.name}/usage`, { method: 'POST', body: {} }) } catch (e) { USAGE[a.name] = { error: e.message } }
-    showUsage()
-  }
-  if (a.state === 'ready') { if (!(a.name in USAGE)) checkUsage(); else showUsage() } else usageBox.append(h('p', { class: 'muted small' }, 'Wake it up and sign it in to see how much is left.'))
+  wantUsage(a)
+  const again = () => { USAGE[a.name] = null; drawUsage(a.name); loadUsage(a.name, true) }
   return [
-    section('Plan usage', `How much is left on its plan (${a.plan}). Only Claude Code and Codex can tell.`, h('div', { class: 'card usage-card' }, usageBox,
-      a.state === 'ready' ? h('div', { class: 'row' }, btn('Check again', checkUsage, 'sm ghost', 'refresh-cw')) : null)),
-    section('Asking first', '', h('div', { class: 'card' },
-      setting('Ask before acting in your apps', a.name === 'claude'
-        ? 'Before it sends an email, books a meeting or changes anything in an app you connected, it asks you in the chat. Work on its own computer goes ahead.'
-        : `${a.label} can only ask before every action, so expect more questions. It asks in the chat, with Allow and Deny buttons.`,
-      toggle(a.approve, (on) => runJob(['approve', a.name, on ? 'on' : 'off'], 'Asking first'), 'Ask before acting')))),
+    section('Plan usage', `How much is left on its plan (${a.plan}). Only Claude Code and Codex can tell.`, h('div', { class: 'card usage-card' },
+      h('div', { class: 'usage', 'data-usage': a.name }, usageView(a)),
+      a.state === 'ready' && TELLS_USAGE.includes(a.name) ? h('div', { class: 'row' }, btn('Check again', again, 'sm ghost', 'refresh-cw')) : null)),
+    askingFirst(a),
     section('Chat apps', 'Talk to it from your phone too. Only you can message it, unless you let others in.', h('ul', { class: 'list chats' }, CHATS.map(([k, n]) => chatRow(k, n)))),
     section('Preferences', '', h('div', { class: 'card' },
       setting('Privacy mask', `In what you type, your About me and your notes’ names and titles, emails, phone and card numbers, bank details, keys and your own words reach ${meta.vendor} as placeholders like [EMAIL_1], and come back as themselves. Files and pictures you send, notes and web pages it opens, and app results go as they are; voice notes go to Groq as they are, if you use Groq for them. Anyone who can chat with it can ask it about masked values, and so can a web page or app result it reads. The real values are kept in its VM, so something that tells it to look there can find them.`,
@@ -1545,9 +2265,13 @@ function pageMemory () {
     section('About you', 'Every agent reads this. Write it like a note to a new colleague.', h('div', { class: 'stack' }, ta, h('div', { class: 'row' }, save, status))))
 }
 
+let SECURITY_SEEN = ''   // what cage blocked, as the page last told cage you'd seen it
 function pageSecurity () {
   const S = STATE
-  if (S.events.unseen > 0) quietJob(['security'])   // you've seen them now
+  // you've seen them now: said once when you arrive, and again when something new comes in while you look (not at
+  // every redraw, which would run cage once more each time until it has answered)
+  const blocked = S.events.unseen + ' ' + JSON.stringify(S.events.recent[0] || null)
+  if (S.events.unseen > 0 && (ARRIVED || blocked !== SECURITY_SEEN)) { SECURITY_SEEN = blocked; quietJob(['security']) }
   const ev = S.events.recent.map((e) => {
     const when = `${e.count > 1 ? e.count + ' times · ' : ''}${ago(e.at)}`
     if (e.kind === 'secret') {
@@ -1634,6 +2358,11 @@ function paletteItems () {
     ['sparkles', 'Ask your agents', () => { go('home'); setTimeout(() => { const t = document.querySelector('.composer textarea'); if (t) t.focus() }, 60) }]
   ]
   for (const a of S.agents) items.push([null, a.label, () => go('agent/' + a.name), a.name, STATUS[statusOf(a)].label])
+  for (const a of agentsOn()) {
+    items.push(['square-pen', 'New conversation with ' + a.label, () => newConversation(a.name)],
+      ['calendar-clock', 'Schedule a task for ' + a.label, () => { go('agent/' + a.name + '/schedule'); setTimeout(() => { const t = document.querySelector('[data-keep="sched-what"]'); if (t) t.focus() }, 60) }])
+    if (a.state === 'ready') items.push(['square', 'Stop ' + a.label, () => openChat(a.name) && chatSend(CHAT, '/stop')])
+  }
   items.push(['blocks', 'Apps', () => go('apps')], ['key-round', 'Sign-ins & keys', () => go('signins')], ['brain', 'Memory', () => go('memory')],
     ['shield', 'Security', () => go('security')], ['settings', 'Settings', () => go('settings')])
   if (agentsOn().some((a) => a.reachable && ['asleep', 'none'].includes(a.state))) items.push(['power', 'Wake everyone', () => runJob(['up'], 'Waking your agents')])
@@ -1644,8 +2373,11 @@ function paletteItems () {
 const pal = document.getElementById('palette')
 function openPalette () {
   if (!STATE || !STATE.configured || dlg.open || pal.open) return
-  const input = h('input', { type: 'text', placeholder: 'Go to, or do…', 'aria-label': 'Search', autocomplete: 'off', spellcheck: 'false' })
-  const list = h('ul', { class: 'pal-list', role: 'listbox' })
+  const input = h('input', {
+    type: 'text', placeholder: 'Go to, or do…', 'aria-label': 'Go to, or do', autocomplete: 'off', spellcheck: 'false',
+    role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'pal-list', 'aria-autocomplete': 'list'
+  })
+  const list = h('ul', { class: 'pal-list', role: 'listbox', id: 'pal-list', 'aria-label': 'Places and actions' })
   let hits = []
   let at = 0
   const draw = () => {
@@ -1653,10 +2385,11 @@ function openPalette () {
     hits = paletteItems().filter(([, label]) => !q || label.toLowerCase().includes(q))
     at = Math.min(at, Math.max(0, hits.length - 1))
     list.replaceChildren(...hits.map(([ic, label, fn, agent, note], i) => h('li', {
-      role: 'option', class: i === at ? 'on' : '', 'aria-selected': i === at ? 'true' : 'false',
+      role: 'option', id: 'pal-' + i, class: i === at ? 'on' : '', 'aria-selected': i === at ? 'true' : 'false',
       onmousemove: () => { if (at !== i) { at = i; draw() } }, onclick: () => pick(i)
     }, agent ? avatar(agent, 18) : icon(ic), h('span', { class: 'grow' }, label), note ? h('span', { class: 'muted small' }, note) : null)))
-    if (!hits.length) list.append(h('li', { class: 'pal-empty' }, 'Nothing matches.'))
+    if (!hits.length) list.append(h('li', { class: 'pal-empty', role: 'presentation' }, 'Nothing matches.'))
+    if (hits.length) input.setAttribute('aria-activedescendant', 'pal-' + at); else input.removeAttribute('aria-activedescendant')
   }
   const pick = (i) => { const it = hits[i]; if (!it) return; pal.close(); it[2]() }
   input.addEventListener('input', () => { at = 0; draw() })
@@ -1671,21 +2404,77 @@ function openPalette () {
   input.focus()
 }
 pal.addEventListener('click', (e) => { if (e.target === pal) pal.close() })   // a click on the backdrop
+function openChat (name) { // an agent's chat, now (not after the next hashchange): the open chat, or null if you stayed
+  if (page !== 'agent/' + name) { location.hash = 'agent/' + name; route() }
+  return CHAT && CHAT.agent === name && page === 'agent/' + name ? CHAT : null
+}
+function newConversation (name) { const C = openChat(name); if (C) chatSend(C, '/new') }
+// Shortcuts: Ctrl+K (⌘K) jumps anywhere; Alt+1…4 opens an agent's chat (as listed in the sidebar); Ctrl+Shift+O
+// (⌘⇧O) starts a new conversation with the agent you're on; Esc stops an agent that's working, while you haven't
+// typed anything; ? lists them.
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
+const KEYS = [[MAC ? '⌘K' : 'Ctrl K', 'Go to, or do, anything'], [MAC ? '⌥1 … ⌥4' : 'Alt 1 … Alt 4', 'Open an agent’s chat, as listed on the left' + (MAC ? ' (when you’re not typing)' : '')],
+  [MAC ? '⌘⇧O' : 'Ctrl Shift O', 'Start a new conversation with this agent'], ['Esc', 'Stop the agent while it’s working (with nothing typed)'],
+  ['Enter', 'Send'], ['Shift Enter', 'A new line'], ['?', 'These shortcuts']]
+const keysSheet = document.getElementById('keys')
+function showKeys () {
+  keysSheet.replaceChildren(h('header', { class: 'sheet-head' }, h('h2', { id: 'keys-title' }, 'Keyboard shortcuts'),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => keysSheet.close() }, icon('x'))),
+  h('dl', { class: 'keys-list' }, KEYS.map(([k, what]) => h('div', {}, h('dt', {}, k.split(' ').map((x) => x === '…' ? ' … ' : h('kbd', {}, x))), h('dd', {}, what)))))
+  keysSheet.showModal()
+}
+keysSheet.addEventListener('click', (e) => { if (e.target === keysSheet) keysSheet.close() })
 document.addEventListener('keydown', (e) => {
   if (dlg.open) return   // in the side panel, Ctrl+K is the terminal's (and the panel is modal anyway)
   if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (pal.open) pal.close(); else openPalette() }
-  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) document.body.classList.remove('nav-open')
+  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) { document.body.classList.remove('nav-open'); return }   // (and nothing else)
+  if (!STATE || !STATE.configured || document.querySelector('dialog[open]')) return
+  const field = typing(document.activeElement)
+  // By the key, as Alt+1 on a Mac is "¡". But in a box you type in, only Alt with a plain digit: on a Mac, Option and a
+  // digit is how many keyboards type "#", "@", "$" or "£", which must go into the box, not to another page.
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-4]$/.test(e.code) && !(field && !/^[1-4]$/.test(e.key))) {
+    const a = STATE.agents.slice().sort((x, y) => y.enabled - x.enabled)[+e.code.slice(5) - 1]
+    if (a) { // its chat, ready to write in (unless you stay, to save what you wrote on this page)
+      e.preventDefault()
+      if (!a.enabled) go('agent/' + a.name)
+      else { const C = openChat(a.name); if (C) C.ta.focus() }
+    }
+  } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyO') {
+    if (page.startsWith('agent/')) { e.preventDefault(); newConversation(page.split('/')[1]) }
+  } else if (e.key === 'Escape' && CHAT && page === 'agent/' + CHAT.agent && !CHAT.typing.hidden && !CHAT.ta.value.trim() && (!field || document.activeElement === CHAT.ta)) {
+    e.preventDefault()
+    chatSend(CHAT, '/stop')
+  } else if (e.key === '?' && !field && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault()
+    showKeys()
+  }
 })
 
 // --- notifications: replies and questions from agents you're not looking at ----------------------------------------
-// One stream per agent, from now on; what arrives while you're elsewhere marks the agent unread in the sidebar and,
-// if you turned them on, shows a desktop notification (through the service worker, so it works installed too).
+// One stream for all agents, from where you last read each chat; what arrives while you're elsewhere marks the agent
+// unread in the sidebar and, if you turned them on, shows a desktop notification (through the service worker, so it
+// works installed too).
 const NOTES = { unread: {} }
+// How far you've read each agent's chat (seen) and been told about it (told), as offsets in its log, kept in this
+// browser: what came while the page was closed is still unread when it opens again, and is notified only once. ino:
+// which log those offsets are in (the server's name for it), as the VM starts a new one now and then.
+const READ = (() => { try { const r = JSON.parse(localStorage.getItem('cage-read')); if (r && r.seen && r.told) return { ...r, ino: r.ino || {} } } catch (e) {} return { seen: {}, told: {}, ino: {} } })()
+function keepRead () { try { localStorage.setItem('cage-read', JSON.stringify(READ)) } catch (e) {} }
+function onAgent (agent) { return page === 'agent/' + agent || page.startsWith('agent/' + agent + '/') }   // its chat, files, schedule or settings
+function looking (agent) { return onAgent(agent) && document.visibilityState === 'visible' }
+function saw (agent) { // you're looking at it: everything so far is read
+  const o = LIVE.offsets[agent]
+  if (NOTES.unread[agent]) { delete NOTES.unread[agent]; if (STATE) drawNav() }
+  if (o === undefined || o < 0 || (READ.seen[agent] === o && READ.told[agent] >= o)) return
+  READ.seen[agent] = o
+  READ.told[agent] = Math.max(READ.told[agent] ?? -1, o)
+  keepRead()
+}
 let INSTALL = null   // the browser's "install this app" prompt, when it offers one
 function notifyOn () { try { return localStorage.getItem('cage-notify') === 'on' && 'Notification' in window && Notification.permission === 'granted' } catch (e) { return false } }
 // Every agent's chat on one stream (a browser allows only a few connections to a site): the open chat's new lines,
 // and the others' for unread marks and notifications. offsets: how far each log has been seen.
-const LIVE = { es: null, key: '', offsets: {} }
+const LIVE = { es: null, key: '', offsets: {}, ino: {} }
 function liveConnect (force) {
   if (!STATE) return
   const names = agentsOn().map((a) => a.name)
@@ -1695,31 +2484,53 @@ function liveConnect (force) {
   LIVE.es = null
   LIVE.key = key
   if (!names.length) return
-  const from = names.map((a) => a + ':' + (LIVE.offsets[a] ?? -1)).join(',')
+  const at = (a, o, ino) => a + ':' + o + (ino ? ':' + ino : '')   // an offset, and which log it's in when that's known
+  const from = names.map((a) => LIVE.offsets[a] !== undefined ? at(a, LIVE.offsets[a], LIVE.ino[a]) : at(a, READ.seen[a] ?? -1, READ.ino[a])).join(',')
   const es = new EventSource(`/api/chat/stream?from=${encodeURIComponent(from)}&token=${encodeURIComponent(TOKEN)}`)
   LIVE.es = es
   es.onopen = () => { document.body.dataset.live = 'on' }
   es.onmessage = (m) => {
     const d = JSON.parse(m.data)
+    if (d.start) { // where it starts: the end, the first time this browser looks (what came before isn't news)
+      const was = LIVE.offsets[d.a] ?? READ.seen[d.a]
+      LIVE.offsets[d.a] = d.o
+      // Before what this page read: a new log, one the page didn't know the name of (kept from before it was told).
+      // Read on from here, or nothing would be news until the new log is as long as the old one was.
+      if (was === undefined || d.o < was) {
+        READ.seen[d.a] = READ.told[d.a] = d.o
+        if (was !== undefined && CHAT && CHAT.agent === d.a) chatLoad(CHAT, true)
+      }
+      if (d.ino) READ.ino[d.a] = LIVE.ino[d.a] = d.ino
+      keepRead()
+      if (looking(d.a)) saw(d.a)
+      return
+    }
     if (d.reset) { // the VM started a new log (the old one is kept): the open chat is read again, nothing is lost
       LIVE.offsets[d.a] = 0
+      READ.seen[d.a] = READ.told[d.a] = 0   // offsets in the new one
+      if (d.ino) READ.ino[d.a] = LIVE.ino[d.a] = d.ino
+      keepRead()
       if (CHAT && CHAT.agent === d.a) chatLoad(CHAT, true)
       return
     }
     if (!d.e || d.o <= (LIVE.offsets[d.a] ?? -1)) return
     LIVE.offsets[d.a] = d.o
     if (CHAT && CHAT.agent === d.a) chatLive(CHAT, d)
-    heard(d.a, d.e)
+    heard(d.a, d.e, d.o)
+    if (['you', 'buttons', 'action', 'reply', 'typing', 'error'].includes(d.e.t)) activitySoon()   // Home shows it
   }
   es.onerror = () => { document.body.dataset.live = 'off'; es.close(); if (LIVE.es === es) { LIVE.es = null; setTimeout(() => liveConnect(true), 3000) } }
 }
-function heard (agent, e) {
+function heard (agent, e, o) {
   if ((e.session || 'you') !== 'you' || !['reply', 'buttons', 'card', 'file'].includes(e.t)) return
-  if (page === 'agent/' + agent && document.visibilityState === 'visible') return
-  if (page !== 'agent/' + agent) { NOTES.unread[agent] = (NOTES.unread[agent] || 0) + 1; drawNav() }
+  if (looking(agent)) return saw(agent)
+  if (!onAgent(agent)) { NOTES.unread[agent] = (NOTES.unread[agent] || 0) + 1; drawNav() }
+  if (o <= (READ.told[agent] ?? -1)) return   // told already, before the page was opened again
+  READ.told[agent] = o
+  keepRead()
   if (!notifyOn()) return
   const perm = e.t === 'buttons' && (e.buttons || []).flat().some((b) => /^perm:/.test(b.data))
-  const text = perm ? 'wants to go ahead: ' + (e.text || '') : e.t === 'file' ? 'sent you ' + (e.name || 'a file') : (e.text || (e.card && e.card.header && e.card.header.title) || '')
+  const text = perm ? 'wants your OK: ' + approvalLine(approvalOf(e.text)) : e.t === 'file' ? 'sent you ' + (e.name || 'a file') : (e.text || (e.card && e.card.header && e.card.header.title) || '')
   const opts = { body: text.replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180), icon: 'icon-192.png', badge: 'icon-192.png', tag: 'cage-' + agent, data: { url: '/#agent/' + agent }, requireInteraction: perm }
   const title = nameOf(agent)
   const fallback = () => { const n = new Notification(title, opts); n.onclick = () => { window.focus(); go('agent/' + agent); n.close() } }
@@ -1729,7 +2540,7 @@ function heard (agent, e) {
 async function setNotify (on) {
   if (on && 'Notification' in window && Notification.permission !== 'granted') {
     const p = await Notification.requestPermission()
-    if (p !== 'granted') { alert('Your browser blocked notifications for cage. You can allow them in its site settings.'); on = false }
+    if (p !== 'granted') { toast('Your browser blocked notifications for cage. You can allow them in its site settings.'); on = false }
   }
   try { localStorage.setItem('cage-notify', on ? 'on' : 'off') } catch (e) {}
   if (BUSY === 'Desktop notifications') BUSY = ''   // done here and now, not by a job
@@ -1767,7 +2578,8 @@ function drawNav () {
   if (INSTALL && !installed()) ver.append(h('button', { type: 'button', class: 'update', onclick: installApp }, icon('app-window'), 'Install as an app'))
   const todo = agentsOn().filter((a) => ['login', 'stuck'].includes(statusOf(a))).length + S.connectors.filter((c) => c.broken).length + (S.events.unseen ? 1 : 0)
   const unread = Object.values(NOTES.unread).reduce((x, y) => x + y, 0)
-  document.title = todo + unread ? `(${todo + unread}) cage` : 'cage'
+  const waiting = agentsOn().filter(askingOf).length
+  document.title = todo + unread + waiting ? `(${todo + unread + waiting}) cage` : 'cage'
   document.getElementById('crumb').textContent = page.startsWith('agent/') ? nameOf(page.slice(6).split('/')[0]) : ({ home: 'Home', apps: 'Apps', signins: 'Sign-ins & keys', memory: 'Memory', security: 'Security', settings: 'Settings' })[page] || ''
 }
 let ARRIVED = false   // true while a page is drawn on arriving at it (not on a redraw): the time to reload what it shows
@@ -1782,7 +2594,7 @@ function formState (root) {
   return s
 }
 function keepForm (root, s) {
-  root.querySelectorAll('[data-keep]').forEach((el) => { if (s.text[el.dataset.keep]) el.value = s.text[el.dataset.keep] })
+  root.querySelectorAll('[data-keep]').forEach((el) => { if (s.text[el.dataset.keep]) { el.value = s.text[el.dataset.keep]; el.dispatchEvent(new Event('kept')) } })
   root.querySelectorAll('input[type=checkbox][name]:not(:disabled)').forEach((el) => { // (one that was greyed out starts afresh)
     const was = s.ticks[el.name + '/' + el.value]
     if (was !== undefined && was !== el.checked) { el.checked = was; el.dispatchEvent(new Event('change')) }   // its menu's summary follows
@@ -1794,13 +2606,23 @@ function render (force) {
   document.body.classList.remove('is-locked')
   document.body.classList.toggle('unconfigured', !STATE.configured)
   drawNav()
-  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE)
+  // (Home shows what each agent is doing: not "today", which changes with every message and would only take the focus)
+  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE) + (page === 'home' ? JSON.stringify([Object.entries(ACTIVITY).map(([a, x]) => [a, x.pending, x.working, x.last]), ANSWERED, FORGOTTEN]) : '')
   const main = document.getElementById('main')
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields
   if (!force && main.contains(document.activeElement) && typing(document.activeElement) && main.dataset.page === page) return
   const kept = main.dataset.page === page ? formState(main) : null
-  const focused = main.contains(document.activeElement) && document.activeElement.getAttribute('aria-label')   // a switch, say
+  const was = main.contains(document.activeElement) ? document.activeElement : null
+  // what has the focus, to give it back: by its label (a switch, Allow for one agent), a link by where it goes and what
+  // it says (an agent's Chat), or a heading by what it says (Needs you, after an answer there). A link whose words
+  // changed (an agent's row on Home, which says what it's doing) by where it goes and what kind it is, if only one is.
+  const keyOf = (el) => el.getAttribute('aria-label') || (el.tagName === 'A' ? el.getAttribute('href') + '\n' + el.textContent
+    : /^H[2-6]$/.test(el.tagName) ? el.tagName + '\n' + el.textContent : '')
+  const kindOf = (el) => el.tagName === 'A' && !el.hasAttribute('aria-label') ? el.getAttribute('href') + '\n' + el.className : ''
+  const focused = was && keyOf(was)
+  const kind = was && kindOf(was)
+  const onHead = !!was && was.tagName === 'H1'   // the page's heading, where arriving put it
   document.body.classList.toggle('in-setup', page === 'setup')
   const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
     : page.startsWith('agent/') ? () => pageAgent(...page.slice(6).split('/'))
@@ -1811,8 +2633,18 @@ function render (force) {
   main.replaceChildren(fn())
   ARRIVED = false
   if (kept) keepForm(main, kept)
-  if (same && focused) { const el = main.querySelector(`[aria-label="${CSS.escape(focused)}"]`); if (el) el.focus({ preventScroll: true }) }
+  if (same && focused) {
+    const all = [...main.querySelectorAll('[aria-label], a[href], h2, h3')]
+    const like = kind ? all.filter((x) => kindOf(x) === kind) : []
+    const el = all.find((x) => keyOf(x) === focused) || (like.length === 1 ? like[0] : null)
+    if (el) { if (/^H\d$/.test(el.tagName)) el.tabIndex = -1; el.focus({ preventScroll: true }) }
+  }
   if (!same) window.scrollTo(0, 0)
+  // On arriving at a page (not on a redraw), focus goes to its heading: a screen reader says where you are, and Tab
+  // goes on from there. Not from under a side panel or a question that's open. A redraw keeps it there (it draws a new
+  // heading, and the focus would fall back to the top of the page).
+  const h1 = main.querySelector('h1')
+  if (h1 && (same ? onHead : !document.querySelector('dialog[open]'))) { h1.tabIndex = -1; h1.focus({ preventScroll: true }) }
   SEEN = key
 }
 function route () {
@@ -1824,13 +2656,15 @@ function route () {
   }
   const p = raw
   const next = PAGES.includes(p) || /^agent\/[a-z]+(\/(files|schedule|settings))?$/.test(p) ? p : 'home'
-  if (next !== page && unsaved() && !confirm('You haven’t saved what you wrote. Leave this page anyway?')) {
+  if (next !== page && unsaved() && LEAVING !== next) {
     history.replaceState(null, '', location.pathname + '#' + page)   // stay (this doesn't fire another hashchange)
+    confirmSheet('You haven’t saved what you wrote. Leave this page anyway?', 'Leave', 'Stay').then((yes) => { if (yes) { LEAVING = next; go(next) } })
     return
   }
+  LEAVING = ''
   page = next
   UNSAVED = null
-  if (/^agent\/[a-z]+$/.test(page)) delete NOTES.unread[page.slice(6)]
+  if (page.startsWith('agent/')) saw(page.split('/')[1])
   document.body.classList.remove('nav-open')
   if (TOKEN) start(); else locked(LOCKED)
   render()
@@ -1840,6 +2674,7 @@ function route () {
 // token in it (from an older cage) still works, but only a token that works replaces the one kept here: any website
 // could send you to this page with a made-up one.
 let LOCKED = ''   // why this page can't open, when it can't
+let LEAVING = ''  // the page you said you'd leave unsaved text for
 async function signIn (raw) {
   let t = ''
   try {
@@ -1867,7 +2702,11 @@ function start () {
   api('/api/update').then((d) => { LATEST = d.latest || ''; render() }).catch(() => {})
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {})
   setInterval(() => { if (!dlg.open && document.visibilityState === 'visible') refresh() }, 6000)
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !dlg.open) refresh() })
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return
+    if (page.startsWith('agent/')) saw(page.split('/')[1])
+    if (!dlg.open) refresh()
+  })
   window.addEventListener('beforeunload', (e) => { if (unsaved()) { e.preventDefault(); e.returnValue = '' } })
 }
 async function reattach () { // after a reload: a job this page started is still going; it comes back as the pill
@@ -1892,4 +2731,4 @@ window.addEventListener('hashchange', route)
 try { TOKEN = localStorage.getItem('cage-token') || '' } catch (e) {}
 route()
 document.getElementById('jump').addEventListener('click', () => { document.body.classList.remove('nav-open'); openPalette() })
-if (/Mac|iPhone|iPad/.test(navigator.platform)) document.getElementById('jump-key').textContent = '⌘K'
+if (MAC) document.getElementById('jump-key').textContent = '⌘K'

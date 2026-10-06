@@ -1,7 +1,7 @@
 // Plays an agent's VM for the web app's tests: what guest/app.mjs and cc-connect would write to its chat folder.
 //   node test/fixtures/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
-// A message gets a streamed reply; "email" asks before acting; "/usage" answers with a card; files come back; scheduled
-// tasks live in cron.json, and running one answers in the chat.
+// A message gets a streamed reply; "email" or "Tell Bob…" asks before acting; "/usage" answers with a card; files come
+// back; scheduled tasks live in cron.json, and running one answers in the chat.
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -11,16 +11,34 @@ fs.mkdirSync(work, { recursive: true })
 const log = (e) => fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), ...e }) + '\n')
 const out = (id, d) => fs.writeFileSync(path.join(dir, 'out', id + '.json'), JSON.stringify(d))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// cc-connect v1.5.0's own words (1.5.1-beta.3's are the same) when it asks before acting (core/i18n.go,
+// MsgPermissionPrompt), word for word, and its buttons (engine.go, sendPermissionPrompt). An app's tool input comes as
+// one line of JSON, its keys in order (Go's).
+const permission = (tool, input) => `⚠️ **Permission Request**\n\nAgent wants to use **${tool}**:\n\n\`\`\`\n${input}\n\`\`\`\n\n` +
+  'Reply **allow** / **deny** / **allow all** (skip all future prompts this session).'
+const PERM_BUTTONS = [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }], [{ text: 'Allow All (this session)', data: 'perm:allow_all' }]]
+const EMAIL = JSON.stringify({ body: 'Hi Bob,\n\nThe brief is ready. It covers:\n\n1. Scope\n2. Timeline\n3. Budget\n\nTell me if anything is missing.\n\nBest,\nSam',
+  subject: 'The brief is ready', to: 'bob@acme.com' })
+// and its /usage card (engine.go, renderUsageCard; bridge.go, serializeCard): what's left in each window, word for word
+const USAGE = { header: { title: 'Usage', color: 'indigo' }, elements: [
+  { type: 'markdown', content: 'Account: sam@example.com (max)\n\n5h limit\nRemaining: 58%\nResets: 2h 13m\n\n7d limit\nRemaining: 17%\nResets: 3d 4h 0m' },
+  { type: 'actions', buttons: [{ text: 'Back', btn_type: 'default', value: 'nav:/help' }], layout: '' }] }
 log({ t: 'status', connected: true })
 async function handle (r) {
   const session = r.session || 'you'
   if (r.type === 'message') {
     if (session === 'you') log({ t: 'you', session, id: r.id, text: r.text, files: (r.files || []).map((f) => ({ ...f, size: fs.statSync(path.join(dir, f.path)).size })) })
-    if (r.text === '/usage') return log({ t: 'card', session, ctx: r.id, card: { header: { title: 'Usage' }, elements: [{ type: 'markdown', content: '**5-hour limit:** 42% used, resets in 2 h' }, { type: 'note', text: 'Weekly: 17% used' }] } })
+    if (r.text === '/usage') return log({ t: 'card', session, ctx: r.id, card: USAGE })
+    if (r.text === '/stop') { log({ t: 'reply', session, ctx: r.id, text: '⏹ Execution stopped.' }); return log({ t: 'typing', session, on: false }) }
+    if (r.text === '/new') return log({ t: 'reply', session, ctx: r.id, text: '✅ New session created' })
     log({ t: 'typing', session, on: true })
     if (/email/i.test(r.text)) {
       await sleep(300)
-      return log({ t: 'buttons', session, ctx: r.id, text: 'Allow tool execution: mcp__zapier__gmail_send_email(to: bob@acme.com)?', buttons: [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }], [{ text: 'Allow all', data: 'perm:allow_all' }]] })
+      return log({ t: 'buttons', session, ctx: r.id, text: permission('mcp__zapier__gmail_send_email', EMAIL), buttons: PERM_BUTTONS })
+    }
+    if (/^tell bob/i.test(r.text)) { // as Zapier's tools are often asked: in words (its instructions), and to whom
+      await sleep(300)
+      return log({ t: 'buttons', session, ctx: r.id, text: permission('mcp__zapier__gmail_send_email', JSON.stringify({ instructions: r.text, to: 'bob@acme.com' })), buttons: PERM_BUTTONS })
     }
     const handle = 'p-' + r.id
     log({ t: 'preview', session, ctx: r.id, handle, text: 'Working on it' })

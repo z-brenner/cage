@@ -32,19 +32,36 @@ Standard library only.
 The chat with an agent goes through ~/.cage/app/<agent>, a folder its VM shares (guest/app.mjs relays it to
 cc-connect). The VM writes there, so nothing in it is trusted: no links are followed, only regular files are read,
 and only pictures are shown in the page (everything else downloads).
+A line that ends the wait for an approval (an answer to it, /stop, a question from the agent, cc-connect restarted: see
+ends()) comes to the page with "ends": true, in history and stream alike, so its card stops offering answers.
   GET  /api/chat/<a>/history?tail=N     the end of the chat (log.jsonl, after the end of log.1.jsonl when the VM has
                                         just started a new one): {"o": offset in log.jsonl, "entries", "more"}
-  GET  /api/chat/stream?from=a:N,b:M    server-sent events for all your agents' chats at once (a browser allows only a
-                                        few connections per site): {"a", "o", "e"} per new line, {"a", "reset"}
-  POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
+  GET  /api/chat/stream?from=a:N:I,b:M  server-sent events for all your agents' chats at once (a browser allows only a
+                                        few connections per site): {"a", "o", "start", "ino"} where each begins, then
+                                        {"a", "o", "e"} per new line, {"a", "reset", "ino"} when the VM starts a new
+                                        log. I (optional): the log N is in, as "ino" said, to go on from the log before
+  GET  /api/activity?agents=a,b&since=T what each agent is doing, from the end of its chat (for Home): {"agents": {a:
+                                        {"pending": {"text","at"}|null, "stopped" (true: it was waiting for that while
+                                        its VM wasn't running, so it can't be answered: see Stopped), "working",
+                                        "last": {"t","text","at"}|null, "today": {"asked","answers","files"} (from T,
+                                        ms, on)}}}
+  POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}  (409 for one cc-connect
+                                        would read as a second answer to an approval, as for action)
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
-  POST /api/chat/<a>/action             {"action", "label"?}  (a button in the chat)
+  POST /api/chat/<a>/action             {"action", "label"?, "pending"?}  (a button in the chat or on Home. An answer to
+                                        an approval (perm:) comes with the one it answers, {"text", "at"}, as
+                                        /api/activity gave it or as its line in the log says it: 409 if it isn't that one
+                                        now, or says none. 409 too for a second answer to one, until the VM has taken the
+                                        first, and for one to an agent whose VM isn't running, as msb says, or wasn't
+                                        while it waited)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
-  POST /api/chat/<a>/usage              your plan's usage, as cc-connect's /usage answers it
+  POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
+                                        seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
+                                        Asked at most every 10 minutes, or 30 seconds with "fresh"
   GET  /api/chat/<a>/file?p=files/…     a file from the chat (pictures shown, the rest downloaded)
 """
-import base64, fcntl, hashlib, hmac, http.server, json, os, pty, re, secrets, signal, socket, stat, struct, subprocess, sys
-import termios, threading, time, unicodedata, urllib.parse, urllib.request
+import base64, fcntl, hashlib, hmac, http.server, json, math, os, pty, re, secrets, signal, socket, stat, struct, subprocess, sys
+import shutil, termios, threading, time, unicodedata, urllib.parse, urllib.request
 
 CAGE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "..", "cage")
 HOME = os.environ.get("CAGE_HOME") or os.path.expanduser("~/.cage")
@@ -84,6 +101,26 @@ MIME = dict(PICTURES, **{".pdf": "application/pdf", ".txt": "text/plain", ".md":
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 TOO_BIG = "A message was too long to show here"
+
+
+def finite(s):
+    """A number in JSON (that has a point or an exponent), or None for one too big for a float (1e400)."""
+    f = float(s)
+    return f if math.isfinite(f) else None
+
+
+DEEPEST = 100   # how deeply nested a line of a chat log may be (cc-connect's deepest, a card's button, is a few levels)
+
+
+def shallow(v, most=DEEPEST):
+    """Is this dict or list (read from JSON) nested at most `most` deep? Python's json reads about a thousand levels
+    (ten thousand from 3.12), but it can't always write as many back: in an answer, a line is a level or two deeper."""
+    level = [v]
+    for _ in range(most):
+        level = [x for c in level for x in (c.values() if isinstance(c, dict) else c) if isinstance(x, (dict, list))]
+        if not level:
+            return True
+    return False
 
 
 def token():
@@ -338,16 +375,20 @@ class Chat:
     """An agent's chat folder (~/.cage/app/<agent>), opened without following links: its VM writes in there."""
     D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
-    def __init__(self, agent):
+    def __init__(self, agent, create=True):
+        """create=False: only one that's there already (FileNotFoundError if not)."""
         if agent not in AGENTS:
             raise KeyError("no such agent")
         self.agent = agent
-        os.makedirs(APPDIR, mode=0o700, exist_ok=True)
+        if create:
+            os.makedirs(APPDIR, mode=0o700, exist_ok=True)
         top = os.open(APPDIR, self.D)
         try:
             try:
                 self.fd = os.open(agent, self.D, dir_fd=top)
             except FileNotFoundError:
+                if not create:
+                    raise
                 os.mkdir(agent, 0o777, dir_fd=top)
                 self.fd = os.open(agent, self.D, dir_fd=top)
                 os.fchmod(self.fd, 0o777)
@@ -409,6 +450,19 @@ class Chat:
         finally:
             os.close(d)
         return f"{folder}/{name}"
+
+    def waiting(self, rid):
+        """Is that request still in in/, not yet taken by the VM (whose relay isn't running, say)?"""
+        try:
+            d = os.open("in", self.D, dir_fd=self.fd)
+        except OSError:
+            return False
+        try:
+            return stat.S_ISREG(os.stat(f"{rid}.json", dir_fd=d, follow_symlinks=False).st_mode)
+        except OSError:
+            return False
+        finally:
+            os.close(d)
 
     def send(self, req):
         req["id"] = req.get("id") or f"{int(time.time() * 1000):013d}-{os.urandom(3).hex()}"
@@ -473,11 +527,11 @@ class Chat:
         out, pos = [], start
         for line in data[:end + 1].split(b"\n")[:-1]:
             pos += len(line) + 1
-            try:
-                e = json.loads(line)
-            except ValueError:
+            try:   # (NaN, Infinity and 1e400 are no number in JSON.parse, which would read none of the page's answer)
+                e = json.loads(line, parse_constant=lambda c: None, parse_float=finite)
+            except (ValueError, RecursionError):   # (nested deeper than Python reads: skipped, as a line that isn't JSON)
                 continue
-            if isinstance(e, dict):
+            if isinstance(e, dict) and shallow(e):   # (and one it only just reads, which it may not write back out)
                 out.append((pos, e))
         return out, pos
 
@@ -494,39 +548,450 @@ class Chat:
         return start + i if i >= 0 else start
 
 
+TAIL = 512 << 10   # how much of the end of a chat log Home reads
+WORKING = 15 * 60   # "working…" for longer than this without a word is stale (it was stopped, or its VM restarted)
+# How cc-connect (v1.5.0 and 1.5.1-beta.3, core/engine.go) reads what you send while it waits for your OK. A message
+# that starts with "/" (and has no picture) is one of its own commands when it names one: by one of its names, in any
+# case, or by the start of just one command's names ("/sto" is /stop, "/ch" is /dir, as "chdir"). Those that end the
+# turn end the wait (/stop, /new, /cancel), and so do those that start the agent's session afresh
+# (cleanupInteractiveState) when they're told what to switch to: /switch, /model, /reasoning, /mode, /dir and
+# /provider (without, they show what there is); and /restart and /upgrade confirm, which restart cc-connect. Its other
+# commands leave the wait as it is. Any other message is the answer when it has one of these words in it (allow, deny
+# or allow all, in English or Chinese), a "/" one that names none of its commands too ("/x yes": cc-connect says it
+# isn't one of its commands, and reads it as a message). Anything else gets "Waiting for permission response", and
+# the approval still waits.
+# A card's buttons (core/bridge.go): perm: is an answer; cmd: is the message after it, and askq: the message as it is;
+# act: does what the card does (executeCardAction: /new and /stop end the wait, and /model, /reasoning, /mode,
+# /provider, /switch and /dir start afresh when told what to switch to); nav: only shows another card.
+# Where cc-connect may or may not end it (/mode with the mode it's in, a /model it doesn't have), it counts as ended:
+# the card then says it isn't waiting any more, and an answer typed in the chat still goes. A restart of cc-connect
+# ends the wait too, as it keeps what it waits for only in memory: the relay registering with it again (a "status"
+# line), unless it says it's the same cc-connect as before.
+ANSWER_WORDS = {"allow", "yes", "y", "ok", "approve", "deny", "no", "n", "reject", "cancel", "allowall", "允许", "同意",
+                "可以", "好", "好的", "是", "确认", "拒绝", "不允许", "不行", "不", "否", "取消", "允许所有", "允许全部",
+                "全部允许", "所有允许", "都允许", "全部同意"}
+ANSWER_SPLIT = re.compile(r"[\s@＠,，.。!！?？:：;；()（）\[\]【】\"'“”‘’、·]+")
+# cc-connect's own commands, each with all its names (builtinCommands)
+CC_COMMANDS = {cmd: names.split() for cmd, names in {
+    "new": "new", "list": "list sessions", "switch": "switch", "name": "name rename", "current": "current",
+    "status": "status", "usage": "usage quota", "history": "history", "allow": "allow", "model": "model",
+    "reasoning": "reasoning effort", "mode": "mode", "lang": "lang", "quiet": "quiet", "provider": "provider",
+    "memory": "memory", "cron": "cron", "timer": "timer at remind", "heartbeat": "heartbeat hb",
+    "compress": "compress compact", "stop": "stop", "cancel": "cancel", "help": "help", "version": "version",
+    "commands": "commands command cmd", "skills": "skills skill", "config": "config", "doctor": "doctor",
+    "upgrade": "upgrade update", "restart": "restart", "alias": "alias", "delete": "delete del rm", "bind": "bind",
+    "search": "search find", "shell": "shell sh exec run", "show": "show", "dir": "dir cd chdir workdir", "tts": "tts",
+    "workspace": "workspace ws", "whoami": "whoami myid", "web": "web", "diff": "diff", "ps": "ps btw"}.items()}
+ENDS_TURN = ("new", "stop", "cancel", "restart")
+STARTS_AFRESH = ("switch", "model", "reasoning", "mode", "dir", "provider", "upgrade")   # (when told what to switch to)
+CARD_ENDS = ("/new", "/stop")
+CARD_STARTS_AFRESH = ("/model", "/reasoning", "/mode", "/provider", "/switch", "/dir")
+
+
+def picture(files):
+    """Is one of these files (sent with a message) a picture? cc-connect then gives the agent the message, command or not."""
+    return any(isinstance(f, dict) and re.fullmatch(r"image/(png|jpeg|gif|webp)", str(f.get("mime"))) for f in files)
+
+
+def words_of(text):
+    """A command's words, as cc-connect splits them (splitCommandArgs): at spaces and tabs, but not inside quotes,
+    which it takes off."""
+    out, word, single, double = [], "", False, False
+    for ch in text:
+        if ch == "'" and not double:
+            single = not single
+        elif ch == '"' and not single:
+            double = not double
+        elif ch in " \t" and not single and not double:
+            if word:
+                out.append(word)
+            word = ""
+        else:
+            word += ch
+    return out + [word] if word else out
+
+
+def one_of(word, names):
+    """The one of these a word names, as cc-connect reads what follows a command (matchSubCommand): itself, or the start
+    of just one; else the word as it is."""
+    if word in names:
+        return word
+    starting = [n for n in names if n.startswith(word)]
+    return starting[0] if len(starting) == 1 else word
+
+
+def command(text):
+    """The command of cc-connect's own a message is, as handleCommand reads it: [the command, the words after it]; or
+    None for one that names none of them (cc-connect then runs a command or skill of yours of that name, if there is
+    one, or else reads it as a message). (In lower case as Go makes it: "İ" is "i".)"""
+    text = text.strip()
+    if not text.startswith("/"):
+        return None
+    words = words_of(text)
+    name = words[0][1:].replace("İ", "i").lower()
+    for cmd, names in CC_COMMANDS.items():
+        if name in names:
+            return [cmd, words[1:]]
+    starting = {cmd for cmd, names in CC_COMMANDS.items() if any(n.startswith(name) for n in names)}
+    return [starting.pop(), words[1:]] if len(starting) == 1 else None
+
+
+def ends_by(cmd, told):
+    """Does cc-connect's command `cmd`, told `told` (the words after it), end the wait for an approval?"""
+    if cmd in ENDS_TURN:
+        return True
+    if cmd not in STARTS_AFRESH or not told:
+        return False
+    if cmd == "dir":   # (but for its help)
+        return told not in (["help"], ["-h"], ["--help"])
+    if cmd == "provider":   # (but for what only shows, adds or removes one)
+        sub = one_of(told[0].lower(), ["list", "add", "remove", "switch", "current", "clear", "reset", "none"])
+        return sub not in ("list", "add", "remove", "rm", "delete", "current") and (sub != "switch" or len(told) > 1)
+    if cmd == "upgrade":   # (but for looking for one)
+        return one_of(told[0], ["confirm", "check"]) == "confirm"
+    return True
+
+
+def message_ends(text, files=()):
+    """Does a message (typed, or a card's cmd: or askq: button) end the wait for an approval: a command of cc-connect's
+    that ends it, or anything else with one of the answer words in it?"""
+    cmd = None if picture(files) else command(text)
+    if cmd:
+        return ends_by(*cmd)
+    return any(w in ANSWER_WORDS for w in ANSWER_SPLIT.split(text.strip().lower()))
+
+
+def answers(e):
+    """Does this line of the chat log answer an approval cc-connect waits for (or end the turn it waits in)?"""
+    t = e.get("t")
+    said = e.get("text") if t == "you" else e.get("action") if t == "action" else None
+    if not isinstance(said, str):
+        return False
+    if t == "you":
+        return message_ends(said, e.get("files") if isinstance(e.get("files"), list) else [])
+    kind, _, rest = said.partition(":")
+    if kind == "perm":
+        return True
+    if kind == "cmd":
+        return message_ends(rest)
+    if kind == "askq":
+        return message_ends(said)
+    if kind == "act":   # (the card's command, and what it's told after its first space)
+        cmd, _, told = rest.partition(" ")
+        return cmd in CARD_ENDS or (cmd in CARD_STARTS_AFRESH and bool(told.strip()))
+    return False
+
+
+QUESTION_TITLES = ("Agent Question", "Agent 提问", "Agent 提問", "エージェントの質問", "Pregunta del agente")   # (its languages)
+
+
+def values_of(e):
+    """What the buttons of a "buttons" or "card" line send, as the page reads them."""
+    if e.get("t") == "buttons":
+        rows = e.get("buttons") if isinstance(e.get("buttons"), list) else []
+        found = [b.get("data") for row in rows if isinstance(row, list) for b in row if isinstance(b, dict)]
+    else:
+        card = e.get("card") if isinstance(e.get("card"), dict) else {}
+        found = []
+        for el in card.get("elements") if isinstance(card.get("elements"), list) else []:
+            if isinstance(el, dict):
+                found.append(el.get("btn_value"))
+                for key in ("buttons", "options"):
+                    found += [b.get("value") for b in (el.get(key) if isinstance(el.get(key), list) else []) if isinstance(b, dict)]
+    return [v for v in found if isinstance(v, str)]
+
+
+def asks_question(e):
+    """Is this line the agent asking you a question (AskUserQuestion): cc-connect's card with askq: buttons, or for one
+    you may pick several answers to, its title ("Agent Question (1/2)")? cc-connect asks one thing at a time, and asks
+    the next only once it has the answer to the one before; so an approval asked before it isn't waited for any more.
+    (An Allow now would be the question's answer: "allow".)"""
+    if e.get("t") not in ("buttons", "card"):
+        return False
+    if any(v.startswith("askq:") for v in values_of(e)):
+        return True
+    card = e.get("card") if isinstance(e.get("card"), dict) else {}
+    header = card.get("header") if isinstance(card.get("header"), dict) else {}
+    title = header.get("title")
+    return isinstance(title, str) and re.sub(r" \(\d+/\d+\)$", "", title) in QUESTION_TITLES
+
+
+def ends(e):
+    """Does this line of the chat log end the wait for whatever approval waits: an answer (see answers()), the agent
+    asking a question (see asks_question()), or cc-connect starting afresh (the relay registers with it again: it keeps
+    what it waits for only in memory)? Not when the relay says it's the same cc-connect as before ("same": the
+    connection dropped, or only the relay restarted)."""
+    return answers(e) or asks_question(e) or (e.get("t") == "status" and e.get("connected") is True and e.get("same") is not True)
+
+
+def marked(e):
+    """A line of the chat log as the page gets it: with "ends": true when it ends the wait for an approval, so a card
+    in the chat stops offering answers to what nobody waits for any more (as this server reads it: the page doesn't
+    read cc-connect's words again). Whatever "ends" the VM wrote is replaced."""
+    e.pop("ends", None)
+    if ends(e):
+        e["ends"] = True
+    return e
+
+
+def moment(at):
+    """A time from the log, in ms: not Infinity or NaN, which json reads but a browser doesn't (so one agent's log could
+    keep Home from showing any agent's approvals), nor anything else that isn't a time; else 0."""
+    return at if isinstance(at, (int, float)) and not isinstance(at, bool) and 0 <= at < 1e15 else 0
+
+
+def approval(text, at):
+    """An approval as Home has it, and as an answer says which one it answers: the start of what it asks (its first
+    4,000 characters, as Python counts them: one this long, Home reads as cut) and when it asked."""
+    return {"text": str(text or "")[:4000], "at": moment(at)}
+
+
+def same(sent, now):
+    """Is the approval an answer came with (Home's, as /api/activity gave it, or a card's, as its log line says it) the
+    one that waits now (activity()'s)? Both are read the same way (approval()). The page holds text as UTF-16, and
+    joins two halves of a character that Python, reading a log with them apart, keeps as two: so they're compared as
+    UTF-16 too, where those are the same."""
+    if not (isinstance(sent, dict) and set(sent) == {"text", "at"} and now):
+        return False
+    sent = approval(sent["text"], sent["at"])
+    utf16 = lambda s: s.encode("utf-16-le", "surrogatepass")   # noqa: E731
+    return sent["at"] == now["at"] and utf16(sent["text"]) == utf16(now["text"])
+
+
+def activity(c, since):
+    """What an agent is doing, from the end of its chat log (read like the chat: no links followed): an approval
+    waiting for you (cc-connect's "perm:" buttons, until something ends the wait, see ends()),
+    since when it's been working (typing on, until it answers), what it said last, and how many questions, answers
+    and files there were from `since` on (ms: the page's midnight). The log is the VM's, so every value is checked.
+    A log shorter than that end is read after the end of the one before it (the VM starts a new one at 8 MB), as the
+    chat shows them: an approval asked just before still waits."""
+    size, _ = c.size()
+    start = c.line_start(size - TAIL) if size > TAIL else 0
+    entries, _ = c.read_log(start, TAIL + (1 << 20))
+    if size < TAIL:
+        osize, ino = c.size("log.1.jsonl")
+        ostart = max(0, osize - (TAIL - size))
+        if ostart:
+            ostart = c.line_start(ostart, "log.1.jsonl")
+        entries = (c.read_log(ostart, TAIL + (1 << 20), "log.1.jsonl", ino)[0] if osize else []) + entries
+    pending, typing, last, today = None, None, None, {"asked": 0, "answers": 0, "files": 0}
+    for _, e in entries:
+        if (e.get("session") or "you") != "you":
+            continue
+        t, at = e.get("t"), moment(e.get("at"))
+        rows = e.get("buttons") if isinstance(e.get("buttons"), list) else []
+        if t == "buttons" and any(isinstance(b, dict) and str(b.get("data", "")).startswith("perm:")
+                                  for row in rows if isinstance(row, list) for b in row):
+            pending = approval(e.get("text"), at)
+        elif ends(e):
+            pending = None
+        if t == "typing":
+            typing = at if e.get("on") is True else None
+        elif t in ("reply", "error", "buttons"):   # as the chat shows it: an answer, an error or a question ends "working…"
+            typing = None
+        if t in ("reply", "file", "card"):
+            card = e.get("card") if isinstance(e.get("card"), dict) else {}
+            header = card.get("header") if isinstance(card.get("header"), dict) else {}
+            text = e.get("text") if t == "reply" else e.get("name") if t == "file" else header.get("title")
+            last = {"t": t, "text": str(text or "")[:160], "at": at}
+        if at >= since:
+            key = {"you": "asked", "reply": "answers", "file": "files"}.get(t)
+            if key:
+                today[key] += 1
+    return {"pending": pending, "typing": typing, "last": last, "today": today}
+
+
+class Answered:
+    """The approval each agent was last sent an answer for, as its log showed it waiting then. cc-connect's buttons say
+    allow or deny, not to what: an answer goes to whatever waits when it gets there. Until the VM has taken one (and
+    its log says so), the approval still seems to wait, and a second answer to it (another window's, or a card's in
+    the chat after Home's) would answer what the agent asks next, which nobody has seen. So that one is refused. An
+    agent's answers go one at a time: two can't both find the approval still waiting."""
+    lock, locks, last = threading.Lock(), {}, {}
+
+    @classmethod
+    def of(cls, agent):
+        with cls.lock:
+            return cls.locks.setdefault(agent, threading.Lock())
+
+    @classmethod
+    def sent(cls, agent, pending):
+        if pending is not None:
+            cls.last[agent] = pending
+
+
+def find_msb():
+    """msb, found where cage finds it (find_msb): $CAGE_MSB, on PATH, or where microsandbox's installer puts it (not on
+    PATH in a session started at login); None if it's nowhere."""
+    if os.environ.get("CAGE_MSB"):
+        return os.environ["CAGE_MSB"]
+    home = os.path.expanduser("~")
+    for m in (shutil.which("msb"), os.path.join(home, ".local", "bin", "msb"),
+              os.path.join(os.environ.get("MSB_HOME") or os.path.join(home, ".microsandbox"), "bin", "msb")):
+        if m and os.path.isfile(m) and os.access(m, os.X_OK):
+            return m
+    return None
+
+
+STOPPED = "It stopped while waiting for your OK, so it won’t go ahead."
+
+
+def vm_running(agent):
+    """Is the agent's VM running? As msb says, asked as cage asks it (refresh_running), which is what makes cage call an
+    agent asleep: True or False, or None when msb can't say (it isn't there, fails, or takes more than a few seconds).
+    One quick look on this computer, nothing asked of the VM (as `cage _state` asks each one), for an answer to an
+    approval only: cc-connect keeps what it asked only in memory, so a VM that isn't running has forgotten it, and
+    cc-connect, started afresh when it wakes, drops an answer to it without a word."""
+    m = find_msb()
+    if not m:
+        return None
+    try:
+        r = subprocess.run([m, "ps", "-q", "--label", "app=cage"], stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return f"cage-{agent}" in r.stdout.decode("utf-8", "replace").split() if r.returncode == 0 else None
+
+
+class Stopped:
+    """The approval each agent was last seen waiting for while its VM wasn't running (asleep, say), as its log had it.
+    cc-connect forgot it when the VM stopped (see vm_running()), and the one that starts when the VM wakes drops an
+    answer to it without a word. Its log has it waiting until the relay registers with that new cc-connect (its status
+    line: see ends()), which comes a while after the agent is up again; so it's kept here, and an answer to it is
+    refused then too, and /api/activity says it can't be answered ("stopped"), so the page offers none. Seen when an
+    answer finds the VM not running, and when `cage _state` calls the agent asleep (which msb says too, see State):
+    then only if its log is as it was before cage looked, so it was asked before msb said that (the agent may have
+    woken since, and asked something new)."""
+    last, looked = {}, {}
+
+    @classmethod
+    def saw(cls, agent, pending):
+        if pending is not None:
+            cls.last[agent] = pending
+
+    @classmethod
+    def logs(cls):
+        """Each agent's chat log as it is now (its size and inode), to tell afterwards which ones changed."""
+        out = {}
+        for a in AGENTS:
+            try:
+                with Chat(a, create=False) as c:
+                    out[a] = c.size()
+            except OSError:   # no chat yet, or not a folder (a link a VM left)
+                pass
+        return out
+
+    @classmethod
+    def asleep(cls, state, before):
+        """After `cage _state`: what each agent it calls asleep was waiting for, if its log is as it was before (logs())."""
+        for a in state.get("agents") if isinstance(state.get("agents"), list) else []:
+            name = a.get("name") if isinstance(a, dict) and a.get("state") == "asleep" else None
+            if not isinstance(name, str) or name not in before or cls.looked.get(name) == before[name]:
+                continue   # (that log, as it was, has been looked at already: a VM that isn't running writes nothing)
+            try:
+                with Chat(name, create=False) as c:
+                    if c.size() != before[name]:
+                        continue
+                    pending = activity(c, 0)["pending"]
+            except OSError:
+                continue
+            cls.looked[name] = before[name]
+            cls.saw(name, pending)
+
+
+def ask_usage(c, timeout=25):
+    """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show), and waits
+    a while for the answer: {"rid": the question's id, "pos": how far its log has been read for the answer, "entry": the
+    card, reply or error cc-connect answered with, or None}."""
+    pos, _ = c.size()
+    q = {"rid": c.send({"type": "message", "session": "usage", "text": "/usage"}), "pos": pos, "entry": None}
+    end = time.time() + timeout
+    while not usage_answer(c, q) and time.time() < end:
+        time.sleep(0.4)
+    return q
+
+
+def usage_answer(c, q):
+    """The answer to that question, if it's in the log by now (read on from where the last look stopped), or None."""
+    entries, q["pos"] = c.read_log(q["pos"])
+    for _, e in entries:
+        if e.get("session") == "usage" and e.get("ctx") == q["rid"] and e.get("t") in ("reply", "card", "error"):
+            q["entry"] = e
+            break
+    return q["entry"]
+
+
+class Usage:
+    """Each agent's plan usage, as its /usage card says it ("5h limit\nRemaining: 58%\nResets: 2h 13m"). Home shows it,
+    and pages look again every minute, but an agent is asked at most every 10 minutes ("Check again": 30 seconds).
+    Asking costs no quota, but it's a request to the AI company each time. An answer that didn't come in time (the
+    agent was still waking up, say) is looked for in the log at each look instead, which costs nothing; and while the
+    agent hasn't even taken a question (its relay is down), no second one piles up behind it. The last good answer
+    (a card) is kept with when it was asked, for when a later one is an error."""
+    EVERY, SOONEST = 600, 30
+    lock, asking, last, good = threading.Lock(), {}, {}, {}
+    ask, look = staticmethod(ask_usage), staticmethod(usage_answer)
+
+    @classmethod
+    def get(cls, c, fresh=False):
+        with cls.lock:
+            one = cls.asking.setdefault(c.agent, threading.Lock())
+        with one:   # one question at a time per agent: another page waits for its answer instead of asking again
+            last = cls.last.get(c.agent)
+            if last and not last["entry"]:
+                cls.look(c, last)
+            due = not last or time.time() - last["asked"] >= (cls.SOONEST if fresh else cls.EVERY)
+            if due and not (last and not last["entry"] and c.waiting(last["rid"])):
+                asked = time.time()
+                last = cls.last[c.agent] = dict(cls.ask(c), asked=asked)
+            if last["entry"] and last["entry"].get("t") == "card":
+                cls.good[c.agent] = last
+            good = cls.good.get(c.agent)
+        if good and good is not last:   # this one didn't say (its service is down, say): the last good answer, marked
+            return dict(good["entry"], asked=good["asked"], stale=True)
+        return dict(last["entry"], asked=last["asked"]) if last["entry"] else None
+
+
 class State:
     lock, at, body, ok = threading.Lock(), 0.0, b"{}", False
+    began, changed = 0.0, 0.0   # when the look the last answer is from began; when what it shows last changed (stale())
     TIMEOUT = 20   # seconds `cage _state` may take
 
     @classmethod
     def get(cls):
         """`cage _state`, at most every 2 seconds. While it runs, others get the last answer; if it hangs, they get
-        that too, marked stale (and with no answer at all yet, an error)."""
-        if not cls.lock.acquire(blocking=not cls.ok):
+        that too, marked stale (and with no answer at all yet, an error). But not an answer from a look that began
+        before something changed (stale(): a job started or ended, an answer found a VM stopped), which may say what
+        was true before (an agent up that has just stopped): they wait for a look that began after it. An agent it
+        calls asleep has forgotten the approval it was waiting for (Stopped)."""
+        if not cls.lock.acquire(blocking=not cls.ok or cls.began <= cls.changed):
             return cls.body
         try:
-            if time.time() - cls.at > 2:
+            if time.time() - cls.at > 2 or cls.began <= cls.changed:
+                began = time.monotonic()
                 env = dict(os.environ)
                 env.pop("CAGE_PROTO", None)
+                logs = Stopped.logs()
                 try:
                     out = subprocess.run([CAGE, "_state"], capture_output=True, env=env, timeout=cls.TIMEOUT).stdout
                     d = json.loads(out)
                     if isinstance(d, dict):
                         cls.body, cls.ok = out, True
+                        Stopped.asleep(d, logs)
                 except subprocess.TimeoutExpired:
                     if not cls.ok:
                         raise Refused(504, "cage is taking too long to answer")
                     cls.body = json.dumps(dict(json.loads(cls.body), stale=True)).encode()
+                    began = time.monotonic()   # (that's all there is to say now, marked as old: the next one waits no more)
                 except ValueError:
                     pass
-                cls.at = time.time()
+                cls.at, cls.began = time.time(), began
             return cls.body
         finally:
             cls.lock.release()
 
     @classmethod
     def stale(cls):
-        cls.at = 0.0
+        cls.changed = time.monotonic()
 
     @classmethod
     def backups(cls):
@@ -791,6 +1256,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, {"ok": True})
         if parts == ["chat", "stream"] and method == "GET":
             return self.multi(query)
+        if parts == ["activity"] and method == "GET":
+            since = query.get("since", ["0"])[0]
+            since, now, out = int(since) if since.isdigit() else 0, time.time() * 1000, {}
+            for a in query.get("agents", [""])[0].split(","):
+                if a not in AGENTS or a in out:
+                    continue
+                try:
+                    with Chat(a, create=False) as c:   # no chat yet: nothing to say (and no folder made for it)
+                        act = activity(c, since)
+                except OSError:   # none, or not a folder (a link a VM left): nothing the app reads
+                    continue
+                typing = act.pop("typing")
+                act["working"] = bool(typing) and not act["pending"] and now - typing < WORKING * 1000
+                act["stopped"] = act["pending"] is not None and Stopped.last.get(a) == act["pending"]
+                out[a] = act
+            return self.send(200, {"agents": out})
         if len(parts) == 3 and parts[0] == "chat":
             return self.chat(method, parts[1], parts[2], query)
         if parts == ["check"] and method == "GET":
@@ -891,7 +1372,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ostart = c.line_start(ostart, "log.1.jsonl")
                     older, _ = c.read_log(ostart, 8 << 20, "log.1.jsonl", ino) if osize else ([], 0)
                     more = ostart > 0
-                return self.send(200, {"o": end, "entries": [e for _, e in older + entries], "more": more})
+                return self.send(200, {"o": end, "entries": [marked(e) for _, e in older + entries], "more": more})
             if what == "file" and method == "GET":
                 return self.file(c, query.get("p", [""])[0], query.get("dl", [""])[0] == "1")
             if method != "POST":
@@ -902,6 +1383,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rel = c.write_new("files", f"{int(time.time() * 1000)}-{os.urandom(2).hex()}-{name}", data)
                 mime = MIME.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
                 return self.send(200, {"path": rel, "name": name, "size": len(data), "mime": mime})
+            if self.headers.get_content_type() != "application/json":   # as the page sends it: a form elsewhere can't
+                raise Refused(415, "send that as JSON")
             b = self.body()
             session = str(b.get("session") or "you")
             if not re.fullmatch(r"[a-z0-9-]{1,32}", session):
@@ -919,10 +1402,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     files.append({"path": p, "name": safe_name(f.get("name") or p.split("/")[-1]), "mime": str(f.get("mime") or "")[:100]})
                 if not text.strip() and not files:
                     raise ValueError("nothing to send")
-                return self.send(200, {"id": c.send({"type": "message", "session": session, "text": text, "files": files})})
+                with Answered.of(c.agent):   # (an answer typed in the chat: see Answered)
+                    typed = session == "you" and answers({"t": "you", "text": text, "files": files})
+                    waits = activity(c, 0)["pending"] if typed else None
+                    # (as from the chat's card: but for a command of cc-connect's own, which still goes; "/x yes" is an answer)
+                    if waits is not None and Answered.last.get(c.agent) == waits and (picture(files) or not command(text)):
+                        raise Refused(409, "You answered that already. Send this again once the chat shows your answer.")
+                    rid = c.send({"type": "message", "session": session, "text": text, "files": files})
+                    Answered.sent(c.agent, waits)   # (once it's sent: one that couldn't be isn't an answer)
+                return self.send(200, {"id": rid})
             if what == "action":
-                return self.send(200, {"id": c.send({"type": "action", "session": session, "action": str(b.get("action", ""))[:512],
-                                                     "label": str(b.get("label", ""))[:200]})})
+                action = str(b.get("action", ""))[:512]
+                said = {"t": "action", "action": action}
+                # An answer to an approval (a perm: button, on Home or on its card in the chat) comes with the approval
+                # it answers, and goes only while that's still the one the agent waits for (in the chat). Answered
+                # since (by a message, from another window), ended (/stop, /new, cc-connect restarted) or asked anew,
+                # it may be asking something else, which an Allow meant for that one would say yes to. One that doesn't
+                # say which it answers can't be told apart from those. And nowhere a second answer to one (Answered).
+                # Nor while its VM isn't running (asleep, say), though its log still has it waiting: cc-connect forgot
+                # it when it stopped (see vm_running()). Nor once it's running again, for one it was waiting for then
+                # (Stopped): the new cc-connect never asked it. The page offers no answer then, but it may not know yet.
+                asks = "pending" in b or action.startswith("perm:")
+                with Answered.of(c.agent):
+                    now = activity(c, 0)["pending"] if session == "you" and (asks or answers(said)) else None
+                    again = now is not None and Answered.last.get(c.agent) == now
+                    if asks and not same(b.get("pending"), now):
+                        error = "It isn’t waiting for that any more. Open its chat to see what it’s doing."
+                    elif again and asks:
+                        error = "You answered that already."
+                    elif asks and Stopped.last.get(c.agent) == now:
+                        error = STOPPED
+                    elif asks and vm_running(c.agent) is False:   # (asked after the approval was read: see Stopped)
+                        Stopped.saw(c.agent, now)
+                        State.stale()   # (cage's state, which the page looks at next, may still say it's up)
+                        error = STOPPED
+                    else:
+                        error = None
+                        rid = c.send({"type": "action", "session": session, "action": action, "label": str(b.get("label", ""))[:200]})
+                        if answers(said):   # (once it's sent: one that couldn't be isn't an answer)
+                            Answered.sent(c.agent, now)
+                return self.send(409, {"error": error}) if error else self.send(200, {"id": rid})
             if what == "request":
                 kind = b.get("type")
                 req = {"type": kind}
@@ -940,20 +1459,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ans = c.answer(c.send(req))
                 return self.send(200, ans) if ans is not None else self.send(504, {"error": "the agent didn't answer; is it awake?"})
             if what == "usage":
-                start, _ = c.size()
-                rid = c.send({"type": "message", "session": "usage", "text": "/usage"})
-                end = time.time() + 25
-                while time.time() < end:
-                    entries, _ = c.read_log(start)
-                    for _, e in entries:
-                        if e.get("session") == "usage" and e.get("ctx") == rid and e.get("t") in ("reply", "card", "error"):
-                            return self.send(200, e)
-                    time.sleep(0.4)
-                return self.send(504, {"error": "the agent didn't answer; is it awake?"})
+                # (no answer is an answer too: Home asks every minute, and a page shows each failed request as an error)
+                return self.send(200, Usage.get(c, b.get("fresh") is True) or {"error": "It didn’t answer. Is it awake?"})
         return self.send(404, {"error": "no such endpoint"})
 
     def events_head(self):
-        self.head(200, [("Content-Type", "text/event-stream"), ("Cache-Control", "no-store"), ("X-Accel-Buffering", "no")])
+        self.head(200, [("Content-Type", "text/event-stream"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                        ("Referrer-Policy", "no-referrer"), ("X-Accel-Buffering", "no")])   # (as send() answers)
         self.close_connection = True
 
     def multi(self, query):
@@ -961,13 +1473,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         chats, pos, ino, seen = {}, {}, {}, {}
         try:
             for item in query.get("from", [""])[0].split(","):
-                a, _, o = item.partition(":")
+                a, _, rest = item.partition(":")
+                o, _, was = rest.partition(":")
                 if a in AGENTS and a not in chats:
                     chats[a] = Chat(a)
                     size, ino[a] = chats[a].size()
                     pos[a] = int(o) if o.isdigit() and int(o) <= size else size
+                    if o.isdigit() and was.isdigit() and int(was) != ino[a]:
+                        # Read up to there in a log the VM has replaced since (the page was closed, say): the rest
+                        # of that one, if it's still the one before (log.1.jsonl), then this one from its start, as
+                        # when it's replaced while the page looks (below). Its offsets mean nothing in this one.
+                        ino[a], pos[a] = int(was), int(o)
             self.events_head()
             self.wfile.write(b": hello\n\n")
+            for a in chats:   # where each one starts (the end, unless the page asked for more): what it has seen so far
+                self.wfile.write(b"data: " + json.dumps({"a": a, "o": pos[a], "start": True, "ino": str(ino[a])}).encode() + b"\n\n")
             self.wfile.flush()
             quiet = 0.0
             while True:
@@ -980,14 +1500,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if now != ino[a] or size < pos[a]:   # the VM started a new log: the rest of the old one first
                         if now != ino[a]:
                             old, _ = c.read_log(pos[a], name="log.1.jsonl", ino=ino[a])
-                            out = [{"a": a, "o": o, "e": e} for o, e in old]
-                        out.append({"a": a, "reset": True, "o": 0})
+                            out = [{"a": a, "o": o, "e": marked(e)} for o, e in old]
+                        out.append({"a": a, "reset": True, "o": 0, "ino": str(now)})   # (as a string: it may not fit a JS number)
                         ino[a], pos[a] = now, 0
                     was = pos[a]
                     entries, pos[a] = c.read_log(pos[a])
                     # read again only once it changes, unless the window held only part of what's there
                     seen[a] = (size, now) if pos[a] in (was, size) else None
-                    for msg in out + [{"a": a, "o": o, "e": e} for o, e in entries]:
+                    for msg in out + [{"a": a, "o": o, "e": marked(e)} for o, e in entries]:
                         self.wfile.write(b"data: " + json.dumps(msg).encode() + b"\n\n")
                         sent = True
                 if sent:

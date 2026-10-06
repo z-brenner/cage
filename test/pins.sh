@@ -104,6 +104,26 @@ problems="$(grep -v '^counts ' <<<"$problems" || true)"
 read -r uses checkouts downloads <<<"$counts"
 [ "$uses" -gt 0 ] && [ "$checkouts" -gt 0 ] && [ "$downloads" -gt 0 ] || fail "found no actions, checkouts or downloads in .github/workflows; update test/pins.sh"
 ok "the workflows: $uses actions pinned to commits, $checkouts checkouts that keep no token, $downloads downloads checked"
+# CI runs every suite test/all.sh has: one that a step leaves out (--skip) runs in another step, as test/all.sh <suite>
+# or test/<suite>.sh. (A suite moved to a job of its own, as the web app's was, mustn't be dropped on the way.)
+suites="$(sed -n 's/^SUITES="\(.*\)"$/\1/p' test/all.sh)"
+[ -n "$suites" ] || fail "can't find test/all.sh's SUITES; update test/pins.sh"
+ran=" "
+while IFS= read -r line; do
+  set -- ${line#*test/all.sh}
+  if [ "${1:-}" = --skip ]; then
+    shift
+    for s in $suites; do case " $* " in *" $s "*) ;; *) ran="$ran$s " ;; esac; done
+  elif [ $# -eq 0 ]; then ran="$ran$suites "
+  else ran="$ran$* "; fi
+done < <(grep -E '^[[:space:]]*(- )?run:.*test/all\.sh' .github/workflows/ci.yml | sed 's/[[:space:]]*#.*$//')
+for s in $(grep -v '^[[:space:]]*#' .github/workflows/ci.yml | grep -oE 'test/[a-z-]+\.sh' | sed 's|test/||; s|\.sh$||'); do
+  case " $suites " in *" $s "*) ran="$ran$s " ;; esac
+done
+missing=""
+for s in $suites; do case "$ran" in *" $s "*) ;; *) missing="$missing $s" ;; esac; done
+[ -z "$missing" ] || fail "CI runs test/all.sh without these suites, and nothing else runs them:$missing (.github/workflows/ci.yml)"
+ok "CI runs every suite of test/all.sh: $(echo $suites)"
 # Dependabot proposes new versions of those actions, but only once they're a week old (a compromised release, like
 # tj-actions/changed-files in 2025, was found and pulled within days)
 days="$(sed -nE 's/^ +default-days: *([0-9]+) *$/\1/p' .github/dependabot.yml)"
