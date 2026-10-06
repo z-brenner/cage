@@ -374,6 +374,7 @@ def disposition(name):
 class Chat:
     """An agent's chat folder (~/.cage/app/<agent>), opened without following links: its VM writes in there."""
     D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    ids, last_id = threading.Lock(), 0   # send(): the newest request id's milliseconds
 
     def __init__(self, agent, create=True):
         """create=False: only one that's there already (FileNotFoundError if not)."""
@@ -389,9 +390,13 @@ class Chat:
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(agent, 0o777, dir_fd=top)
-                self.fd = os.open(agent, self.D, dir_fd=top)
-                os.fchmod(self.fd, 0o777)
+                try:
+                    os.mkdir(agent, 0o777, dir_fd=top)
+                except FileExistsError:   # another request made it just now
+                    self.fd = os.open(agent, self.D, dir_fd=top)
+                else:
+                    self.fd = os.open(agent, self.D, dir_fd=top)
+                    os.fchmod(self.fd, 0o777)
         finally:
             os.close(top)
 
@@ -408,9 +413,12 @@ class Chat:
         try:
             return os.open(name, self.D, dir_fd=self.fd)
         except FileNotFoundError:
-            if os.path.lexists(os.path.join(f"/proc/self/fd/{self.fd}", name)):
+            if os.path.islink(os.path.join(f"/proc/self/fd/{self.fd}", name)):
                 raise   # a dangling link: not ours to replace
-            os.mkdir(name, 0o777, dir_fd=self.fd)
+            try:
+                os.mkdir(name, 0o777, dir_fd=self.fd)
+            except FileExistsError:   # another request made it just now (or the VM did: a link fails to open)
+                return os.open(name, self.D, dir_fd=self.fd)
             fd = os.open(name, self.D, dir_fd=self.fd)
             os.fchmod(fd, 0o777)
             return fd
@@ -465,7 +473,12 @@ class Chat:
             os.close(d)
 
     def send(self, req):
-        req["id"] = req.get("id") or f"{int(time.time() * 1000):013d}-{os.urandom(3).hex()}"
+        if not req.get("id"):
+            # the VM takes in/ in name order (guest/app.mjs), so each id comes after the one before: also for two sent
+            # in the same millisecond (a card's button, then a message), and if the clock goes back
+            with Chat.ids:
+                Chat.last_id = max(int(time.time() * 1000), Chat.last_id + 1)
+                req["id"] = f"{Chat.last_id:013d}-{os.urandom(3).hex()}"
         self.write_new("in", req["id"] + ".json", json.dumps(req).encode())
         return req["id"]
 

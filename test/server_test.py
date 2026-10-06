@@ -320,6 +320,76 @@ class Events(unittest.TestCase):
         self.assertEqual(out, [("raw", b"{oops\n")])
 
 
+class Sends(unittest.TestCase):
+    """What goes to an agent lands in its in/, which its VM takes in name order (guest/app.mjs): so in the order sent."""
+    def setUp(self):
+        self.tearDown()
+
+    def tearDown(self):
+        shutil.rmtree(os.path.join(server.APPDIR, "codex"), True)
+
+    def names(self):
+        return sorted(os.listdir(os.path.join(server.APPDIR, "codex", "in")))
+
+    def test_in_the_order_sent(self):
+        """Also many in the same millisecond (a card's button, then a message), and after the clock went back an hour."""
+        now = [1791000000000]
+
+        class Clock:
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+            def time(self):
+                return now[0] / 1000
+
+        sent, real = [], server.time
+        server.time = Clock()
+        try:
+            with server.Chat("codex") as c:
+                for i in range(60):
+                    if i == 40:
+                        now[0] -= 3600 * 1000
+                    sent.append(c.send({"type": "message", "session": "s", "text": str(i)}))
+        finally:
+            server.time = real
+        self.assertEqual(self.names(), [i + ".json" for i in sent])
+
+    def test_from_many_requests_at_once(self):
+        """The server answers each request in a thread of its own: each one's sends still go in its order, also when
+        the agent's chat folder isn't there yet (each request makes it, and its in/, if it can)."""
+        sent, failed = {}, []
+
+        def sends(n):
+            try:
+                with server.Chat("codex") as c:
+                    sent[n] = [c.send({"type": "message", "session": "s", "text": f"{n}.{i}"}) for i in range(50)]
+            except Exception as e:
+                failed.append(repr(e))
+
+        threads = [threading.Thread(target=sends, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(failed, [])
+        self.assertEqual(len(self.names()), 400)
+        for ids in sent.values():
+            self.assertEqual(ids, sorted(ids))
+
+    def test_not_through_a_link(self):
+        """A link the VM put where in/ goes (one that leads nowhere yet, or to another folder) is neither made into a
+        folder nor written through."""
+        away = os.path.join(HOME, "away")
+        for target in (away, os.path.join(server.APPDIR, "claude")):
+            os.makedirs(os.path.join(server.APPDIR, "codex"), exist_ok=True)
+            os.symlink(target, os.path.join(server.APPDIR, "codex", "in"))
+            before = sorted(os.listdir(target)) if os.path.isdir(target) else None
+            with server.Chat("codex") as c, self.assertRaises(OSError):
+                c.send({"type": "message", "session": "s", "text": "hi"})
+            self.assertEqual(sorted(os.listdir(target)) if os.path.isdir(target) else None, before, target)
+            os.unlink(os.path.join(server.APPDIR, "codex", "in"))
+
+
 class Logs(unittest.TestCase):
     def setUp(self):
         self.chat = server.Chat("claude")

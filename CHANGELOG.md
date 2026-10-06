@@ -56,6 +56,7 @@ Nothing yet.
 - The app kept running its old version after an update.
 - An agent could stay offline for a long time when Ubuntu's servers were slow.
 - The app's chat went quiet after its connection to the agent restarted. Files and scheduled tasks waited behind a message the agent hadn't answered yet. Videos didn't arrive, and downloaded work files lost part of their names.
+- Two things sent to an agent from the app in the same instant (a button in the chat, then a message) could reach it in the wrong order.
 - WhatsApp lost messages sent while the agent's chat service restarted, and kept asking WhatsApp for new linking codes while nobody was linking.
 - A voice note sent while the agent was starting failed instead of waiting for the speech model.
 - Questions over 8 KB failed in the app, files with non-Latin names couldn't be downloaded, Esc stopped running jobs, and switches showed your click even when cage didn't do it.
