@@ -368,4 +368,29 @@ out="$(entry stops 1 1 1 1 1 1 400 1 1 1 1 1)"
   && [ "$(grep -c 'cc-connect exited with 1; restarting in' <<<"$out")" = 12 ] || fail "cc-connect's quick exits: $out"
 ok "cc-connect restarts after 5s, twice as long after each quick exit up to a minute, and 5s again after a good run; 5 quick exits in a row are said plainly, once"
 
+# --- the mark: written last, so "provisioned" means provisioning has finished (cage status and the tests go by it) ----
+# Stand-ins for the agent's CLI and cc-connect, and provision.sh's log, note it when the mark is there before they run.
+for b in claude cc-connect; do
+  printf '#!/bin/sh\n[ ! -e "$T/opt/provisioned-claude" ] || echo "MARK BEFORE %s $*" >> "$T/calls"\n[ "${STUB_CLI:-}" != broken ] || exit 1\necho v1.2.3\n' \
+    "$b" > "$T/bin/$b"
+done
+chmod +x "$T/bin/claude" "$T/bin/cc-connect"
+finished() {
+  MARK="$T/opt/provisioned-claude"
+  eval "real_$(declare -f log)"
+  log() { [ ! -e "$MARK" ] || echo "MARK BEFORE log: $*" >> "$T/calls"; real_log "$@"; }
+  mark_provisioned
+}
+export -f finished
+lib finished || fail "mark_provisioned: $(shown)"
+grep -q '^provision\[claude\]: done: claude v1.2.3; v1.2.3 (' "$T/out" || fail "no done line: $(shown)"
+grep -q 'MARK BEFORE' "$T/calls" && fail "the mark was there before provisioning had finished: $(shown)"
+[ -s "$T/opt/provisioned-claude" ] || fail "no mark once provisioning had finished: $(shown)"
+rm -rf "$T/opt"
+if STUB_CLI=broken lib finished; then fail "provisioning finished with a CLI that doesn't run: $(shown)"; fi
+grep -q 'provision: claude is installed but does not run; will retry' "$T/out" && [ ! -e "$T/opt/provisioned-claude" ] \
+  || fail "a CLI that doesn't run: $(shown)"
+rm -f "$T/bin/claude" "$T/bin/cc-connect"
+ok "the mark that says an agent is provisioned comes last, after its CLI ran and \"done\" was logged; none if the CLI doesn't run"
+
 echo "all $pass provisioning unit tests passed"
