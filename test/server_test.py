@@ -698,6 +698,68 @@ class Live(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(HOME)), before)
         self.assertEqual(os.listdir(server.APPDIR), ["claude"])
 
+    def test_what_a_vm_could_write(self):
+        """An agent's log is its VM's to write. Whatever is in it (huge numbers, NaN and Infinity, nesting deeper than
+        Python reads, bytes that aren't UTF-8, a line of megabytes, half a line, a link, a pipe, a folder, a terabyte),
+        Home gets valid JSON at once, with the other agents' approvals and what that agent's log says after it; and
+        that agent's chat goes on after it too."""
+        p = self.asks("claude", "Bash(ls)")
+        deep = lambda n, o=b"[", c=b"]": o * n + c * n   # noqa: E731
+        near = range(900, 4000, 41)   # (where reading it may just work, or just not, in this Python or another)
+        lines = {
+            "huge numbers": [b'{"t": "reply", "text": "hi", "at": 1e400}', b'{"t": "typing", "on": true, "at": ' + b"9" * 5000 + b"}",
+                             b'{"t": "you", "text": "hi", "at": ' + b"9" * 400 + b"}"],
+            "NaN and Infinity": [b'{"t": "buttons", "text": NaN, "buttons": [[{"data": "perm:allow"}]], "at": NaN}',
+                                 b'{"t": "reply", "text": Infinity, "at": -Infinity}', b'{"t": "typing", "on": true, "at": Infinity}'],
+            "deep nesting": [b'{"t": "reply", "at": 1, "text": ' + deep(100000) + b"}", b'{"t": "reply", "at": 1, "text": ' + deep(50000, b'{"a": ', b"}") + b"}"],
+            "nesting near the limit": [b'{"t": "reply", "at": 1, "text": ' + deep(n) + b"}" for n in near],
+            "nesting near the limit, in a button": [b'{"t": "buttons", "at": 1, "text": "x", "buttons": [[{"data": ' + deep(n) + b"}]]}" for n in near],
+            "nesting near the limit, in a card": [b'{"t": "card", "at": 1, "card": {"header": {"title": ' + deep(n) + b"}}}" for n in near],
+            "bytes that aren't UTF-8": [b'{"t": "reply", "text": "\xff\xfe", "at": 1}', b"\xc3\x28", b'{"t": "reply", "text": "\xed\xa0\x80", "at": 2}',
+                                        b'{"t": "reply", "text": "\\ud800", "at": 3}'],
+            "a line of megabytes": [b'{"t": "reply", "text": "' + b"x" * (3 << 20) + b'", "at": 1}'],
+        }
+        for name, bad in lines.items():
+            self.tearDown()
+            self.log("claude", {"t": "buttons", "session": "you", "text": p["text"], "buttons": self.PERM, "at": p["at"]})
+            self.log("codex", *bad, {"t": "buttons", "session": "you", "text": "after " + name, "buttons": self.PERM, "at": 5})
+            t = time.time()
+            status, _, body = self.call("GET", "/api/activity?since=0&agents=claude,codex")
+            self.assertLess(time.time() - t, 2, name)
+            self.assertEqual(status, 200, name)
+            agents = strict(body)["agents"]
+            self.assertEqual((agents["claude"]["pending"], agents["codex"]["pending"]), (p, {"text": "after " + name, "at": 5}), name)
+            if name in ("huge numbers", "NaN and Infinity"):
+                continue
+            status, _, body = self.call("GET", "/api/chat/codex/history")
+            self.assertEqual((status, strict(body)["entries"][-1]["text"]), (200, "after " + name), name)
+            after = lambda events: any(isinstance(e.get("e"), dict) and e["e"].get("text") == "after " + name for e in events)   # noqa: E731
+            self.assertTrue(after(self.stream("from=codex:0", after)[1]), name)
+        # what the log is: a link (to another agent's), a pipe, a folder, a terabyte (sparse), half a line; or the chat
+        # folder itself a link
+        def sparse(f):
+            with open(f, "wb") as fh:
+                fh.truncate(1 << 40)
+
+        def half(f):
+            with open(f, "wb") as fh:
+                fh.write(b'{"t": "buttons", "session": "you", "text": "half", "buttons": [[{"data": "perm:al')
+        claude_log = os.path.join(server.APPDIR, "claude", "log.jsonl")
+        for name, make in (("a link", lambda f: os.symlink(claude_log, f)), ("a pipe", os.mkfifo), ("a folder", os.mkdir), ("a terabyte", sparse),
+                           ("half a line", half)):
+            shutil.rmtree(os.path.join(server.APPDIR, "codex"), True)
+            os.makedirs(os.path.join(server.APPDIR, "codex"))
+            make(os.path.join(server.APPDIR, "codex", "log.jsonl"))
+            t = time.time()
+            status, _, body = self.call("GET", "/api/activity?since=0&agents=claude,codex")
+            self.assertLess(time.time() - t, 2, name)
+            agents = strict(body)["agents"]
+            self.assertEqual((status, agents["claude"]["pending"], agents["codex"]["pending"]), (200, p, None), name)
+        shutil.rmtree(os.path.join(server.APPDIR, "codex"))
+        os.symlink(os.path.join(server.APPDIR, "claude"), os.path.join(server.APPDIR, "codex"))
+        status, _, body = self.call("GET", "/api/activity?since=0&agents=claude,codex")
+        self.assertEqual((status, list(strict(body)["agents"])), (200, ["claude"]))
+
     def test_headers(self):
         """The routes Home uses answer with the headers every other API answer has: JSON, not kept, not sniffed, no
         referrer; whatever the answer (a refusal too)."""

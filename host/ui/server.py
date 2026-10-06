@@ -500,7 +500,7 @@ class Chat:
             pos += len(line) + 1
             try:
                 e = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):   # (nested deeper than Python reads: skipped, as a line that isn't JSON)
                 continue
             if isinstance(e, dict):
                 out.append((pos, e))
