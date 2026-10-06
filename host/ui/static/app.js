@@ -1197,7 +1197,7 @@ async function useRecipe (a, r, where, button) {
   }
   const sched = r.schedule
   if (blanksLeft(r.prompt).length) { // the form, filled in, with the blank to fill selected
-    SCHED[a.name].draft = { prompt: r.prompt, title: r.title }
+    SCHED[a.name].draft = { prompt: r.prompt, title: r.title, needs: r.needs }
     const set = (k, v) => { const el = document.querySelector(`[data-keep="${k}"]`); if (el) { el.value = v; el.dispatchEvent(new Event('kept')) } }
     set('sched-kind', sched.kind)
     set('sched-time', sched.time)
@@ -1207,14 +1207,7 @@ async function useRecipe (a, r, where, button) {
     if (ta) { ta.scrollIntoView({ block: 'center' }); pickBlank(ta) }
     return
   }
-  // One that reads your email runs by itself with nobody watching, and anyone can send you an email: without "Ask
-  // before acting", what an email says could get the agent to send or change things in your apps. Say so first.
-  // Codex never asks: working read-only (its switch) may not stop it in your apps, so it's said for Codex either way.
-  const unwatched = a.name === 'codex'
-    ? 'Codex can’t ask before acting in your apps, and working read-only may not stop it there, so an email could get it to send or change something. To be safe, add it to another agent, with “Ask before acting” on.'
-    : `${a.label} doesn’t ask before acting in your apps now, so an email could get it to send or change something there. To be safe, turn on “Ask before acting” in its settings first.`
-  if (r.needs.includes('zapier') && (!a.approve || a.name === 'codex') &&
-    !(await confirmSheet(`${r.title} runs by itself and reads your email, which anyone can send you. ${unwatched}`, 'Add it anyway', 'Not now'))) return
+  if (!(await addUnwatched(a, r))) return
   // as it is: the same task the form below would add (cc-connect's cron, through the agent's VM)
   const expr = cronOf(sched.kind, sched.time, sched.day)
   button.disabled = true   // (once: a second click would add it twice)
@@ -1225,6 +1218,21 @@ async function useRecipe (a, r, where, button) {
     render(true)
   } catch (e) { toast('Couldn’t add it: ' + e.message) }
   button.disabled = false
+}
+// A task runs by itself, with nobody watching. One that reads your email (anyone can send you one) on an agent that
+// doesn't ask before acting in your apps: what an email says could get it to send or change things there. Say so
+// first, and add it only if you still want to. Codex never asks: working read-only (its switch) may not stop it in your
+// apps, so it's said for Codex either way. recipe: what it is, when it's one ({title, needs}), else it's what you
+// wrote, which may read your email whenever Zapier is there for that agent. → true to add it.
+async function addUnwatched (a, recipe) {
+  if (a.approve && a.name !== 'codex') return true
+  if (recipe ? !recipe.needs.includes('zapier') : !hasApp('zapier', a.name)) return true
+  const how = a.name === 'codex'
+    ? 'Codex can’t ask before acting in your apps, and working read-only may not stop it there, so an email could get it to send or change something. To be safer, add it to another agent, with “Ask before acting” on.'
+    : `${a.label} doesn’t ask before acting in your apps now, so an email could get it to send or change something there. To be safer, turn on “Ask before acting” in its settings first.`
+  const what = recipe ? `${recipe.title} runs by itself and reads your email, which anyone can send you.`
+    : 'This task runs by itself, with nobody watching, and through Zapier it may read your email, which anyone can send you.'
+  return confirmSheet(`${what} ${how}`, 'Add it anyway', 'Not now')
 }
 function blanksHint (C) { // under the message: what's still to fill in
   const left = blanksLeft(C.ta.value)
@@ -1742,8 +1750,9 @@ function pageSchedule (a) {
     const prompt = what.value.trim()
     if (!prompt) return what.focus()
     if (pickBlank(what)) return toast(`Fill in ${blanksLeft(prompt)[0]} first.`, 'info')
+    const title = S.draft ? filledTitle(S.draft, prompt) : ''   // (a recipe still, filled in; '' once it's what you wrote)
+    if (!(await addUnwatched(a, title ? { title, needs: S.draft.needs } : null))) return
     try {
-      const title = S.draft ? filledTitle(S.draft, prompt) : ''
       await cronApi(a.name, 'POST', '/api/v1/cron', { project: a.name, session_key: 'app:you:you', cron_expr: cronOf(kind.value, time.value, day.value), prompt, description: (title || prompt.split('\n')[0]).slice(0, 80) })
       what.value = ''
       S.draft = null

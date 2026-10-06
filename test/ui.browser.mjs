@@ -442,7 +442,8 @@ fs.writeFileSync(path.join(home, 'connectors', 'zapier.conf'), 'url=https://mcp.
 await briefing.getByRole('button', { name: 'Add: Morning briefing' }).click({ timeout: 20000 })
 // it reads your email by itself, which anyone can send you: with "Ask before acting" off, the page says so first, and
 // Not now adds nothing
-await answer(/^Morning briefing runs by itself and reads your email, which anyone can send you\. Claude Code doesn’t ask before acting in your apps now, .* turn on “Ask before acting” in its settings first\.$/, 'Not now')
+// (safer, not safe: asking first is a check for mistakes, not a wall)
+await answer(/^Morning briefing runs by itself and reads your email, which anyone can send you\. Claude Code doesn’t ask before acting in your apps now, .* To be safer, turn on “Ask before acting” in its settings first\.$/, 'Not now')
 await page.waitForTimeout(500)
 if (cronOfClaude().length) fail('Not now added the recipe: ' + JSON.stringify(cronOfClaude()))
 await briefing.getByRole('button', { name: 'Add: Morning briefing' }).click()
@@ -466,6 +467,18 @@ await page.getByRole('button', { name: 'Add', exact: true }).click()
 await page.locator('.card li', { hasText: 'News watch on electric cars' }).getByText(/Every day at 8:00\sAM/).waitFor({ timeout: 15000 })
 const news = cronOfClaude()[1]
 if (news.cron_expr !== '0 8 * * *' || !news.prompt.startsWith('Look for news from the last day about electric cars.')) fail('the recipe with a blank added: ' + JSON.stringify(news))
+// the form says so too, before it adds a task that may read your email: an email recipe filled in there, or anything
+// you write, with Zapier there for an agent that doesn't ask
+await page.getByRole('button', { name: 'Add: Friday status draft' }).click()
+await page.keyboard.type('my team')
+await page.getByRole('button', { name: 'Add', exact: true }).click()
+await answer(/^Friday status draft runs by itself and reads your email, which anyone can send you\. Claude Code doesn’t ask before acting in your apps now/, 'Not now')
+await page.getByLabel('What should it do?').fill('Tell me what came in overnight')
+await page.getByRole('button', { name: 'Add', exact: true }).click()
+await answer(/^This task runs by itself, with nobody watching, and through Zapier it may read your email, which anyone can send you\. Claude Code doesn’t ask before acting in your apps now/, 'Not now')
+await page.waitForTimeout(500)
+if (cronOfClaude().length !== 2) fail('Not now on the form added a task: ' + JSON.stringify(cronOfClaude()))
+await page.getByLabel('What should it do?').fill('')
 fs.rmSync(path.join(home, 'connectors', 'zapier.conf'))
 fs.writeFileSync(path.join(home, 'app', 'cron.claude.json'), '[]')
 ok('recipes: they say which app they need; added as they are, or with their blanks filled in first, as scheduled tasks; in the chat, nothing goes with a blank in it')
@@ -520,7 +533,7 @@ for (const { n, r } of codexAsked()) {
 }
 await page.getByText('Nothing scheduled yet.').waitFor({ timeout: 15000 })
 await page.locator('.recipe', { hasText: 'Morning briefing' }).getByRole('button', { name: 'Add: Morning briefing' }).click({ timeout: 20000 })
-await answer(/^Morning briefing runs by itself and reads your email, which anyone can send you\. Codex can’t ask before acting in your apps, and working read-only may not stop it there, so an email could get it to send or change something\. To be safe, add it to another agent, with “Ask before acting” on\.$/, 'Not now')
+await answer(/^Morning briefing runs by itself and reads your email, which anyone can send you\. Codex can’t ask before acting in your apps, and working read-only may not stop it there, so an email could get it to send or change something\. To be safer, add it to another agent, with “Ask before acting” on\.$/, 'Not now')
 await page.waitForTimeout(500)
 if (codexAsked().length) fail('Not now added the recipe to Codex: ' + JSON.stringify(codexAsked()))
 fs.rmSync(path.join(home, 'connectors', 'zapier.conf'))
