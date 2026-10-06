@@ -653,13 +653,25 @@ timeout = 10
 "
     done
   fi
+  # cc-connect tries its own commands first, and any unique start of one's name will do, so a command called "all"
+  # was its /allow: "/all Write a poem" pre-allowed a tool called Write, and this agent never got the question. So
+  # the command is "askall" (no built-in name starts with that), and /all is an alias for it, once for each way to
+  # capitalize it: an alias must match exactly, and guest/hook.sh takes /all in any case. /allow itself is off
+  # (disabled_commands below); what an agent asks about first is set with cage approve and the app's buttons.
   if [[ " $features " == *" ask "* ]]; then
     extras="$extras
 [[commands]]
-name = \"all\"
-description = \"Ask all your agents (each answers here)\"
+name = \"askall\"
+description = \"Ask all your agents (each answers here), same as /all\"
 prompt = \"{{args}}\"
 "
+    for v in all alL aLl aLL All AlL ALl ALL; do
+      extras="$extras
+[[aliases]]
+name = \"/$v\"
+command = \"/askall\"
+"
+    done
   fi
   extras="$extras$(voice_config "$a")"
   # reset_on_idle_mins = 0: a chat carries on however long you were away, until you say /new. cc-connect does that
@@ -678,6 +690,7 @@ $bridge$extras
 name = "$a"
 admin_from = "$admins"
 reset_on_idle_mins = 0
+disabled_commands = ["allow"]
 
 [projects.agent]
 type = "$(cc_type "$a")"

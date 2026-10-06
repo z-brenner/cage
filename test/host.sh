@@ -121,6 +121,9 @@ for a in claude codex cursor antigravity; do
   # a chat carries on however long you were away (cc-connect's docs say 30 minutes when it's not set)
   [ "$(awk '/^\[\[projects\]\]$/ { n++; on = 1; next } /^\[/ { on = 0 } on && $0 == "reset_on_idle_mins = 0" { k++ } END { print n + 0, k + 0 }' "$f")" = "1 1" ] \
     || fail "$a: reset_on_idle_mins = 0 isn't in its [[projects]]: $(cat "$f")"
+  # cc-connect's /allow is off: it pre-allows a tool for the agent's next sessions, and asking first is cage approve's
+  [ "$(awk '/^\[\[projects\]\]$/ { on = 1; next } /^\[/ { on = 0 } on && $0 == "disabled_commands = [\"allow\"]" { k++ } END { print k + 0 }' "$f")" = 1 ] \
+    || fail "$a: /allow isn't off in its [[projects]]: $(cat "$f")"
 done
 grep -q '^type = "claudecode"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude type"
 grep -q '^mode = "bypassPermissions"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude mode"
@@ -128,7 +131,7 @@ grep -q '^mode = "force"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "c
 grep -q '^cmd = "cursor-agent"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor cmd"
 grep -q '^cmd = "agy"$' "$CAGE_HOME/agents/antigravity/cc-connect.toml" || fail "agy cmd"
 grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" && fail "claude should use the default cmd"
-ok "renders one cc-connect config per agent with the right type, mode and cmd, and chats that never reset on their own"
+ok "renders one cc-connect config per agent with the right type, mode and cmd, chats that never reset on their own, and /allow off"
 
 line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
 for want in "-d" "--mount-named | cage-claude-home:/home/agent" "--mount-dir | $ROOT/guest:/cage:ro" "--mount-dir | $CAGE_HOME/agents/claude:/cage-config:ro" \
@@ -426,7 +429,13 @@ cage voice on </dev/null 2>/dev/null
 cage up claude codex 2>/dev/null
 t="$CAGE_HOME/agents/claude/cc-connect.toml"
 [ "$(grep -c '^command = "/bin/bash /cage/hook.sh ask fallback"$' "$t")" = 3 ] || fail "claude's hooks: $(grep -A4 hooks "$t")"
-grep -q '^name = "all"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "no /all command"
+# a command called all would be cc-connect's /allow, so it's askall, with /all (each way to capitalize it) an alias
+grep -q '^name = "askall"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "no /askall command: $(cat "$t")"
+grep -q '^name = "all"$' "$t" && fail "a command called all (cc-connect runs /allow for it)"
+for v in all All ALL aLl; do
+  grep -A2 '^\[\[aliases\]\]$' "$t" | grep -A1 -x "name = \"/$v\"" | grep -qx 'command = "/askall"' || fail "/$v isn't /askall: $(cat "$t")"
+done
+[ "$(grep -c '^command = "/askall"$' "$t")" = 8 ] || fail "not every way to write /all is /askall: $(grep -A2 '^\[\[aliases\]\]$' "$t")"
 grep -q '^base_url = "http://127.0.0.1:8178/v1"$' "$t" && grep -q '^provider = "openai"$' "$t" || fail "voice: no local speech-to-text"
 grep -q '^VOICE_MODE=local$' "$CAGE_HOME/agents/claude/voice.env" || fail "voice.env"
 grep -q '^command = "/bin/bash /cage/hook.sh ask"$' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex has no stand-in, only /all"
@@ -435,7 +444,7 @@ if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   out="$(HOME="$T/cc-relay" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$t" 2>&1 || true)"
   grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"
 fi
-ok "/all, stand-ins and voice notes: hooks, the /all command, local speech-to-text, the outbox mount"
+ok "/all, stand-ins and voice notes: hooks, the /all command (/askall), local speech-to-text, the outbox mount"
 
 # guest/hook.sh as cc-connect runs it: everything in environment variables
 pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `ask-all on` started would race `cage _outbox` below)
