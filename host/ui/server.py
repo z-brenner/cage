@@ -521,12 +521,13 @@ class Chat:
 
 TAIL = 512 << 10   # how much of the end of a chat log Home reads
 WORKING = 15 * 60   # "working…" for longer than this without a word is stale (it was stopped, or its VM restarted)
-# How cc-connect (v1.5.0, core/engine.go) reads what you send while it waits for your OK: a message with any of these
-# words in it is the answer (allow, deny or allow all, in English or Chinese), and so is a perm: button; anything else
-# gets "Waiting for permission response", and the approval still waits. A command that ends the turn ends the wait too,
-# and so does one that starts the agent's session afresh (cleanupInteractiveState): /switch, /model, /reasoning, /dir
-# and /provider when they're told what to switch to (without, they only show what there is). So does a restart of
-# cc-connect, which keeps what it waits for only in memory: the relay registering with it again (a "status" line).
+# How cc-connect (v1.5.0 and 1.5.1-beta.3, core/engine.go) reads what you send while it waits for your OK: a message
+# with any of these words in it is the answer (allow, deny or allow all, in English or Chinese), and so is a perm:
+# button; anything else gets "Waiting for permission response", and the approval still waits. A command that ends the
+# turn ends the wait too, and so does one that starts the agent's session afresh (cleanupInteractiveState): /switch,
+# /model, /reasoning, /dir and /provider when they're told what to switch to (without, they only show what there is). So
+# does a restart of cc-connect, which keeps what it waits for only in memory: the relay registering with it again (a
+# "status" line).
 ANSWER_WORDS = {"allow", "yes", "y", "ok", "approve", "deny", "no", "n", "reject", "cancel", "allowall", "允许", "同意",
                 "可以", "好", "好的", "是", "确认", "拒绝", "不允许", "不行", "不", "否", "取消", "允许所有", "允许全部",
                 "全部允许", "所有允许", "都允许", "全部同意"}

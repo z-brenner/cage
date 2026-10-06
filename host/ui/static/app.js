@@ -1369,7 +1369,7 @@ function fileChip (a, f) {
 // same in one of its other languages), with the buttons perm:allow, perm:deny and perm:allow_all. <input> is the
 // command for Bash, the file for Read, Edit and Write, the address for Cursor's WebFetch, and otherwise the tool's
 // input as one line of JSON, cut at 800 characters with "...". The card says what the agent would do, shows the
-// details that matter first, and keeps exactly what it asked one click away.
+// details that matter first, and keeps exactly what it asked one click away. (1.5.1-beta.3 asks in the same words.)
 const PERM_LABEL = { 'perm:allow': 'Allow', 'perm:deny': 'Deny', 'perm:allow_all': 'Allow for the rest of this conversation' }
 // Zapier's tools are named after the app first: gmail_send_email, google_calendar_find_event…
 const ZAPIER_APPS = [['google_calendar', 'Google Calendar'], ['google_sheets', 'Google Sheets'], ['google_docs', 'Google Docs'],

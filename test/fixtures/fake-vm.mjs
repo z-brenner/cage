@@ -11,8 +11,9 @@ fs.mkdirSync(work, { recursive: true })
 const log = (e) => fs.appendFileSync(path.join(dir, 'log.jsonl'), JSON.stringify({ at: Date.now(), ...e }) + '\n')
 const out = (id, d) => fs.writeFileSync(path.join(dir, 'out', id + '.json'), JSON.stringify(d))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-// cc-connect v1.5.0's own words when it asks before acting (core/i18n.go, MsgPermissionPrompt), word for word, and its
-// buttons (engine.go, sendPermissionPrompt). An app's tool input comes as one line of JSON, its keys in order (Go's).
+// cc-connect v1.5.0's own words (1.5.1-beta.3's are the same) when it asks before acting (core/i18n.go,
+// MsgPermissionPrompt), word for word, and its buttons (engine.go, sendPermissionPrompt). An app's tool input comes as
+// one line of JSON, its keys in order (Go's).
 const permission = (tool, input) => `⚠️ **Permission Request**\n\nAgent wants to use **${tool}**:\n\n\`\`\`\n${input}\n\`\`\`\n\n` +
   'Reply **allow** / **deny** / **allow all** (skip all future prompts this session).'
 const PERM_BUTTONS = [[{ text: 'Allow', data: 'perm:allow' }, { text: 'Deny', data: 'perm:deny' }], [{ text: 'Allow All (this session)', data: 'perm:allow_all' }]]
