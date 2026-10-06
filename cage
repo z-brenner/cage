@@ -653,13 +653,29 @@ timeout = 10
 "
     done
   fi
+  # /all <question>: guest/hook.sh asks your other agents, and this one answers as it does any message. Not through a
+  # command: cc-connect tries its own first, by any unique start of their names, so one called "all" was its /allow
+  # ("/all Write a poem" pre-allowed a tool called Write, and this agent never got the question); and a command of
+  # ours gets the question cut into words (quotes and indentation lost) and is refused while the agent is busy. So
+  # /all is an alias for "@all", once for each way to capitalize it (an alias matches the first word exactly, and
+  # only before a space; guest/hook.sh goes by the same rules): "/all <question>" reaches this agent as
+  # "@all <question>", the same as typing @all. /askall does the same; it's also a command, so chat apps list it in
+  # their menus, and says "@all" too when it's written some other way. /allow itself is off (disabled_commands
+  # below); what an agent asks about first is set with cage approve and the app's buttons.
   if [[ " $features " == *" ask "* ]]; then
     extras="$extras
 [[commands]]
-name = \"all\"
-description = \"Ask all your agents (each answers here)\"
-prompt = \"{{args}}\"
+name = \"askall\"
+description = \"Ask all your agents (each answers here), same as /all\"
+prompt = \"@all {{args}}\"
 "
+    for v in all alL aLl aLL All AlL ALl ALL askall Askall AskAll ASKALL; do
+      extras="$extras
+[[aliases]]
+name = \"/$v\"
+command = \"@all\"
+"
+    done
   fi
   extras="$extras$(voice_config "$a")"
   # reset_on_idle_mins = 0: a chat carries on however long you were away, until you say /new. cc-connect does that
@@ -678,6 +694,7 @@ $bridge$extras
 name = "$a"
 admin_from = "$admins"
 reset_on_idle_mins = 0
+disabled_commands = ["allow"]
 
 [projects.agent]
 type = "$(cc_type "$a")"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-side tests for ./cage against a stub `msb` that records its arguments.
-# Optional: CAGE_TEST_CC_CONNECT=/path/to/cc-connect validates the generated configs with the real binary.
+# Optional: CAGE_TEST_CC_CONNECT=/path/to/cc-connect validates the generated configs with the real binary, and chats
+# through it (test/cc-chat.mjs, which needs node).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -121,6 +122,9 @@ for a in claude codex cursor antigravity; do
   # a chat carries on however long you were away (cc-connect's docs say 30 minutes when it's not set)
   [ "$(awk '/^\[\[projects\]\]$/ { n++; on = 1; next } /^\[/ { on = 0 } on && $0 == "reset_on_idle_mins = 0" { k++ } END { print n + 0, k + 0 }' "$f")" = "1 1" ] \
     || fail "$a: reset_on_idle_mins = 0 isn't in its [[projects]]: $(cat "$f")"
+  # cc-connect's /allow is off: it pre-allows a tool for the agent's next sessions, and asking first is cage approve's
+  [ "$(awk '/^\[\[projects\]\]$/ { on = 1; next } /^\[/ { on = 0 } on && $0 == "disabled_commands = [\"allow\"]" { k++ } END { print k + 0 }' "$f")" = 1 ] \
+    || fail "$a: /allow isn't off in its [[projects]]: $(cat "$f")"
 done
 grep -q '^type = "claudecode"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude type"
 grep -q '^mode = "bypassPermissions"$' "$CAGE_HOME/agents/claude/cc-connect.toml" || fail "claude mode"
@@ -128,7 +132,7 @@ grep -q '^mode = "force"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "c
 grep -q '^cmd = "cursor-agent"$' "$CAGE_HOME/agents/cursor/cc-connect.toml" || fail "cursor cmd"
 grep -q '^cmd = "agy"$' "$CAGE_HOME/agents/antigravity/cc-connect.toml" || fail "agy cmd"
 grep -q '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml" && fail "claude should use the default cmd"
-ok "renders one cc-connect config per agent with the right type, mode and cmd, and chats that never reset on their own"
+ok "renders one cc-connect config per agent with the right type, mode and cmd, chats that never reset on their own, and /allow off"
 
 line="$(grep '^run | ' "$MSB_LOG" | grep -- '--name | cage-claude |')"
 for want in "-d" "--mount-named | cage-claude-home:/home/agent" "--mount-dir | $ROOT/guest:/cage:ro" "--mount-dir | $CAGE_HOME/agents/claude:/cage-config:ro" \
@@ -426,7 +430,14 @@ cage voice on </dev/null 2>/dev/null
 cage up claude codex 2>/dev/null
 t="$CAGE_HOME/agents/claude/cc-connect.toml"
 [ "$(grep -c '^command = "/bin/bash /cage/hook.sh ask fallback"$' "$t")" = 3 ] || fail "claude's hooks: $(grep -A4 hooks "$t")"
-grep -q '^name = "all"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "no /all command"
+# /all (each way to capitalize it) and /askall are aliases for plain "@all": a command called all would be
+# cc-connect's /allow, and a command gets the question cut into words. /askall is a command too, for chat app menus.
+grep -q '^name = "askall"$' "$t" && grep -q '^prompt = "@all {{args}}"$' "$t" || fail "no /askall command: $(cat "$t")"
+grep -q '^name = "all"$' "$t" && fail "a command called all (cc-connect runs /allow for it)"
+for v in all All ALL aLl alL askall AskAll ASKALL; do
+  grep -A2 '^\[\[aliases\]\]$' "$t" | grep -A1 -x "name = \"/$v\"" | grep -qx 'command = "@all"' || fail "/$v isn't @all: $(cat "$t")"
+done
+[ "$(grep -c '^command = "@all"$' "$t")" = 12 ] || fail "not every way to write /all and /askall is @all: $(grep -A2 '^\[\[aliases\]\]$' "$t")"
 grep -q '^base_url = "http://127.0.0.1:8178/v1"$' "$t" && grep -q '^provider = "openai"$' "$t" || fail "voice: no local speech-to-text"
 grep -q '^VOICE_MODE=local$' "$CAGE_HOME/agents/claude/voice.env" || fail "voice.env"
 grep -q '^command = "/bin/bash /cage/hook.sh ask"$' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex has no stand-in, only /all"
@@ -435,7 +446,14 @@ if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   out="$(HOME="$T/cc-relay" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$t" 2>&1 || true)"
   grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"
 fi
-ok "/all, stand-ins and voice notes: hooks, the /all command, local speech-to-text, the outbox mount"
+ok "/all, stand-ins and voice notes: hooks, /all and /askall (@all), local speech-to-text, the outbox mount"
+if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
+  # the real cc-connect, chatting with a stand-in claude, through the app's relay: test/cc-chat.mjs says what it checks
+  command -v node >/dev/null || fail "test/cc-chat.mjs needs node"
+  node "$ROOT/test/cc-chat.mjs" "$CAGE_TEST_CC_CONNECT" "$t" 2>"$T/cc-chat.err" || fail "chatting through cc-connect:
+$(cat "$T/cc-chat.err")"
+  ok "a real cc-connect: /all in any case, /askall and @all reach the agent as written, busy or not, and ask the others the same; /allow is off"
+fi
 
 # guest/hook.sh as cc-connect runs it: everything in environment variables
 pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `ask-all on` started would race `cage _outbox` below)
@@ -453,7 +471,18 @@ hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="5-hour limit reached ∙ resets
 grep -lx fallback "$O"/*/kind >/dev/null || fail "no fallback request"
 f="$(dirname "$(grep -lx fallback "$O"/*/kind)")/text"
 grep -q '^User: hi there$' "$f" && grep -q '^Agent: Hello! How can I help?$' "$f" && grep -q "^User: what's the capital" "$f" || fail "stand-in context: $(cat "$f")"
-ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't"
+# The hook asks the others when cc-connect gives this agent "@all <question>" (test/cc-chat.mjs checks that with a
+# real one): /all (in any case) and a space, /askall and a space or a tab, @all, after any spaces cc-connect trims, and
+# /all@YourBot (Telegram's, when your bot's name is written in another case). Anything else starting with /all doesn't.
+mkdir "$T/outbox-all"
+for m in "/askall Q1" "/ALL Q2" "/aLl Q3" "@all Q4" "/all@Cage_Claude_Bot Q5" "/AskAll Q6" "/allow Q7" "/allQ8" "/askallQ9" "all Q10" \
+  "  /all Q11" "$(printf '\t/all Q12')" "$(printf '\n\n/all Q13')" "$(printf '/all\tQ14')" "$(printf '/all\nQ15')" \
+  "$(printf '/askall\tQ16')" "$(printf '@all\tQ17')" "/all   Q18" "/all   " "$(printf '/all \n ')" "/all" "/askall"; do
+  hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="$m" CAGE_OUTBOX="$T/outbox-all" CC_HOOK_SESSION_KEY=telegram:222:222
+done
+asked="$(for f in "$T"/outbox-all/*/text; do tr '\n\t' '~~' < "$f"; echo; done | LC_ALL=C sort | tr '\n' ' ')"
+[ "$asked" = "Q1 Q11 Q12 Q13 Q16 Q17 Q18 Q2 Q3 Q4 Q5 Q6 " ] || fail "/all and /askall asked the others: $asked"
+ok "guest/hook.sh: /all and limit notices become requests (with the last turns); long answers don't; /all as cc-connect takes it"
 
 # cage relays them: other awake agents answer into the asking chat; nothing in a request is ever run
 printf 'cage-claude\ncage-codex\n' > "$T/running"

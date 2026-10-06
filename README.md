@@ -371,7 +371,8 @@ cage is a bash command (`cage`), a small web app (Python's standard library and 
 test/all.sh                     # every fast check, as CI runs them, with a summary (test/all.sh host setup: only those)
 shellcheck -S warning cage install.sh guest/*.sh test/*.sh scripts/*.sh
 test/host.sh                    # cage against a stub msb: configs, msb arguments, status, relays, the mask's host side, guards
-CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # plus: a real cc-connect loads every generated config
+CAGE_TEST_CC_CONNECT=/path/to/cc-connect test/host.sh   # plus: a real cc-connect loads every generated config, and
+                                # takes chat commands (/all, /allow) as cage means them (test/cc-chat.mjs)
 test/setup.sh                   # setup, doctor and autostart against a mock Telegram API and stubbed launchctl/systemctl
 test/oauth.sh                   # app sign-ins in the browser (host/mcp_oauth.py) against a mock server
 test/installer.sh               # install.sh: releases and git, checksums, offline, updates halfway, going back, uninstall

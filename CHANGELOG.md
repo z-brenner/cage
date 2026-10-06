@@ -16,7 +16,7 @@ Write for the people who use cage, not for its developers: short sentences, no i
 
 Nothing yet.
 
-## v0.4.0 (2026-10-05)
+## v0.4.0 (2026-10-06)
 
 **New:**
 - **Home shows an agent waiting for your OK,** in the same words as its chat ("Gmail: send email to bob@acme.com"), with Allow, Deny and Open (just Open and Deny when there's more to the request than that line shows). Each agent's row on Home says what it's doing: waiting for your OK, working, or what it said last.
@@ -65,6 +65,7 @@ Nothing yet.
 - One agent that couldn't start kept the others asleep.
 - `cage approve codex on`, and the app's switch for it, said Codex would ask you in the chat. It can't; both now say Codex works read-only.
 - A backup that wouldn't open again could still be reported as saved. Restore now checks the passphrase and free space first.
+- `/all` in an agent's chat ran another command, `/allow`: that agent never got your question, and a tool named like its first word could then run without asking first (`/all Write a poem` allowed Write). Now that agent answers too, however you capitalize `/all`, with your question exactly as you wrote it, and `/allow` is turned off. Chat apps' command menus list it as `/askall`.
 
 **After updating:**
 - Nothing to do for most. Your agents are rebuilt with fresh downloads, and keep their logins and files.

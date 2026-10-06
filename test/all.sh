@@ -10,7 +10,8 @@
 # A suite whose tool isn't installed is skipped and listed as such; CAGE_TEST_NO_SKIP=1 (CI sets it) makes that a
 # failure instead. The web app suite needs Playwright: PLAYWRIGHT_MODULE=/path/to/node_modules/playwright, or a
 # global install, plus CAGE_TEST_CHROME=/path/to/chrome if Playwright's own Chromium isn't installed.
-# CAGE_TEST_CC_CONNECT=/path/to/cc-connect has the host suite check the generated configs with a real cc-connect.
+# CAGE_TEST_CC_CONNECT=/path/to/cc-connect has the host suite check the generated configs with a real cc-connect,
+# and chat through it.
 # The slow ones need Docker or KVM and run on their own: test/guest-smoke.sh, test/offline-wake.sh, test/microvm-e2e.sh.
 set -uo pipefail
 shopt -s nullglob

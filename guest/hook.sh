@@ -2,6 +2,7 @@
 # cc-connect's hook inside an agent's VM (runs as the agent user, for every message in and out). Hooks can't change
 # messages; this one only leaves requests for cage on your computer, in /cage-outbox:
 #   /all <question> (or @all …)  "ask": your other agents answer in this chat too       (cage ask-all on)
+#                                (/askall too; cc-connect makes them "@all …", after this hook has seen them)
 #   a usage-limit reply          "fallback": another agent answers your last message     (cage fallback <agent> <to>)
 # What's on comes as arguments (from the generated config: hook.sh ask fallback). Everything else arrives in
 # CC_HOOK_* variables, never through a shell.
@@ -38,6 +39,11 @@ remember() { # remember <who> <text>: one line per turn, the last six kept
 }
 
 shopt -s nocasematch
+# A question for all your agents, as cc-connect sees one (so this agent and your others answer the same messages): a
+# message that starts, once trimmed, with /all and a space (cage's aliases: after a tab, it's cc-connect's /allow),
+# /askall and a space or a tab (cage's command too), or @all (plain text, which this agent gets anyway), in any case,
+# and has a question after it. /all@YourBot: Telegram leaves your bot's name on when it's written in another case.
+all_re=$'^(/all(@[A-Za-z0-9_]+)? |/askall(@[A-Za-z0-9_]+)?[ \t]|@all[[:space:]])[[:space:]]*(.+)$'
 # Claude: "5-hour limit reached ∙ resets 3pm", "You've hit your limit", "API Error: 529 Overloaded";
 # Codex: "You've hit your usage limit…", "…429 Too Many Requests"
 limit_re="limit (reached|exceeded|will reset)|hit (your|the) .{0,20}limit|api error: (429|529)|too many requests|out of (credits|usage)|(quota|credits) (exceeded|reached|exhausted)|exceeded (your|the) .{0,20}quota"
@@ -45,10 +51,15 @@ limit_re="limit (reached|exceeded|will reset)|hit (your|the) .{0,20}limit|api er
 case "${CC_HOOK_EVENT:-}" in
   message.received)
     text="${CC_HOOK_CONTENT:-}"
+    # cc-connect trims a message first; what counts here is its start
+    [[ "$text" =~ ^[[:space:]]+ ]] && text="${text:${#BASH_REMATCH[0]}}"
     [ -n "$text" ] || exit 0
-    if [[ "$text" =~ ^[/@]all(@[A-Za-z0-9_]+)?[[:space:]]+(.+)$ ]]; then
-      text="${BASH_REMATCH[2]}"
-      if on ask; then request ask "$text"; fi
+    if [[ "$text" =~ $all_re ]]; then
+      q="${BASH_REMATCH[4]}"
+      if [[ "$q" =~ [^[:space:]] ]]; then
+        text="$q"
+        if on ask; then request ask "$text"; fi
+      fi
     fi
     if on fallback; then remember User "$text"; fi
     ;;
