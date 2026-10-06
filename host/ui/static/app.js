@@ -1495,16 +1495,23 @@ function toolWords (tool, path) { // what a tool does: {what: 'Gmail: send email
   if (/^Web(Fetch|Search)$/.test(tool)) return { what: 'Look something up online' }
   return { what: capital(words(tool)) || tool }
 }
-function looseJSON (text) { // the tool's input as {args, cut}: JSON, or JSON that cc-connect cut short ("..."); else null
+function looseJSON (text) { // the tool's input as {args, cut, open}: JSON, or JSON that cc-connect cut short ("..."); else null
   const t = text.trim()
   if (!t.startsWith('{')) return null
   const obj = (s) => { try { const o = JSON.parse(s); return o && typeof o === 'object' && !Array.isArray(o) ? o : null } catch (e) { return null } }
   const whole = obj(t)
   if (whole) return { args: whole, cut: false }
   if (!t.endsWith('...')) return null
-  // closed off where it was cut (half an escape and a dangling comma dropped first), as far as it goes
+  // closed off where it was cut (half an escape and a dangling comma dropped first), as far as it goes; and which value
+  // that closed off (open): cut right after "cc": or "cc":", it's null or "" only because it was cut there. (Which one
+  // that is: the one that changes when it's closed off with something in it instead.)
   const cut = t.slice(0, -3).replace(/\\+$/, (s) => s.length % 2 ? s.slice(1) : s).replace(/,\s*$/, '')
-  for (const end of ['"}', '}', '":null}', 'null}', '"]}', ']}', '"}}', '}}', '"}]}']) { const o = obj(cut + end); if (o) return { args: o, cut: true } }
+  for (const end of ['"}', '}', '":null}', 'null}', '"]}', ']}', '"}}', '}}', '"}]}']) {
+    const o = obj(cut + end)
+    if (!o) continue
+    const alt = obj(cut + (end.includes('null') ? end.replace('null', '0') : /^["\]]/.test(end) ? '0' + end : end)) || o
+    return { args: o, cut: true, open: Object.keys(o).find((k) => JSON.stringify(o[k]) !== JSON.stringify(alt[k])) }
+  }
   return null
 }
 function shown (v) { // a value as text: a list as "a, b", anything else as JSON. All of it: cc-connect cuts the whole input at
@@ -1571,9 +1578,13 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const inWhat = /^(Change|Read) a file:/.test(what) ? paths[0] : ''
   const bodyKey = APPROVAL_BODY.find((k) => typeof args[k] === 'string' && args[k].trim())
   const known = (k) => APPROVAL_FIELDS.some(([f]) => f === k)
-  const fields = APPROVAL_FIELDS.filter(([k]) => !blank(args[k]) && k !== inWhat).map(([k, label]) => [label, shown(args[k]), k])
+  // Each field it sends, an empty one too ("cc": "", null or []: it's on no line, so Home offers no Allow for it, and
+  // the card shows why), as "" (which the card says is empty); but for one that's empty only because it was cut there
+  const sent = (k) => Object.prototype.hasOwnProperty.call(args, k) && !(k === (parsed && parsed.open) && blank(args[k]))
+  const said = (v) => blank(v) ? '' : shown(v)
+  const fields = APPROVAL_FIELDS.filter(([k]) => sent(k) && k !== inWhat).map(([k, label]) => [label, said(args[k]), k])
   for (const [k, v] of Object.entries(args)) { // everything else it would send: nothing is left out
-    if (k !== bodyKey && !known(k) && !blank(v)) fields.push([capital(words(k)) || JSON.stringify(k), shown(v), k])   // (a name of no letters, "" say, as sent)
+    if (k !== bodyKey && !known(k) && sent(k)) fields.push([capital(words(k)) || JSON.stringify(k), said(v), k])   // (a name of no letters, "" say, as sent)
   }
   // Names that read alike ("TO" next to "to", two files, or a name like one of the card's own, "Command"): the app it
   // goes to may use either one, so each is shown with its name as it was sent ("TO"), and Home doesn't offer Allow
@@ -1653,7 +1664,9 @@ function approvalView (ap) { // what the card shows above its buttons
   return [
     h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
     ...odd,
-    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v, k]) => h('div', {}, h('dt', {}, visible(label)), h('dd', PROSE.includes(k) ? {} : { class: 'exact' }, visible(v))))) : null,
+    // (an empty one says so, in words of the card's own: not what it sent, which could say "(empty)" itself)
+    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v, k]) => h('div', {}, h('dt', {}, visible(label)),
+      v === '' ? h('dd', { class: 'empty' }, '(empty)') : h('dd', PROSE.includes(k) ? {} : { class: 'exact' }, visible(v))))) : null,
     body,
     more,
     ap.cut ? h('p', { class: 'small muted' }, 'Only the start of this was shown here. Allow lets it do all of it.') : null,

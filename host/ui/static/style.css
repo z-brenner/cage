@@ -732,6 +732,7 @@ dialog.keys::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparen
 .approval-fields > div { display: contents; }
 .approval-fields dt { color: var(--muted); overflow-wrap: anywhere; }
 .approval-fields dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
+.approval-fields dd.empty { color: var(--muted); }
 .approval-body { padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--card) 70%, transparent); border: 1px solid var(--line-soft);
   font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval-body .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }

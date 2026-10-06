@@ -1431,6 +1431,7 @@ const asked = async (text) => { // what Home's row and the card show for a reque
     const exact = rows.filter((d) => !['Subject', 'Title'].includes(d.querySelector('dt').textContent)).map((d) => d.querySelector('dd'))
     return {
       fields: rows.map((d) => [d.querySelector('dt').textContent, d.querySelector('dd').textContent]),
+      empty: rows.filter((d) => d.querySelector('dd.empty')).map((d) => d.querySelector('dt').textContent),   // (said to be, in the card's words)
       notes: [...box.querySelectorAll('.note')].map((el) => el.textContent),
       body: clamp && clamp.textContent,
       raw: pre.textContent,
@@ -1646,6 +1647,19 @@ check('an app\'s tool with two files', labelOf(r, '/home/agent/work/notes.md') =
 notAtOnce('an app\'s tool with two files', r, partOnly, /names/)
 r = await asked(permText('mcp__filesystem__write_file', JSON.stringify({ content: 'hello', path: '/home/agent/.bashrc' })))
 check('an app\'s tool with a file', r.home.line === 'Filesystem: write file: /home/agent/.bashrc', 'Home shows ' + JSON.stringify(r.home.line))
+// Empty fields ("cc": "", null or []) are on no line, so Home offers no Allow; Open shows why: the card has each one,
+// said to be empty in the card's own words (not like a field that says "(empty)" itself)
+const empties = { bcc: null, cc: '', instructions: 'Tell Bob the brief is ready', labels: [], reply_to: '(empty)', to: 'bob@acme.com' }
+r = await asked(permText('mcp__zapier__gmail_send_email', JSON.stringify(empties)))
+shownAsIs('empty fields', r)
+check('empty fields', JSON.stringify(r.card.fields) === JSON.stringify([['To', 'bob@acme.com'], ['Cc', '(empty)'], ['Bcc', '(empty)'], ['Labels', '(empty)'], ['Reply to', '(empty)']]) &&
+  JSON.stringify(r.card.empty) === '["Cc","Bcc","Labels"]', 'the card shows ' + JSON.stringify([r.card.fields, r.card.empty]))
+check('empty fields', r.home.line === 'Gmail: send email to bob@acme.com: Tell Bob the brief is ready', 'Home shows ' + JSON.stringify(r.home.line))
+notAtOnce('empty fields', r, partOnly)
+// (but not one that's null, "" or [] only because cc-connect cut what it asked right there: it may not be empty at all)
+const cutThere = await page.evaluate((asks) => asks.map((text) => approvalOf(text).fields.map(([label, v]) => label + ': ' + v)),
+  ['"subject":...', '"subject":"...', '"labels":[...', '"subj...'].map((end) => permText('mcp__zapier__gmail_send_email', '{"cc":"","to":"bob@acme.com",' + end)))
+check('empty fields', cutThere.every((f) => JSON.stringify(f) === '["To: bob@acme.com","Cc: "]'), 'the card shows, of what was cut: ' + JSON.stringify(cutThere))
 
 // Home has the first 4,000 characters of what it asks (server.py's activity()): a longer one is more than its line,
 // though a "```" in it would end what Home read of it there ("ls ~/docs '")
