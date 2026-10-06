@@ -430,13 +430,14 @@ cage voice on </dev/null 2>/dev/null
 cage up claude codex 2>/dev/null
 t="$CAGE_HOME/agents/claude/cc-connect.toml"
 [ "$(grep -c '^command = "/bin/bash /cage/hook.sh ask fallback"$' "$t")" = 3 ] || fail "claude's hooks: $(grep -A4 hooks "$t")"
-# a command called all would be cc-connect's /allow, so it's askall, with /all (each way to capitalize it) an alias
-grep -q '^name = "askall"$' "$t" && grep -q '^prompt = "{{args}}"$' "$t" || fail "no /askall command: $(cat "$t")"
+# /all (each way to capitalize it) and /askall are aliases for plain "@all": a command called all would be
+# cc-connect's /allow, and a command gets the question cut into words. /askall is a command too, for chat app menus.
+grep -q '^name = "askall"$' "$t" && grep -q '^prompt = "@all {{args}}"$' "$t" || fail "no /askall command: $(cat "$t")"
 grep -q '^name = "all"$' "$t" && fail "a command called all (cc-connect runs /allow for it)"
-for v in all All ALL aLl; do
-  grep -A2 '^\[\[aliases\]\]$' "$t" | grep -A1 -x "name = \"/$v\"" | grep -qx 'command = "/askall"' || fail "/$v isn't /askall: $(cat "$t")"
+for v in all All ALL aLl alL askall AskAll ASKALL; do
+  grep -A2 '^\[\[aliases\]\]$' "$t" | grep -A1 -x "name = \"/$v\"" | grep -qx 'command = "@all"' || fail "/$v isn't @all: $(cat "$t")"
 done
-[ "$(grep -c '^command = "/askall"$' "$t")" = 8 ] || fail "not every way to write /all is /askall: $(grep -A2 '^\[\[aliases\]\]$' "$t")"
+[ "$(grep -c '^command = "@all"$' "$t")" = 12 ] || fail "not every way to write /all and /askall is @all: $(grep -A2 '^\[\[aliases\]\]$' "$t")"
 grep -q '^base_url = "http://127.0.0.1:8178/v1"$' "$t" && grep -q '^provider = "openai"$' "$t" || fail "voice: no local speech-to-text"
 grep -q '^VOICE_MODE=local$' "$CAGE_HOME/agents/claude/voice.env" || fail "voice.env"
 grep -q '^command = "/bin/bash /cage/hook.sh ask"$' "$CAGE_HOME/agents/codex/cc-connect.toml" || fail "codex has no stand-in, only /all"
@@ -445,13 +446,13 @@ if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   out="$(HOME="$T/cc-relay" timeout 5 "$CAGE_TEST_CC_CONNECT" --config "$t" 2>&1 || true)"
   grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"
 fi
-ok "/all, stand-ins and voice notes: hooks, the /all command (/askall), local speech-to-text, the outbox mount"
+ok "/all, stand-ins and voice notes: hooks, /all and /askall (@all), local speech-to-text, the outbox mount"
 if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   # the real cc-connect, chatting with a stand-in claude, through the app's relay: test/cc-chat.mjs says what it checks
   command -v node >/dev/null || fail "test/cc-chat.mjs needs node"
   node "$ROOT/test/cc-chat.mjs" "$CAGE_TEST_CC_CONNECT" "$t" 2>"$T/cc-chat.err" || fail "chatting through cc-connect:
 $(cat "$T/cc-chat.err")"
-  ok "a real cc-connect: /all in any case and /askall reach the agent and ask the others; /allow is off, nothing is pre-allowed"
+  ok "a real cc-connect: /all in any case, /askall and @all reach the agent as written, busy or not, and ask the others the same; /allow is off"
 fi
 
 # guest/hook.sh as cc-connect runs it: everything in environment variables
@@ -470,8 +471,8 @@ hook CC_HOOK_EVENT=message.sent CC_HOOK_CONTENT="5-hour limit reached ∙ resets
 grep -lx fallback "$O"/*/kind >/dev/null || fail "no fallback request"
 f="$(dirname "$(grep -lx fallback "$O"/*/kind)")/text"
 grep -q '^User: hi there$' "$f" && grep -q '^Agent: Hello! How can I help?$' "$f" && grep -q "^User: what's the capital" "$f" || fail "stand-in context: $(cat "$f")"
-# cc-connect makes /all (in any case) /askall after the hook has seen it; both ask the others, @all and Telegram's
-# /all@yourbot too. Anything else starting with /all doesn't.
+# cc-connect makes /all (in any case) and /askall "@all …" after the hook has seen them; both ask the others, @all and
+# Telegram's /all@yourbot too. Anything else starting with /all doesn't.
 mkdir "$T/outbox-all"
 for m in "/askall Q1" "/ALL Q2" "/aLl Q3" "@all Q4" "/all@cage_claude_bot Q5" "/AskAll Q6" "/allow Q7" "/allQ8" "/askallQ9" "all Q10"; do
   hook CC_HOOK_EVENT=message.received CC_HOOK_CONTENT="$m" CAGE_OUTBOX="$T/outbox-all" CC_HOOK_SESSION_KEY=telegram:222:222

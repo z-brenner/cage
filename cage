@@ -653,23 +653,27 @@ timeout = 10
 "
     done
   fi
-  # cc-connect tries its own commands first, and any unique start of one's name will do, so a command called "all"
-  # was its /allow: "/all Write a poem" pre-allowed a tool called Write, and this agent never got the question. So
-  # the command is "askall" (no built-in name starts with that), and /all is an alias for it, once for each way to
-  # capitalize it: an alias must match exactly, and guest/hook.sh takes /all in any case. /allow itself is off
-  # (disabled_commands below); what an agent asks about first is set with cage approve and the app's buttons.
+  # /all <question>: guest/hook.sh asks your other agents, and this one answers as it does any message. Not through a
+  # command: cc-connect tries its own first, by any unique start of their names, so one called "all" was its /allow
+  # ("/all Write a poem" pre-allowed a tool called Write, and this agent never got the question); and a command of
+  # ours gets the question cut into words (quotes and indentation lost) and is refused while the agent is busy. So
+  # /all is an alias for "@all", once for each way to capitalize it (an alias matches the first word exactly, and
+  # only before a space; guest/hook.sh goes by the same rules): "/all <question>" reaches this agent as
+  # "@all <question>", the same as typing @all. /askall does the same; it's also a command, so chat apps list it in
+  # their menus, and says "@all" too when it's written some other way. /allow itself is off (disabled_commands
+  # below); what an agent asks about first is set with cage approve and the app's buttons.
   if [[ " $features " == *" ask "* ]]; then
     extras="$extras
 [[commands]]
 name = \"askall\"
 description = \"Ask all your agents (each answers here), same as /all\"
-prompt = \"{{args}}\"
+prompt = \"@all {{args}}\"
 "
-    for v in all alL aLl aLL All AlL ALl ALL; do
+    for v in all alL aLl aLL All AlL ALl ALL askall Askall AskAll ASKALL; do
       extras="$extras
 [[aliases]]
 name = \"/$v\"
-command = \"/askall\"
+command = \"@all\"
 "
     done
   fi

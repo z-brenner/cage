@@ -4,9 +4,10 @@
 // The config runs as cage wrote it, but for what only works in a VM: its folders and ports are temporary ones, its
 // chat apps give way to the placeholder cage uses when there are none, its hook is this checkout's guest/hook.sh,
 // and claude is a stand-in (test/fixtures/fake-claude.mjs). The app's relay (guest/app.mjs) is the real one.
-// Checks: /all in any case and /askall reach the agent as the question alone, and reach guest/hook.sh as you typed
-// them (it asks your other agents); /allow (cc-connect's own, which pre-allows a tool) is off, and nothing typed here
-// pre-allows a tool.
+// Checks: /all in any case, /askall and @all reach the agent as "@all <your question>", exactly as you wrote it (with
+// a picture, and while it's busy too), and reach guest/hook.sh as you typed them; the hook asks your other agents the
+// same question, and only when the agent got one. /allow (cc-connect's own, which pre-allows a tool) is off, and
+// nothing typed here pre-allows a tool.
 import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import net from 'node:net'
@@ -72,8 +73,8 @@ channel_token = "${'t'.repeat(32)}"
 allow_from = "nobody"
 port = "${ports.line}"
 `
-  // and one more hook, that notes what it's given
-  fs.writeFileSync(path.join(T, 'seen.sh'), `printf '%s\\n' "$CC_HOOK_CONTENT" >> '${T}/seen.txt'\n`)
+  // and one more hook, that notes what it's given (each message ends with a NUL: one can be several lines)
+  fs.writeFileSync(path.join(T, 'seen.sh'), `printf '%s\\0' "$CC_HOOK_CONTENT" >> '${T}/seen.txt'\n`)
   toml = toml.replace(/^\[\[projects\]\]$/m,
     `[[hooks]]\nevent = "message.received"\ntype = "command"\ncommand = "/bin/sh '${T}/seen.sh'"\ntimeout = 10\n\n$&`)
   const conf = path.join(T, 'cc-connect.toml')
@@ -123,60 +124,96 @@ try {
   const chat = () => jsonl(path.join(APP, 'log.jsonl'))
   await until('the relay to connect', () => chat().some((e) => e.t === 'status' && e.connected))
 
-  // what the app does (host/ui/server.py): a request in in/, written then renamed. Each in its own chat, so none
+  // what the app does (host/ui/server.py): a request in in/, written then renamed. Each case in its own chat, so none
   // waits for another.
   let n = 0
-  const say = (session, text) => {
+  const say = (session, text, files) => {
     const id = `${String(++n).padStart(4, '0')}-test`
-    fs.writeFileSync(path.join(APP, 'in', `.${id}.tmp`), JSON.stringify({ id, type: 'message', session, text }))
+    fs.writeFileSync(path.join(APP, 'in', `.${id}.tmp`), JSON.stringify({ id, type: 'message', session, text, files }))
     fs.renameSync(path.join(APP, 'in', `.${id}.tmp`), path.join(APP, 'in', `${id}.json`))
   }
   const said = (session) => chat().filter((e) => e.session === session && e.t !== 'typing' && e.t !== 'status')
     .map((e) => e.text ?? JSON.stringify(e.card ?? e.buttons ?? '')).filter(Boolean)
-  const heard = () => jsonl(AGENT).filter((e) => 'message' in e).map((e) => e.message)
+  // what the agent got: its text (without the note cc-connect adds about where it saved a picture), and its pictures
+  const heard = () => jsonl(AGENT).filter((e) => 'message' in e)
+    .map((e) => ({ text: e.message.replace(/\n\n\(Images also saved locally: [^\n]*\)$/, ''), images: e.images }))
   const requests = () => fs.readdirSync(OUTBOX).filter((d) => !d.startsWith('.')).map((d) => {
     const r = (f) => fs.readFileSync(path.join(OUTBOX, d, f), 'utf8')
     return { kind: r('kind'), session: r('session'), text: r('text') }
   })
-  const seen = () => lines(path.join(T, 'seen.txt'))
+  const asked = (session) => requests().filter((r) => r.session === `app:${session}:you`).map((r) => `${r.kind}: ${r.text}`)
+  const seen = () => { try { return fs.readFileSync(path.join(T, 'seen.txt'), 'utf8').split('\0').slice(0, -1) } catch { return [] } }
   const shown = (session) => `the chat says: ${JSON.stringify(said(session))}`
+  const json = JSON.stringify
   // over when the agent answered, or cc-connect did instead
   const over = (session) => until(`an answer in ${session}`, () => said(session).some((t) => /ok: |pre-allowed|disabled/.test(t)))
 
-  const asks = ['/all Write a poem about spring', '/All Write a haiku', '/ALL Write a limerick', '/aLl Write a sonnet',
-    '/askall Write an ode']
-  for (const [i, typed] of asks.entries()) {
-    const session = `ask${i}`
-    const question = typed.replace(/^\S+ /, '')
-    say(session, typed)
+  // typed: what you send. agent: what the agent gets (null: nothing, and cc-connect says /allow is off). others: the
+  // question your other agents are asked (null: none).
+  const ask = (typed) => {
+    const question = typed.replace(/^\s*\S+ /, '')
+    return { typed, agent: '@all ' + question, others: question }
+  }
+  const off = (typed) => ({ typed, agent: null, others: null })
+  fs.writeFileSync(path.join(APP, 'files', 'dot.png'), Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'))
+  const cases = [
+    ask('/all Write a poem about spring'), ask('/All Write a haiku'), ask('/ALL Write a limerick'),
+    ask('/aLl Write a sonnet'), ask('/askall Write an ode'), ask('/AskAll Write a ballad'), ask('@all Write an elegy'),
+    // the question just as you wrote it
+    ask(`/all What's the user's name? Say "hi" to them.`),
+    ask('/all Fix this:\n    if x:\n        return 1'),
+    ask(`/all echo "$HOME" and 'single'  a  b   c`),
+    { ...ask('/all Describe this picture'), files: [{ path: 'files/dot.png', mime: 'image/png', name: 'dot.png' }] },
+    // nothing to ask: the agent gets "@all", not an empty message
+    { typed: '/all', agent: '@all', others: null },
+    // cc-connect's /allow, however it's written
+    off('/allow Bash'), off('/ALLOW Bash'), off('/allo Bash')
+  ]
+  for (const [i, c] of cases.entries()) {
+    c.session = `case${i}`
+    const before = heard().length
+    say(c.session, c.typed, c.files)
     try {
-      await over(session)
-      if (!heard().includes(question)) {
-        problems.push(`"${typed}": the agent didn't get "${question}" (it got: ${JSON.stringify(heard())}); ${shown(session)}`)
+      await over(c.session)
+      const got = heard().slice(before)
+      const want = c.agent === null ? [] : [{ text: c.agent, images: c.files ? 1 : 0 }]
+      if (json(got) !== json(want)) problems.push(`${json(c.typed)}: the agent got ${json(got)}, not ${json(want)}; ${shown(c.session)}`)
+      if (c.agent === null && !said(c.session).some((t) => /\/allow\b.*disabled/s.test(t))) {
+        problems.push(`${json(c.typed)}: cc-connect didn't say /allow is off; ${shown(c.session)}`)
       }
-      await until(`"${typed}" to reach the hook`, () => seen().includes(typed), 10000)
-        .catch(() => problems.push(`"${typed}": the hook wasn't given it as typed (it saw: ${JSON.stringify(seen())})`))
-      const asked = (r) => r.kind === 'ask' && r.session === `app:${session}:you` && r.text === question
-      await until(`"${typed}" to ask the others`, () => requests().some(asked), 10000)
-        .catch(() => problems.push(`"${typed}": guest/hook.sh didn't ask the others "${question}" (it asked: ${JSON.stringify(requests())})`))
-    } catch (e) { problems.push(`"${typed}": ${e.message}; ${shown(session)}`) }
+    } catch (e) { problems.push(`${json(c.typed)}: ${e.message}; ${shown(c.session)}`) }
   }
 
-  const refused = ['/allow Bash', '/ALLOW Bash', '/allo Bash']
-  for (const [i, typed] of refused.entries()) {
-    const session = `allow${i}`
-    say(session, typed)
-    try {
-      await over(session)
-      if (!said(session).some((t) => t.includes('/allow') && t.includes('disabled'))) {
-        problems.push(`"${typed}": cc-connect didn't say /allow is off; ${shown(session)}`)
-      }
-    } catch (e) { problems.push(`"${typed}": ${e.message}; ${shown(session)}`) }
+  // While the agent is busy, /all waits its turn, like any message
+  const slow = 'Take your time over this one'
+  const busy = { typed: '/all Write while busy', session: 'busy', others: 'Write while busy' }
+  say('busy', slow)
+  try {
+    await until('the agent to start on the slow one', () => heard().some((e) => e.text === slow))
+    say('busy', busy.typed)
+    await until('the agent to get /all after the slow one', () => heard().some((e) => e.text === '@all Write while busy'), 20000)
+  } catch (e) { problems.push(`${json(busy.typed)} while the agent is busy: ${e.message}; ${shown('busy')}`) }
+  if (said('busy').some((t) => /still processing/i.test(t))) problems.push(`${json(busy.typed)} while the agent is busy: ${shown('busy')}`)
+
+  // guest/hook.sh was given each message as typed, and asked the others the agent's question, when it got one
+  const hooked = [...cases, busy]
+  await until('the hooks', () => hooked.every((c) => seen().includes(c.typed)), 10000)
+    .catch(() => problems.push(`the hooks weren't given every message as typed: they saw ${json(seen())}`))
+  await until('guest/hook.sh', () => hooked.every((c) => c.others === null || asked(c.session).length), 10000).catch(() => {})
+  await sleep(500)   // (and for any it shouldn't have asked)
+  for (const c of hooked) {
+    const want = c.others === null ? [] : [`ask: ${c.others}`]
+    if (json(asked(c.session)) !== json(want)) problems.push(`${json(c.typed)}: guest/hook.sh asked the others ${json(asked(c.session))}, not ${json(want)}`)
   }
+  const sessions = hooked.map((c) => `app:${c.session}:you`)
+  const stray = requests().filter((r) => !sessions.includes(r.session))
+  if (stray.length) problems.push(`guest/hook.sh asked the others from another chat: ${json(stray)}`)
+
   // A tool cc-connect pre-allows is on the command line of the agent's next session: start one, and look.
   say('after', 'Hello again')
   try {
-    await until('the agent to answer in a new chat', () => heard().includes('Hello again'))
+    await until('the agent to answer in a new chat', () => heard().some((e) => e.text === 'Hello again'))
     const pid = jsonl(AGENT).find((e) => e.message === 'Hello again').pid
     const args = jsonl(AGENT).find((e) => e.pid === pid && e.args).args
     const i = args.indexOf('--allowedTools')
@@ -184,9 +221,7 @@ try {
     if (extra.length) problems.push(`pre-allowed: ${extra.join(', ')} (claude's next session started with: ${args.join(' ')})`)
   } catch (e) { problems.push(`a new chat: ${e.message}`) }
   const pre = chat().filter((e) => /pre-allowed/.test(e.text || ''))
-  if (pre.length) problems.push(`cc-connect pre-allowed tools: ${JSON.stringify(pre.map((e) => [e.session, e.text]))}`)
-  await until('the hooks for /allow', () => refused.every((typed) => seen().includes(typed)), 10000).catch(() => {})
-  if (requests().some((r) => !r.session.startsWith('app:ask'))) problems.push(`/allow asked the others: ${JSON.stringify(requests())}`)
+  if (pre.length) problems.push(`cc-connect pre-allowed tools: ${json(pre.map((e) => [e.session, e.text]))}`)
 } catch (e) {
   problems.push(e.message)
 } finally {

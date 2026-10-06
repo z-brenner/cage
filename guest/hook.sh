@@ -2,7 +2,7 @@
 # cc-connect's hook inside an agent's VM (runs as the agent user, for every message in and out). Hooks can't change
 # messages; this one only leaves requests for cage on your computer, in /cage-outbox:
 #   /all <question> (or @all …)  "ask": your other agents answer in this chat too       (cage ask-all on)
-#                                (the same as /askall: cc-connect makes /all that, after this hook has seen it)
+#                                (/askall too; cc-connect makes them "@all …", after this hook has seen them)
 #   a usage-limit reply          "fallback": another agent answers your last message     (cage fallback <agent> <to>)
 # What's on comes as arguments (from the generated config: hook.sh ask fallback). Everything else arrives in
 # CC_HOOK_* variables, never through a shell.
