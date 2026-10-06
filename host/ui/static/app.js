@@ -1698,8 +1698,9 @@ function choose (C, box, value, label, pending) {
   const row = box.querySelector('.choice-row')
   answered(box, label)
   api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label, pending } }).catch((err) => {
-    if (err.status === 409 && pending) { // the agent has moved on, or it was answered already: nothing was sent
-      answered(box, '', /^You answered/.test(err.message) ? 'You answered it already.' : nameOf(C.agent) + ' isn’t waiting for this any more.')
+    if (err.status === 409 && pending) { // the agent has moved on, it was answered already, or its VM stopped: nothing was sent
+      answered(box, '', /^You answered/.test(err.message) ? 'You answered it already.' : /^It stopped/.test(err.message) ? stoppedWaiting(C.agent)
+        : nameOf(C.agent) + ' isn’t waiting for this any more.')
       return
     }
     // it didn't go (cage isn't answering, say): its buttons again, to answer once it can
@@ -1707,8 +1708,23 @@ function choose (C, box, value, label, pending) {
     const chosen = box.querySelector('.chosen')
     if (row && chosen) chosen.replaceWith(row)
     box.querySelectorAll(ANSWERS).forEach((b) => { b.disabled = false })
+    drawAsking(C)   // (unless its agent isn't up any more)
     toast(err.message)
   })
+}
+// cc-connect forgets an approval when it stops (asleep, say), and drops an answer to one it forgot without a word: so
+// while its agent isn't up, the card that waits offers no answers, and says why, as Home offers none (askingOf). Up
+// again with nothing that ended the wait (it only looked away), it offers them again.
+// (server.py refuses an answer while the agent's VM isn't running, for when this page doesn't know yet.)
+function stoppedWaiting (agent) { return nameOf(agent) + ' stopped while waiting for your OK, so it won’t go ahead.' }
+function drawAsking (C) {
+  const box = C.asking
+  if (!box || box.classList.contains('is-answered')) return
+  const a = agentOf(C.agent)
+  const row = box.querySelector('.choice-row')
+  const note = box.querySelector('.chosen')
+  if (a && a.state === 'ready') { if (note && note.row) note.replaceWith(note.row) }
+  else if (row) row.replaceWith(Object.assign(h('div', { class: 'chosen over' }, icon('info'), stoppedWaiting(C.agent)), { row }))   // (its buttons kept for then)
 }
 // What a card says once it's answered (what you chose), or once it can't be (why), instead of its buttons. Only its
 // answers are off: what it shows can still be read (an email's body, with Show all)
@@ -1798,10 +1814,12 @@ async function wake (C) { // wake the chat's agent up, and say so if that doesn'
     })
   } catch (e) { C.waking = false; C.woke = 'none'; C.typing.hidden = true; drawChatState(C) }
 }
-// The line above the message box: what's in the way of a reply, if anything
+// The line above the message box: what's in the way of a reply, if anything (and the approval waiting, if any, offers
+// answers only while its agent is up)
 function drawChatState (C, nudge) {
   const a = agentOf(C.agent)
   if (!a) return
+  drawAsking(C)
   if (a.state === 'ready' || a.state === 'installing') { C.waking = false; C.woke = null }   // it's up (after all)
   const ban = (tone, ic, text, action) => { C.banner.className = 'chat-banner ' + tone; C.banner.replaceChildren(icon(ic), h('span', { class: 'grow' }, text), action || ''); C.banner.hidden = false }
   C.empty.hidden = C.list.childElementCount > 0 || !C.loaded

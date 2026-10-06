@@ -50,7 +50,7 @@ ends()) comes to the page with "ends": true, in history and stream alike, so its
                                         an approval (perm:) comes with the one it answers, {"text", "at"}, as
                                         /api/activity gave it or as its line in the log says it: 409 if it isn't that one
                                         now, or says none. 409 too for a second answer to one, until the VM has taken the
-                                        first)
+                                        first, and for one to an agent whose VM isn't running, as msb says)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
   POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
                                         seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
@@ -58,7 +58,7 @@ ends()) comes to the page with "ends": true, in history and stream alike, so its
   GET  /api/chat/<a>/file?p=files/…     a file from the chat (pictures shown, the rest downloaded)
 """
 import base64, fcntl, hashlib, hmac, http.server, json, math, os, pty, re, secrets, signal, socket, stat, struct, subprocess, sys
-import termios, threading, time, unicodedata, urllib.parse, urllib.request
+import shutil, termios, threading, time, unicodedata, urllib.parse, urllib.request
 
 CAGE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "..", "cage")
 HOME = os.environ.get("CAGE_HOME") or os.path.expanduser("~/.cage")
@@ -817,6 +817,38 @@ class Answered:
             cls.last[agent] = pending
 
 
+def find_msb():
+    """msb, found where cage finds it (find_msb): $CAGE_MSB, on PATH, or where microsandbox's installer puts it (not on
+    PATH in a session started at login); None if it's nowhere."""
+    if os.environ.get("CAGE_MSB"):
+        return os.environ["CAGE_MSB"]
+    home = os.path.expanduser("~")
+    for m in (shutil.which("msb"), os.path.join(home, ".local", "bin", "msb"),
+              os.path.join(os.environ.get("MSB_HOME") or os.path.join(home, ".microsandbox"), "bin", "msb")):
+        if m and os.path.isfile(m) and os.access(m, os.X_OK):
+            return m
+    return None
+
+
+STOPPED = "It stopped while waiting for your OK, so it won’t go ahead."
+
+
+def vm_running(agent):
+    """Is the agent's VM running? As msb says, asked as cage asks it (refresh_running), which is what makes cage call an
+    agent asleep: True or False, or None when msb can't say (it isn't there, fails, or takes more than a few seconds).
+    One quick look on this computer, nothing asked of the VM (as `cage _state` asks each one), for an answer to an
+    approval only: cc-connect keeps what it asked only in memory, so a VM that isn't running has forgotten it, and
+    cc-connect, started afresh when it wakes, drops an answer to it without a word."""
+    m = find_msb()
+    if not m:
+        return None
+    try:
+        r = subprocess.run([m, "ps", "-q", "--label", "app=cage"], stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return f"cage-{agent}" in r.stdout.decode("utf-8", "replace").split() if r.returncode == 0 else None
+
+
 def ask_usage(c, timeout=25):
     """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show), and waits
     a while for the answer: {"rid": the question's id, "pos": how far its log has been read for the answer, "entry": the
@@ -1329,6 +1361,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # since (by a message, from another window), ended (/stop, /new, cc-connect restarted) or asked anew,
                 # it may be asking something else, which an Allow meant for that one would say yes to. One that doesn't
                 # say which it answers can't be told apart from those. And nowhere a second answer to one (Answered).
+                # Nor while its VM isn't running (asleep, say), though its log still has it waiting: cc-connect forgot
+                # it when it stopped (see vm_running()). The page offers no answer then, but it may not know yet.
                 asks = "pending" in b or action.startswith("perm:")
                 with Answered.of(c.agent):
                     now = activity(c, 0)["pending"] if session == "you" and (asks or answers(said)) else None
@@ -1337,6 +1371,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         error = "It isn’t waiting for that any more. Open its chat to see what it’s doing."
                     elif again and asks:
                         error = "You answered that already."
+                    elif asks and vm_running(c.agent) is False:
+                        error = STOPPED
                     else:
                         error = None
                         rid = c.send({"type": "action", "session": session, "action": action, "label": str(b.get("label", ""))[:200]})

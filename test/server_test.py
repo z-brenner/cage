@@ -14,6 +14,16 @@ os.environ["CAGE_HOME"] = HOME
 spec = importlib.util.spec_from_file_location("server", os.path.join(os.path.dirname(__file__), "..", "host", "ui", "server.py"))
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
+# msb, which the server asks which VMs are running (an answer to an approval goes only to an agent whose VM is): this
+# one says the VMs in RUNNING are (every agent's, but where a test says otherwise), and fails when there's no such file
+RUNNING, MSB = os.path.join(HOME, "running"), os.path.join(HOME, "msb")
+EVERY_VM = "".join(f"cage-{a}\n" for a in server.AGENTS)
+with open(MSB, "w") as f:
+    f.write('#!/bin/sh\n[ "$*" = "ps -q --label app=cage" ] && exec cat "%s"\nexit 2\n' % RUNNING)
+os.chmod(MSB, 0o755)
+os.environ["CAGE_MSB"] = MSB
+with open(RUNNING, "w") as f:
+    f.write(EVERY_VM)
 
 
 class Names(unittest.TestCase):
@@ -597,6 +607,41 @@ def strict(body):
     return json.loads(body, parse_constant=refuse)
 
 
+class FindMsb(unittest.TestCase):
+    """msb, found where cage finds it: $CAGE_MSB; else on PATH; else where microsandbox's installer puts it, which a
+    session started at login doesn't have on PATH (~/.local/bin, or $MSB_HOME/bin: ~/.microsandbox/bin unless set)."""
+    def test_where(self):
+        d, saved = tempfile.mkdtemp(dir=HOME), {k: os.environ.get(k) for k in ("CAGE_MSB", "PATH", "HOME", "MSB_HOME")}
+
+        def found_once_put(*where):   # (an msb there now, and that's the one found)
+            path = os.path.join(d, *where, "msb")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+            self.assertEqual(server.find_msb(), path)
+        try:
+            os.environ.update(HOME=d, PATH=os.path.join(d, "bin"))
+            for k in ("CAGE_MSB", "MSB_HOME"):
+                os.environ.pop(k, None)
+            self.assertIsNone(server.find_msb())
+            self.assertIsNone(server.vm_running("claude"))   # (it can't say)
+            found_once_put(".microsandbox", "bin")
+            os.environ["MSB_HOME"] = os.path.join(d, "msb-home")
+            self.assertIsNone(server.find_msb())
+            found_once_put("msb-home", "bin")
+            found_once_put(".local", "bin")
+            found_once_put("bin")
+            os.environ["CAGE_MSB"] = "/opt/microsandbox/msb"
+            self.assertEqual(server.find_msb(), "/opt/microsandbox/msb")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 class Live(unittest.TestCase):
     """What Home asks of the server (/api/activity, Allow and Deny on /api/chat/<a>/action, plan usage) and the chats'
     stream, asked over HTTP of the real handler, as a page, or anything else on this computer, could ask it. The
@@ -905,6 +950,40 @@ class Live(unittest.TestCase):
         self.assertEqual(strict(self.call("GET", "/api/activity?agents=claude")[2])["agents"]["claude"]["pending"], p)
         self.assertEqual(self.answer("claude", "perm:allow", self.card("claude"))[0], 200)
         self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
+
+    def test_not_while_its_vm_is_stopped(self):
+        """An answer to an approval while the agent's VM isn't running (asleep, say), as msb says, though its log still
+        has it waiting: cc-connect keeps what it asked only in memory, so it forgot it when it stopped, and started
+        afresh, it would drop the answer without a word. So it gets 409 (from Home or a card), and nothing is sent; once
+        the VM runs again, the answer goes. When msb can't say (it fails, or isn't there), it goes: the page offers none
+        while the agent isn't up. Anything else (a card's button, a message) still goes, and waits for the agent."""
+        try:
+            for running in ("", "cage-codex\ncage-claude-2\n"):
+                with open(RUNNING, "w") as f:
+                    f.write(running)
+                p = self.asks("claude", "Bash(rm -rf ~/work/old)")
+                for action, pending in (("perm:allow", p), ("perm:deny", p), ("perm:allow_all", p), ("perm:allow", self.card("claude"))):
+                    status, _, body = self.answer("claude", action, pending)
+                    self.assertEqual((status, strict(body)["error"]), (409, "It stopped while waiting for your OK, so it won’t go ahead."), (running, action))
+                self.assertEqual(self.sent("claude"), [])
+                self.assertEqual(self.answer("claude", "nav:/help")[0], 200)
+                self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "What does it delete?"})[0], 200)
+                self.assertEqual([r.get("action") or r["text"] for r in self.sent("claude")], ["nav:/help", "What does it delete?"])
+                self.taken("claude")
+            with open(RUNNING, "w") as f:   # running again (with the approval still waiting: it only looked away)
+                f.write(EVERY_VM)
+            self.assertEqual(self.answer("claude", "perm:deny", p)[0], 200)
+            self.taken("claude")
+            os.unlink(RUNNING)   # msb fails
+            self.assertEqual(self.answer("claude", "perm:deny", self.asks("claude", "Bash(ls)"))[0], 200)
+            self.taken("claude")
+            os.environ["CAGE_MSB"] = os.path.join(HOME, "no-msb")   # msb isn't there
+            self.assertEqual(self.answer("claude", "perm:allow", self.asks("claude", "Bash(ls -la)"))[0], 200)
+            self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
+        finally:
+            os.environ["CAGE_MSB"] = MSB
+            with open(RUNNING, "w") as f:
+                f.write(EVERY_VM)
 
     def test_one_answer_per_approval(self):
         """cc-connect's buttons say allow or deny, not to what: an answer goes to whatever waits when it gets there.

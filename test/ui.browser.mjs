@@ -1301,6 +1301,38 @@ if (wontSend() !== wontSendCard + 1) fail('Deny on the card the agent waits for 
 await page.waitForFunction((n) => LIVE.offsets.claude >= n, fs.statSync(claudeLog).size, { timeout: 10000 })   // (read here, not news later)
 ok('a card in the chat answers the approval it shows, or none: one answered, stopped, ended, asked anew or answered elsewhere offers nothing, and says so')
 
+// ...and only while its agent is up: one that went to sleep has forgotten what it asked, and would drop an answer to it
+// without a word. Its card offers none, and says so, as Home's row does; up again with nothing that ended the wait, it
+// offers them again. One the page still shows as up after its VM has stopped is refused when it's clicked: nothing is
+// sent, and it says why. (Codex stands for any agent that asks, as on Home.)
+await page.locator('#nav-agents').getByRole('link', { name: 'Codex' }).click()
+await page.waitForFunction(() => CHAT && CHAT.agent === 'codex' && CHAT.loaded, null, { timeout: 15000 })
+const codexCards = chat.locator('.choices.approval')
+const codexAnswers = () => (fs.existsSync(codexIn) ? fs.readdirSync(codexIn) : []).filter((n) => n.endsWith('.json'))
+  .map((n) => JSON.parse(fs.readFileSync(path.join(codexIn, n), 'utf8'))).filter((r) => r.type === 'action')
+const stoppedNote = 'Codex stopped while waiting for your OK, so it won’t go ahead.'
+const asleepCard = codexCards.nth(await codexCards.count())
+fs.appendFileSync(codexLog, JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: permButtons, text: permText('Bash', 'rm -rf dist') }) + '\n')
+await asleepCard.locator('.chosen', { hasText: stoppedNote }).waitFor({ timeout: 10000 })
+  .catch(async () => fail('a card whose agent is asleep doesn’t say it stopped while waiting for your OK: ' + await asleepCard.innerText()))
+if (await asleepCard.getByRole('button', { name: /^(Allow|Deny)/ }).count()) fail('a card whose agent is asleep offers to answer it')
+fs.writeFileSync(process.env.STUB_AWAKE, '')
+await codexUp(true)
+await asleepCard.getByRole('button', { name: 'Allow', exact: true }).waitFor({ timeout: 10000 })
+  .catch(async () => fail('a card whose agent is up again, with nothing that ended the wait, doesn’t offer Allow again: ' + await asleepCard.innerText()))
+await page.evaluate(() => { window.__refresh = window.refresh; window.refresh = async () => {} })   // (the page doesn't look again yet)
+fs.rmSync(process.env.STUB_AWAKE)
+const errorsStopped = errors.length
+await asleepCard.getByRole('button', { name: 'Allow', exact: true }).click()
+await asleepCard.locator('.chosen', { hasText: stoppedNote }).waitFor({ timeout: 10000 })
+  .catch(async () => fail('Allow on a card whose agent\'s VM has stopped doesn’t say it stopped: ' + await asleepCard.innerText()))
+errors.splice(errorsStopped, errors.length, ...errors.slice(errorsStopped).filter((m) => !/status of 409/.test(m)))   // (refused: that's the point)
+if (!(await asleepCard.evaluate((el) => el.classList.contains('is-answered')))) fail('Allow refused for an agent whose VM stopped: the card may offer it again')
+if (codexAnswers().length) fail('Allow reached an agent whose VM had stopped: ' + JSON.stringify(codexAnswers()))
+await page.evaluate(() => { window.refresh = window.__refresh })
+await codexUp(false)
+ok('a card offers no answer while its agent is asleep, and says so; one clicked after its VM stopped is refused, and nothing is sent')
+
 // how much is left of each plan, on Home: bars from each agent's /usage card; one that ran out is offered a stand-in
 await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
 const plans = page.locator('.plans')

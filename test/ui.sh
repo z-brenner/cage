@@ -33,7 +33,8 @@ cat > "$T/bin/msb" <<'STUB'
 cmd="$1"; shift
 case "$cmd" in
   inspect) exit 0 ;;
-  ps) echo cage-claude; if [ -e "${STUB_AWAKE:-/nonexistent}" ]; then echo cage-codex; fi ;;
+  ps) echo cage-claude; if [ -e "${STUB_AWAKE:-/nonexistent}" ]; then echo cage-codex; fi
+      if [ -e "${STUB_RUNNING:-/nonexistent}" ]; then cat "$STUB_RUNNING"; fi ;;   # (more VMs that run)
   run) if [ -e "${STUB_NOWAKE:-/nonexistent}" ]; then echo "msb: no room for another VM" >&2; exit 1; fi ;;
   exec) case "$*" in
     *cage:ready*) echo cage:ready ;;
@@ -61,7 +62,7 @@ cat > "$T/bin/xdg-open" <<'STUB'
 printf '%s\n' "$*" >> "$OPENED"
 STUB
 chmod +x "$T/bin/xdg-open"
-export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake" STUB_EVIL="$T/evil-signin" STUB_NOWAKE="$T/no-wake" CAGE_BACKUP_DIR="$T/backups" OPENED="$T/opened"
+export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake" STUB_EVIL="$T/evil-signin" STUB_NOWAKE="$T/no-wake" STUB_RUNNING="$T/running" CAGE_BACKUP_DIR="$T/backups" OPENED="$T/opened"
 export PATH="$T/bin:$PATH" DISPLAY="${DISPLAY:-:99}"
 unset SSH_CONNECTION WSL_DISTRO_NAME
 "$ROOT/cage" init 2>/dev/null
@@ -319,7 +320,13 @@ for was in old other; do
   [ "$(allow $was)" = 409 ] && grep -q "waiting for that any more" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
     || fail "Home's Allow for an approval it isn't waiting for ($was): $(cat "$T/allowed.json")"
 done
+# ...and only while the agent's VM runs: one that stopped (asleep) has forgotten what it asked, and would drop the answer
+# without a word once it wakes
+[ "$(allow now)" = 409 ] && grep -q "It stopped while waiting for your OK" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
+  || fail "Home's Allow for an agent whose VM isn't running: $(cat "$T/allowed.json")"
+echo cage-antigravity > "$STUB_RUNNING"
 [ "$(allow now)" = 200 ] && grep -q '"action": "perm:allow"' "$A"/antigravity/in/*.json || fail "Home's Allow for the approval it waits for: $(cat "$T/allowed.json")"
+rm "$STUB_RUNNING"
 rm -rf "$A/cursor" "$A/codex/log.jsonl"
 ln -s "$A/antigravity" "$A/cursor"   # a chat folder that is itself a link: skipped, not followed
 [ "$(activity cursor,antigravity | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["agents"]))')" = "['antigravity']" ] \
