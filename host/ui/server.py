@@ -51,7 +51,7 @@ and only pictures are shown in the page (everything else downloads).
                                         Asked at most every 10 minutes, or 30 seconds with "fresh"
   GET  /api/chat/<a>/file?p=files/…     a file from the chat (pictures shown, the rest downloaded)
 """
-import base64, fcntl, hashlib, hmac, http.server, json, os, pty, re, secrets, signal, socket, stat, struct, subprocess, sys
+import base64, fcntl, hashlib, hmac, http.server, json, math, os, pty, re, secrets, signal, socket, stat, struct, subprocess, sys
 import termios, threading, time, unicodedata, urllib.parse, urllib.request
 
 CAGE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "..", "cage")
@@ -92,6 +92,12 @@ MIME = dict(PICTURES, **{".pdf": "application/pdf", ".txt": "text/plain", ".md":
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 TOO_BIG = "A message was too long to show here"
+
+
+def finite(s):
+    """A number in JSON (that has a point or an exponent), or None for one too big for a float (1e400)."""
+    f = float(s)
+    return f if math.isfinite(f) else None
 
 
 def token():
@@ -498,8 +504,8 @@ class Chat:
         out, pos = [], start
         for line in data[:end + 1].split(b"\n")[:-1]:
             pos += len(line) + 1
-            try:
-                e = json.loads(line)
+            try:   # (NaN, Infinity and 1e400 are no number in JSON.parse, which would read none of the page's answer)
+                e = json.loads(line, parse_constant=lambda c: None, parse_float=finite)
             except (ValueError, RecursionError):   # (nested deeper than Python reads: skipped, as a line that isn't JSON)
                 continue
             if isinstance(e, dict):

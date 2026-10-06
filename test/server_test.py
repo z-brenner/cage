@@ -729,8 +729,6 @@ class Live(unittest.TestCase):
             self.assertEqual(status, 200, name)
             agents = strict(body)["agents"]
             self.assertEqual((agents["claude"]["pending"], agents["codex"]["pending"]), (p, {"text": "after " + name, "at": 5}), name)
-            if name in ("huge numbers", "NaN and Infinity"):
-                continue
             status, _, body = self.call("GET", "/api/chat/codex/history")
             self.assertEqual((status, strict(body)["entries"][-1]["text"]), (200, "after " + name), name)
             after = lambda events: any(isinstance(e.get("e"), dict) and e["e"].get("text") == "after " + name for e in events)   # noqa: E731
