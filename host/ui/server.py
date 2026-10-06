@@ -1132,9 +1132,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not text.strip() and not files:
                     raise ValueError("nothing to send")
                 with Answered.of(c.agent):   # (an answer typed in the chat: see Answered)
-                    if session == "you" and answers({"t": "you", "text": text, "files": files}):
-                        Answered.sent(c.agent, activity(c, 0)["pending"])
+                    typed = session == "you" and answers({"t": "you", "text": text, "files": files})
+                    waits = activity(c, 0)["pending"] if typed else None
                     rid = c.send({"type": "message", "session": session, "text": text, "files": files})
+                    Answered.sent(c.agent, waits)   # (once it's sent: one that couldn't be isn't an answer)
                 return self.send(200, {"id": rid})
             if what == "action":
                 action = str(b.get("action", ""))[:512]
@@ -1151,9 +1152,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         error = "You answered that already."
                     else:
                         error = None
-                        if answers(said):
-                            Answered.sent(c.agent, now)
                         rid = c.send({"type": "action", "session": session, "action": action, "label": str(b.get("label", ""))[:200]})
+                        if answers(said):   # (once it's sent: one that couldn't be isn't an answer)
+                            Answered.sent(c.agent, now)
                 return self.send(409, {"error": error}) if error else self.send(200, {"id": rid})
             if what == "request":
                 kind = b.get("type")

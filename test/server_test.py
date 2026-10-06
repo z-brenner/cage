@@ -744,6 +744,22 @@ class Live(unittest.TestCase):
         self.assertEqual(self.answer("claude", "perm:allow", last)[0], 409)
         self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
 
+    def test_an_answer_that_didnt_go(self):
+        """An answer that couldn't be sent (nothing can be written in the agent's in/: the disk is full, or the VM
+        made it a file) is no answer: the page is told, and Allow or Deny can be given again, from Home or the chat."""
+        p = self.asks("claude", "Bash(ls)")
+        inbox = os.path.join(server.APPDIR, "claude", "in")
+        for method, path, body in (("POST", "/api/chat/claude/action", {"action": "perm:allow", "label": "Allow", "pending": p}),
+                                   ("POST", "/api/chat/claude/action", {"action": "perm:allow", "label": "Allow"}),
+                                   ("POST", "/api/chat/claude/send", {"text": "yes"})):
+            with open(inbox, "w"):
+                pass
+            self.assertEqual(self.call(method, path, body)[0], 404, body)
+            os.unlink(inbox)
+        self.assertEqual(self.answer("claude", "perm:deny", p)[0], 200)
+        self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:deny"])
+        self.assertEqual(self.answer("claude", "perm:allow", p)[0], 409)   # (and that one went: it's the answer)
+
     def test_two_windows_at_once(self):
         """Allow for the same approval from two windows at the same moment: one goes, the others get 409."""
         p, go, statuses = self.asks("claude", "Bash(ls)"), threading.Barrier(8), []
