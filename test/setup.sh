@@ -232,7 +232,9 @@ chmod +x "$T/obin"/*
   mkdir -p "$HOME"; : > "$T/onb.log"; : > "$T/requests.log"
   printf '%s\n' 1 n y n n '' '' '' y | cage onboard >/dev/null 2>"$T/onb.err" || fail "onboarding (app): $(tail -5 "$T/onb.err")"
   grep -q 'say hi in the app' "$T/onb.err" && grep -q 'Codex is one of your agents' "$T/onb.err" || fail "onboarding (app): $(cat "$T/onb.err")"
-  sed -n '/This computer/,$p' "$T/onb.err" > "$T/onb.after"   # what comes after the choice
+  # what comes after the choice, in cage's own words: the paths in it are in this test's temp folder, whose random name
+  # can have "bot" in it (/tmp/tmp.hbBoTdylWX), so that part of them is left out
+  sed -n '/This computer/,$p' "$T/onb.err" | T="$T" awk '{ while ((i = index($0, ENVIRON["T"])) > 0) $0 = substr($0, 1, i - 1) "<temp>" substr($0, i + length(ENVIRON["T"])); print }' > "$T/onb.after"
   if grep -qi 'telegram\|bot' "$T/onb.after"; then fail "the app's setup talks about Telegram or bots: $(grep -i 'telegram\|bot' "$T/onb.after")"; fi
   [ ! -s "$T/requests.log" ] || fail "the app's setup called Telegram: $(cat "$T/requests.log")"
   grep -qx 'CAGE_AGENTS="codex"' "$CAGE_HOME/cage.env" && [ -d "$CAGE_HOME/app/codex" ] && grep -q 'run .*--name cage-codex' "$T/onb.log" || fail "codex isn't in the app: $(cat "$CAGE_HOME/cage.env")"
