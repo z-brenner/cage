@@ -584,7 +584,7 @@ def activity(c, since):
         rows = e.get("buttons") if isinstance(e.get("buttons"), list) else []
         if t == "buttons" and any(isinstance(b, dict) and str(b.get("data", "")).startswith("perm:")
                                   for row in rows if isinstance(row, list) for b in row):
-            pending = {"text": str(e.get("text") or "")[:4000], "at": at}
+            pending = {"text": str(e.get("text") or "")[:4000], "at": at}   # (one this long, Home reads as cut)
         elif answers(e) or (t == "status" and e.get("connected") is True):
             pending = None
         if t == "typing":

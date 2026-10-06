@@ -1586,9 +1586,12 @@ function moreOf (ap) {
 // Is that line all it asks, as far as saying yes goes? Not when it isn't cc-connect's question, when cc-connect cut what
 // it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end of a
 // command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
-// characters that don't show, letters from another alphabet that look like these, or names that read alike.
+// characters that don't show, letters from another alphabet that look like these, or names that read alike. Nor when
+// it's as long as what Home has of it: server.py's activity() keeps the first 4,000 characters, and a "```" in a
+// longer one would end what Home reads of it there.
 function approvalWhole (ap) {
-  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
+  return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && [...ap.raw].length < 4000 &&
+    approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
 }
 function approvalView (ap) { // what the card shows above its buttons
   const odd = [ // (why Home offers no Allow for it, where that's in what it asks)
