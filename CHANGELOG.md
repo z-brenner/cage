@@ -14,7 +14,8 @@ Write for the people who use cage, not for its developers: short sentences, no i
 
 ## Unreleased
 
-Nothing yet.
+**Fixed:**
+- The security page, and Home's "blocked since you last looked", could count one blocked event twice, such as "tried to send KEY · 2 times" for one try, when the app and the background helper checked at the same moment.
 
 ## v0.4.0 (2026-10-06)
 

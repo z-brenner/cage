@@ -3714,10 +3714,17 @@ cmd_allow() { # cage allow <host> [agents|all] / cage allow rm <host> [agents|al
 #                           epoch|agent|blocked|<host>|               strict network turned a host away
 EVENTS_LOG() { echo "$CAGE_HOME/events.log"; }
 events_harvest() { # events_harvest [agents...]: new events from their VMs' logs
-  local a since now line kind subj det h seen="$CAGE_HOME/events/seen-lines" list=("$@")
+  # One harvest at a time: the helper, `cage _state` (for each open page), `cage security` and `cage up` all harvest,
+  # and two at once would each log a line that neither had seen yet, so one event would show as two.
   find_msb || return 0
-  [ $# -gt 0 ] || read -r -a list <<<"${CAGE_AGENTS:-}"
   mkdir -p "$CAGE_HOME/events" && chmod 700 "$CAGE_HOME/events"
+  ( lock_take "$CAGE_HOME/events/.harvest.lock"
+    trap 'rm -rf "$CAGE_HOME/events/.harvest.lock"' EXIT
+    harvest_now "$@" )
+}
+harvest_now() { # harvest_now [agents...]: events_harvest's work, under its lock
+  local a since now line kind subj det h seen="$CAGE_HOME/events/seen-lines" list=("$@")
+  [ $# -gt 0 ] || read -r -a list <<<"${CAGE_AGENTS:-}"
   touch "$seen"
   for a in ${list[@]+"${list[@]}"}; do
     "$MSB" inspect "$(vm "$a")" >/dev/null 2>&1 || continue
