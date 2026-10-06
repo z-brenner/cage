@@ -6,6 +6,7 @@
 //   files/         files either way: the agent's attachments land here, and yours are read from here
 //   out/<id>.json  answers to the app's other requests: scheduled tasks (cc-connect's management API) and the
 //                  agent's work folder (list, fetch, put)
+//   cc-connect.json  when cc-connect started, as the relay last saw it
 // Started by guest/app.sh as the agent user, with APP_DIR, APP_BRIDGE_URL, APP_MGMT_URL, APP_TOKEN and APP_WORK in
 // its environment. Node 22's own WebSocket and fetch; no packages. test/relay.test.mjs runs it against a fake bridge.
 import crypto from 'node:crypto'
@@ -192,11 +193,44 @@ async function main () {
   let ready = false
   let delay = 1000
   const send = (o) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)) }
-  const canSend = () => ready && ws?.readyState === WebSocket.OPEN
+  // cc-connect keeps what it waits for (your OK, say) only in memory, so the app reads the relay registering with it
+  // again as cc-connect having started afresh, and stops offering answers to what it asked before. When it's the
+  // same cc-connect (the connection dropped, or the relay itself restarted), the status line says so ("same": true).
+  // That's by when it started, from its management API's uptime (in whole seconds, so to within a second and a half),
+  // kept in cc-connect.json so the relay knows it after a restart of its own; what it can't tell, it doesn't say.
+  // (Another cc-connect starts later than that: guest/entry.sh waits 5 s before it starts one again, and /restart
+  // ends one that has been asked something, which takes longer.) Until it's asked, what cc-connect sends, and what
+  // goes to it, waits: the status line comes first.
+  const STARTED = path.join(DIR, 'cc-connect.json')
+  let started = (() => { try { return Number(JSON.parse(fs.readFileSync(STARTED, 'utf8')).started) || 0 } catch { return 0 } })()
+  const startedAt = async () => {
+    try {
+      const res = await fetch(MGMT + '/api/v1/status', { headers: { Authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(3000) })
+      const up = (await res.json())?.data?.uptime_seconds
+      return Number.isFinite(up) && up >= 0 ? Date.now() - up * 1000 : 0
+    } catch { return 0 }
+  }
+  let held = null   // while the relay asks cc-connect when it started: what to do once it knows
+  const canSend = () => ready && !held && ws?.readyState === WebSocket.OPEN
+  function registered () {
+    held = []
+    startedAt().then((at) => {
+      log({ t: 'status', connected: true, ...(at && started && Math.abs(at - started) < 1500 ? { same: true } : {}) })
+      if (at) {
+        started = at
+        write('when cc-connect started', () => fs.writeFileSync(STARTED, JSON.stringify({ started })))
+      }
+      const then = held
+      held = null
+      for (const f of then) f()
+    })
+  }
+  const take = (m) => { try { onFrame(m) } catch (e) { say('bad frame from cc-connect:', e.message) } }
   function onFrame (m) {
+    if (held) { held.push(() => take(m)); return }
     if (m.type === 'register_ack') {
       ready = !!m.ok
-      if (ready) { delay = 1000; log({ t: 'status', connected: true }) } else say('bridge refused:', m.error)
+      if (ready) { delay = 1000; registered() } else say('bridge refused:', m.error)
       return
     }
     if (!handles(m.type)) return
@@ -228,13 +262,13 @@ async function main () {
       let m
       try { m = JSON.parse(String(ev.data)) } catch { return }
       if (!m || typeof m !== 'object') return
-      try { onFrame(m) } catch (e) { say('bad frame from cc-connect:', e.message) }
+      take(m)
     })
     // Node's WebSocket says 'error' and never 'close' when nothing is listening (cc-connect restarting), so either
     // one means this connection is over: try again.
     const lost = () => {
       if (ws !== sock) return
-      if (ready) log({ t: 'status', connected: false })
+      if (ready) { const note = () => log({ t: 'status', connected: false }); held ? held.push(note) : note() }
       ready = false
       ws = null
       try { sock.close() } catch {}

@@ -563,7 +563,7 @@ WORKING = 15 * 60   # "working…" for longer than this without a word is stale 
 # Where cc-connect may or may not end it (/mode with the mode it's in, a /model it doesn't have), it counts as ended:
 # the card then says it isn't waiting any more, and an answer typed in the chat still goes. A restart of cc-connect
 # ends the wait too, as it keeps what it waits for only in memory: the relay registering with it again (a "status"
-# line).
+# line), unless it says it's the same cc-connect as before.
 ANSWER_WORDS = {"allow", "yes", "y", "ok", "approve", "deny", "no", "n", "reject", "cancel", "allowall", "允许", "同意",
                 "可以", "好", "好的", "是", "确认", "拒绝", "不允许", "不行", "不", "否", "取消", "允许所有", "允许全部",
                 "全部允许", "所有允许", "都允许", "全部同意"}
@@ -716,8 +716,9 @@ def asks_question(e):
 def ends(e):
     """Does this line of the chat log end the wait for whatever approval waits: an answer (see answers()), the agent
     asking a question (see asks_question()), or cc-connect starting afresh (the relay registers with it again: it keeps
-    what it waits for only in memory)?"""
-    return answers(e) or asks_question(e) or (e.get("t") == "status" and e.get("connected") is True)
+    what it waits for only in memory)? Not when the relay says it's the same cc-connect as before ("same": the
+    connection dropped, or only the relay restarted)."""
+    return answers(e) or asks_question(e) or (e.get("t") == "status" and e.get("connected") is True and e.get("same") is not True)
 
 
 def marked(e):

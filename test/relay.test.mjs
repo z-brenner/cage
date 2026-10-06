@@ -133,6 +133,49 @@ test('after cc-connect drops it, it reconnects within about a second each time',
   await r.logged((e) => e.t === 'status' && e.connected === false)
 })
 
+// cc-connect's management API, saying when it started (uptime_seconds, as its /api/v1/status does); null: not answering
+async function statusApi (t) {
+  const api = { started: Date.now() - 600 * 1000, slow: 0 }
+  const s = http.createServer(async (req, res) => {
+    await sleep(api.slow)
+    if (api.started === null || req.url !== '/api/v1/status') { res.statusCode = 503; res.end(); return }
+    res.end(JSON.stringify({ ok: true, data: { version: 'v1.5.1-beta.3', uptime_seconds: Math.floor((Date.now() - api.started) / 1000) } }))
+  })
+  await new Promise((resolve) => s.listen(0, '127.0.0.1', resolve))
+  t.after(() => s.close())
+  api.url = `http://127.0.0.1:${s.address().port}`
+  return api
+}
+
+test('registering again with the same cc-connect, it says so; after cc-connect restarted, or when it can\'t tell, it doesn\'t', async (t) => {
+  const api = await statusApi(t)
+  const r = await relay(t, { mgmt: api.url })
+  const statuses = () => r.log().filter((e) => e.t === 'status' && e.connected === true)
+  const nth = (n) => until(() => statuses().length >= n && statuses()[n - 1], 8000, `registration ${n}`)
+  assert.equal((await nth(1)).same, undefined)   // (the first time, nothing to tell it by)
+  r.bridge.last().drop()   // the connection drops: the same cc-connect
+  assert.equal((await nth(2)).same, true)
+  api.started = Date.now()   // cc-connect restarted
+  r.bridge.last().drop()
+  assert.equal((await nth(3)).same, undefined)
+  api.started = null   // it can't say when it started
+  r.bridge.last().drop()
+  assert.equal((await nth(4)).same, undefined)
+})
+
+test('the relay restarted, cc-connect not: it says it\'s the same one, and what comes and goes meanwhile waits for that', async (t) => {
+  const api = await statusApi(t)
+  api.slow = 600   // (it takes a while to say)
+  let dir
+  const r = await relay(t, { mgmt: api.url, before: (d) => { dir = d; fs.writeFileSync(path.join(d, 'cc-connect.json'), JSON.stringify({ started: api.started + 400 })) } })
+  await r.bridge.frame((m) => m.type === 'register')
+  r.bridge.last().send({ type: 'reply', session_key: 'app:you:you', reply_ctx: 'c1', content: 'Hello again.' })
+  r.request({ type: 'message', text: 'yes' })
+  await r.logged((e) => e.t === 'you')
+  assert.deepEqual(r.log().map((e) => e.t === 'status' ? `status ${e.same}` : e.t), ['status true', 'reply', 'you'])
+  assert.ok(Math.abs(JSON.parse(fs.readFileSync(path.join(dir, 'cc-connect.json'), 'utf8')).started - api.started) < 1500)
+})
+
 test('while nothing answers (cc-connect restarting), it keeps trying, and messages go once it is back', async (t) => {
   const r = await relay(t)
   await r.logged((e) => e.t === 'status' && e.connected === true)

@@ -355,11 +355,13 @@ class Activity(unittest.TestCase):
     def test_answered(self):
         """As cc-connect reads it: a perm: button, a message with "yes", "no" or "allow all" in it (or their Chinese),
         a command that ends the turn or starts its session afresh, or cc-connect restarted (it forgets what it waited
-        for, and the relay registers with it again); anything else, and the approval still waits."""
+        for, and the relay registers with it again, unless it says it's the same one); anything else, and the approval
+        still waits."""
         for after in ({"t": "action", "action": "perm:deny"}, {"t": "you", "text": "no, wait"}, {"t": "you", "text": "OK, send it."},
                       {"t": "you", "text": "@bot allow all"}, {"t": "you", "text": "好的"}, {"t": "you", "text": "/stop"},
                       {"t": "you", "text": "/new client call"}, {"t": "action", "action": "act:/stop"},
-                      {"t": "status", "connected": True}, {"t": "you", "text": "/model opus"}, {"t": "you", "text": "/cd ~/other"},
+                      {"t": "status", "connected": True}, {"t": "status", "connected": True, "same": "yes"},
+                      {"t": "you", "text": "/model opus"}, {"t": "you", "text": "/cd ~/other"},
                       {"t": "you", "text": "/provider switch work"}, {"t": "action", "action": "cmd:/reasoning high"}):
             self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
             self.assertIsNone(server.activity(self.chat, 0)["pending"], after)
@@ -367,6 +369,7 @@ class Activity(unittest.TestCase):
                       {"t": "you", "text": "/help"}, {"t": "you", "text": "/reset"}, {"t": "action", "action": "nav:/help"},
                       {"t": "you", "text": ["no"]}, {"t": "you"}, {"t": "reply", "text": "⚠️ Waiting for permission response."},
                       {"t": "status", "connected": False}, {"t": "status", "connected": "yes"}, {"t": "you", "text": "/model"},
+                      {"t": "status", "connected": True, "same": True},   # (the same cc-connect: only the relay restarted)
                       {"t": "you", "text": "/provider list"},
                       {"t": "you", "text": "/stop", "files": [{"name": "a.png", "mime": "image/png"}]}):   # (with a picture: no command)
             self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(after, at=8))
