@@ -50,12 +50,25 @@ EOF
 if [ "$A" = claude ]; then
   printf 'CAGE_WHATSAPP_MODE_claude="spare"\nCAGE_WHATSAPP_ALLOW_claude="15552223333"\nCAGE_WHATSAPP_TOKEN_claude="0123456789abcdef0123"\n' >> "$CAGE_HOME/cage.env"
 fi
+# The privacy mask (claude only, to keep CI quick): cc-connect runs the CLI behind guest/mask.py, and your About me
+# and your notes' names reach AGENTS.md masked. (test/mask-vm.sh runs cage mask forget and cage ask against a VM.)
+if [ "$A" = claude ]; then
+  PATH="$T/bin:$PATH" "$ROOT/cage" mask add "Smoke Corp" </dev/null >/dev/null 2>&1
+  PATH="$T/bin:$PATH" "$ROOT/cage" mask on claude </dev/null >/dev/null 2>&1
+fi
 # A connector with a key: microsandbox would hand the VM a placeholder for it, so the container gets one too.
 printf 'smoke-key\n' | PATH="$T/bin:$PATH" "$ROOT/cage" connect add demo https://mcp.deepwiki.com/mcp --header X-Cage-Key 2>/dev/null
 # The browser (codex only, to keep CI quick): Playwright MCP and Chromium install, and it loads a real page.
 if [ "$A" = codex ]; then PATH="$T/bin:$PATH" "$ROOT/cage" connect add browser codex </dev/null 2>/dev/null; fi
 PATH="$T/bin:$PATH" "$ROOT/cage" up "$A" 2>/dev/null
-sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md"
+if [ "$A" = claude ]; then
+  grep -qx 'cmd = "python3 /cage/mask.py claude"' "$CAGE_HOME/agents/claude/cc-connect.toml" \
+    || fail "cage mask on claude didn't put the mask in front of its CLI: $(grep '^cmd' "$CAGE_HOME/agents/claude/cc-connect.toml")"
+  sed -i 's/^- Name:.*/- Name: Smoke Tester, smoke.tester@example.com, works for Smoke Corp/' "$CAGE_HOME/brain/memory/about-me.md"
+  printf '# Plan for Smoke Corp\n' > "$CAGE_HOME/brain/memory/notes/smoke-corp-plan.md"
+else
+  sed -i 's/^- Name:.*/- Name: Smoke Tester/' "$CAGE_HOME/brain/memory/about-me.md"
+fi
 
 # `msb run`'s arguments as docker's: named volumes (as docker volumes of this test's own), folders, environment, and
 # the image and command. A secret becomes its placeholder, as microsandbox would hand the VM.
@@ -64,7 +77,20 @@ while IFS= read -r -d '' x; do
   if [ "$after" = 1 ]; then cmd+=("$x"); continue; fi
   case "$prev" in
     --mount-named) v="cage-smoke-${x#cage-}"; VOLS="$VOLS ${v%%:*}"; args+=(-v "$v") ;;
-    --mount-dir) args+=(-v "$x") ;;
+    --mount-dir) # host:guest[:options]. docker -v takes ro and rw; microsandbox's own limits on a folder the VM writes
+      # (quota=…, nosuid, nodev) have no docker -v stand-in, so the container goes without them. Any other option
+      # stops the test: the container wouldn't stand in for the VM anymore.
+      m="$x" opts="" keep=""
+      case "${m##*:}" in /*) ;; *) opts="${m##*:}" m="${m%:*}" ;; esac
+      IFS=, read -r -a os <<<"$opts"
+      for o in ${os[@]+"${os[@]}"}; do
+        case "$o" in
+          ro|rw) keep="$keep${keep:+,}$o" ;;
+          quota=*|nosuid|nodev) ;;
+          *) fail "cage up gives msb a folder option the test can't pass on to docker: $o (in $x)" ;;
+        esac
+      done
+      args+=(-v "$m${keep:+:$keep}") ;;
     -e) args+=(-e "$x") ;;
     --conf) for s in $(awk '/^secrets:/ { on = 1; next } /^[a-z]/ { on = 0 } on && /^  [A-Z][A-Z0-9_]*:$/ { sub(/:$/, ""); print $1 }' "$x"); do
         args+=(-e "$s=\$MSB_$s"); done ;;
@@ -122,6 +148,30 @@ docker exec -u agent "$NAME" sh -c 'echo "# Remember" > /memory-inbox/smoke.md' 
 [ -f "$CAGE_HOME/brain/inbox/$A/smoke.md" ] || fail "inbox note didn't reach the host"
 if docker exec -u agent "$NAME" sh -c 'echo x > /memory/x.md' 2>/dev/null; then fail "/memory is writable"; fi
 ok "memory: about-me.md wired into AGENTS.md (and CLAUDE.md), inbox writable, /memory read-only"
+
+if [ "$A" = claude ]; then
+  md="$(docker exec "$NAME" cat /home/agent/work/AGENTS.md)"
+  grep -qF 'Smoke Tester, [EMAIL_1], works for [TERM_1]' <<<"$md" || fail "About me didn't reach AGENTS.md masked: $md"
+  grep -qF -- '- [TERM_1]-plan.md: Plan for [TERM_1]' <<<"$md" || fail "the note's name and title aren't masked: $md"
+  grep -q '^## Masked values' <<<"$md" || fail "AGENTS.md doesn't tell the agent about masked values: $md"
+  [ "$(docker exec -u agent "$NAME" cat '/run/cage/notes/[TERM_1]-plan.md')" = "# Plan for Smoke Corp" ] \
+    || fail "the agent can't open the note by its masked name"
+  docker exec "$NAME" grep -qiF -e 'smoke.tester@example.com' -e 'Smoke Corp' -e 'smoke-corp' \
+    /home/agent/work/AGENTS.md /home/agent/.codex/AGENTS.md /home/agent/.gemini/AGENTS.md && fail "a real value is in an AGENTS.md"
+  [ "$(docker exec "$NAME" stat -c '%U %a' /home/agent/.cage/mask/map.json)" = "agent 600" ] \
+    && docker exec "$NAME" grep -qF 'smoke.tester@example.com' /home/agent/.cage/mask/map.json \
+    || fail "the real values aren't kept in the agent's own map: $(docker exec "$NAME" stat -c '%U %a' /home/agent/.cage/mask/map.json 2>&1)"
+  ok "privacy mask: About me and a note's name reach AGENTS.md masked; the note opens by its masked name; the map is the agent's"
+  docker exec "$NAME" grep -qx 'cmd = "python3 /cage/mask.py claude"' /home/agent/.cc-connect/config.toml \
+    || fail "cc-connect in the VM doesn't run the CLI behind the mask: $(docker exec "$NAME" grep '^cmd' /home/agent/.cc-connect/config.toml)"
+  # the mask as cc-connect runs it, on this image's python: a stream-json message masked on its way to the CLI (here a
+  # stand-in that says what it got), and the real value back in what the CLI says
+  out="$(docker exec -u agent -e HOME=/home/agent "$NAME" bash -c 'printf "%s\n" "{\"type\":\"user\",\"message\":{\"content\":\"mail smoke.tester@example.com\"}}" |
+    python3 /cage/mask.py python3 -c "import sys; l = sys.stdin.readline(); sys.stderr.write(l); print(l.replace(\"mail\", \"sent to\").strip())" --input-format stream-json 2>&1')"
+  grep -qF '"content": "mail [EMAIL_1]"' <<<"$out" && grep -qF '"content":"sent to smoke.tester@example.com"' <<<"$out" \
+    || fail "the mask on this image's python: $out"
+  ok "privacy mask: cc-connect runs the CLI behind it; the CLI gets [EMAIL_1], and its answer comes back with the real value"
+fi
 
 # connectors: the agent's own CLI has the app, with the placeholder (never the key) in the header
 hx() { docker exec -u agent -e HOME=/home/agent "$NAME" bash -lc "set -a; . /etc/cage/runtime.env; set +a; $1"; }

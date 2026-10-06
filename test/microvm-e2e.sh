@@ -8,6 +8,7 @@ set -euo pipefail
 A="${1:?usage: microvm-e2e.sh <agent>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VM="cage-$A"
+B=""   # a second agent, for asking across agents with the mask on (below)
 export CAGE_HOME
 CAGE_HOME="$(mktemp -d)"
 cage() { "$ROOT/cage" "$@"; }
@@ -31,6 +32,7 @@ cleanup() {
   "$ROOT/cage" down "$A" >/dev/null 2>&1 || true
   pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # the background helper (/all and stand-ins start it)
   "$ROOT/cage" destroy "$A" --yes >/dev/null 2>&1 || true
+  if [ -n "$B" ]; then "$ROOT/cage" destroy "$B" --yes >/dev/null 2>&1 || true; fi
   rm -rf "$CAGE_HOME" "$CAGE_HOME".backups* "$CAGE_HOME".before-restore-*
   exit $status
 }
@@ -256,18 +258,43 @@ if [ "$A" = claude ]; then
 fi
 cage ask-all off </dev/null 2>/dev/null; cage voice off </dev/null 2>/dev/null
 
-# the privacy mask: cc-connect runs the real CLI behind guest/mask.py
+# the privacy mask: cc-connect runs the real CLI behind guest/mask.py. With /all on, a second agent (its own mask off)
+# wakes up too, to answer from this one's chat (below).
+B=cursor; [ "$A" != cursor ] || B=claude   # its CLI says at once that it isn't signed in
 cage mask add "Acme Corp" </dev/null 2>/dev/null
 cage mask on "$A" </dev/null 2>/dev/null
-cage up "$A"
+cage ask-all on </dev/null 2>/dev/null
+cage up "$A" "$B"
 retry 1500 gx test -e "/opt/cage/provisioned-$A" || fail "not re-provisioned with the mask on"
 retry 180 sh -c "msb exec --no-tty $VM -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect not running behind the mask"
 ax python3 /cage/mask.py "$BIN" --version >/dev/null || fail "$BIN doesn't run behind the mask"
 [ "$(ax sh -c 'printf "ask acme corp at bob@example.com" | python3 /cage/mask.py --mask')" = "ask [TERM_1] at [EMAIL_1]" ] \
   || fail "the mask in the VM: $(ax sh -c 'printf "ask acme corp at bob@example.com" | python3 /cage/mask.py --mask')"
 gx grep -q 'Masked values' /home/agent/work/AGENTS.md || fail "the agent wasn't told about masked values"
-cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
 ok "privacy mask: the real CLI runs behind it, your terms and emails become tokens, the agent is told"
+
+# Asking other agents keeps the mask: what you tell a masked agent reaches another one's CLI masked by that VM's own
+# mask, with its own map (/all from the masked agent's chat), and cage ask runs a masked agent's CLI behind its mask.
+# The question goes to each VM in a file (never on a command line), which is gone afterwards. Neither CLI is signed
+# in here, so the proof is in each VM's map.
+bx() { msb exec --no-tty "cage-$B" -- "$@"; }
+retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A: $(msb logs "cage-$B" 2>&1 | tail -20)"
+# The background helper `cage up` started takes requests too, every 3 s. Had it taken this one, `cage _outbox` would
+# return while $B is still being asked, and the checks below would run too early. So `cage _outbox` is the only one.
+pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
+retry 60 ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 \
+  CC_HOOK_CONTENT='/all is carol@example.org still at Acme Corp?' bash /cage/hook.sh ask || fail "the hook failed in the VM"
+cage _outbox 2>/dev/null
+bx grep -qF 'carol@example.org' /home/agent/.cage/mask/map.json \
+  || fail "$B wasn't asked behind the mask: $(bx sh -c 'ls -l /home/agent/.cage/mask; cat /etc/cage/mask.terms' 2>&1)"
+bx grep -qF 'Acme Corp' /home/agent/.cage/mask/map.json || fail "your terms didn't reach $B's mask"
+cage ask "and is dave@example.net?" "$A" >/dev/null 2>"$CAGE_HOME/ask.err" || fail "cage ask: $(cat "$CAGE_HOME/ask.err")"
+gx grep -qF 'dave@example.net' /home/agent/.cage/mask/map.json || fail "cage ask didn't run $A's CLI behind its mask"
+left="$(find "$CAGE_HOME/agents/$A/replies" "$CAGE_HOME/agents/$B/replies" -name '*.q' 2>/dev/null || true)"
+[ -z "$left" ] || fail "a question stayed on disk: $left"
+cage destroy "$B" --yes >/dev/null 2>&1; B=""
+cage ask-all off </dev/null 2>/dev/null; cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
+ok "asking other agents keeps the mask: /all from a masked agent's chat, and cage ask, reach each CLI through its VM's mask"
 
 # no chat app at all: cc-connect runs behind the placeholder platform, and the app still reaches it
 sed -i "/^CAGE_TELEGRAM_TOKEN_$A=/d" "$CAGE_HOME/cage.env"

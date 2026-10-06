@@ -8,8 +8,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
-SERVER="" STALL=""
-trap '[ -z "$SERVER$STALL" ] || kill $SERVER $STALL 2>/dev/null; rm -rf "$T"' EXIT
+SERVER="" STALL="" HELPER=""
+trap '[ -z "$SERVER$STALL$HELPER" ] || kill $SERVER $STALL $HELPER 2>/dev/null; rm -rf "$T"' EXIT
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { pass=$((pass + 1)); echo "ok - $*"; }
@@ -387,6 +387,11 @@ mkdir -p "$HOME/cage-backups" && echo backup > "$HOME/cage-backups/cage-2026-01-
 echo 'alias ll="ls -l"' >> "$HOME/.bashrc"
 if printf 'y\nn\nkeep\n' | CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --everything 2>"$T/err"; then fail "--everything without typing delete"; fi
 [ -x "$HOME/cage/cage" ] && [ -d "$CAGE_HOME" ] || fail "uninstall removed something without the typed confirmation"
+# the backup it offers first doesn't work out: nothing is removed
+: > "$MSB_LOG"
+if printf 'y\ny\n' | CAGE_BACKUP_PASSPHRASE=short CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall 2>"$T/err"; then fail "uninstall went on without the backup"; fi
+grep -q 'no backup was made, so nothing was removed' "$T/err" && [ -x "$HOME/cage/cage" ] && [ -f "$CAGE_HOME/cage.env" ] && [ ! -s "$MSB_LOG" ] ||
+  fail "a backup that didn't work out: $(cat "$T/err")"
 # backups where cage.env says (CAGE_BACKUP_DIR): inside ~/cage, or inside cage's settings with --everything
 : > "$MSB_LOG"
 mkdir -p "$HOME/cage/backups" && echo backup > "$HOME/cage/backups/mine.cagebackup"
@@ -417,7 +422,24 @@ grep -q "won't delete $HOME/: your home folder is in it (nothing was removed)" "
 ok "cage uninstall never deletes backups (where cage.env puts them too, through a link too) or your home folder (however it's spelled)"
 
 : > "$MSB_LOG"
+# the background helper (cage _refresh, found by its pid file) stops with cage, not after its folder is gone; so do
+# those of your other CAGE_HOMEs, which run from that folder too
+mkdir -p "$HOME/other" && cp "$CAGE_HOME/cage.env" "$HOME/other/"
+for h in "$CAGE_HOME" "$HOME/other"; do
+  CAGE_HOME="$h" CAGE_MSB="$T/stub/msb" nohup "$HOME/cage/cage" _refresh "$h" </dev/null >/dev/null 2>&1 &
+done
+for _ in $(seq 50); do [ -s "$CAGE_HOME/refresh.pid" ] && [ -s "$HOME/other/refresh.pid" ] && break; sleep 0.1; done
+HELPER="$(cat "$CAGE_HOME/refresh.pid" "$HOME/other/refresh.pid" 2>/dev/null | tr '\n' ' ' || true)"
+up=0; for p in $HELPER; do if kill -0 "$p" 2>/dev/null; then up=$((up + 1)); fi; done
+[ $up = 2 ] || fail "the background helpers didn't start: $HELPER"
 CAGE_MSB="$T/stub/msb" "$HOME/.local/bin/cage" uninstall --yes 2>"$T/err" || fail "uninstall: $(cat "$T/err")"
+for p in $HELPER; do
+  for _ in $(seq 20); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$p" 2>/dev/null; then fail "a background helper outlived cage uninstall: $(ps -o args= -p "$p")"; fi
+done
+[ ! -e "$CAGE_HOME/refresh.pid" ] || fail "uninstall left the helper's pid file"
+HELPER=""
+rm -rf "$HOME/other"
 [ ! -e "$HOME/cage" ] && [ ! -e "$HOME/.local/bin/cage" ] && [ ! -e "$HOME/.local/share/applications/cage.desktop" ] || fail "cage is still here"
 [ -f "$CAGE_HOME/cage.env" ] || fail "uninstall without --everything deleted the settings"
 grep -q '^rm --force cage-claude$' "$MSB_LOG" && ! grep -q 'volume rm' "$MSB_LOG" || fail "VMs and volumes: $(cat "$MSB_LOG")"
@@ -463,6 +485,6 @@ left="$(cd "$HOME" && find . \( -type f -o -type l \) ! -path './cage-backups/*'
 [ -z "$left" ] || fail "uninstall --everything left: $left"
 [ -f "$HOME/cage-backups/cage-2026-01-01-000000.cagebackup" ] || fail "uninstall deleted a backup"
 grep -q 'microsandbox stays installed' "$T/err" || fail "no word on removing microsandbox: $(cat "$T/err")"
-ok "cage uninstall: VMs, command, PATH lines and ~/cage go; settings and volumes only with --everything; backups stay"
+ok "cage uninstall: VMs, helpers, command, PATH lines and ~/cage go; settings and volumes only with --everything; backups stay"
 
 echo "all $pass installer tests passed"

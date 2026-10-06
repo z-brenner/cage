@@ -427,7 +427,7 @@ ok "start at login: the web app starts too, in a process group of its own"
 
 # A job ends with its terminal, as a command does when its window closes: once the web app is gone, a log someone left
 # open stops too (cage ui starts the web app with nohup, which its jobs would otherwise inherit)
-endless() { pgrep -f "$T/bin/msb logs -f cage-codex" >/dev/null; }
+endless() { pgrep -f "$T/bin/msb logs (--tail [0-9]+ )?-f cage-codex" >/dev/null; }
 curl --noproxy '*' -s -o /dev/null -H "X-Cage-Token: $(cat "$T/auto/ui.token")" -X POST -d '{"args":["logs","codex"]}' "http://127.0.0.1:$PORT4/api/jobs"
 for _ in $(seq 50); do endless && break; sleep 0.1; done
 endless || fail "the endless log didn't start"
