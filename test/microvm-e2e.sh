@@ -283,6 +283,29 @@ ok "privacy mask: the real CLI runs behind it, your terms and emails become toke
 # The question goes to each VM in a file (never on a command line), which is gone afterwards. Neither CLI is signed
 # in here, so the proof is in each VM's map.
 bx() { msb exec --no-tty "cage-$B" -- "$@"; }
+unasked() { # why $B wasn't asked: its /cage-config as it sees it, the background helper's log, and the same /all once
+  # more, with what msb says (ask_agent drops its errors) and its exit codes
+  local w="$CAGE_HOME/unasked"
+  echo "--- $B's /cage-config, as $B sees it"; bx ls -la /cage-config /cage-config/replies 2>&1 || true
+  echo "--- the end of $CAGE_HOME/refresh.log"; tail -n 30 "$CAGE_HOME/refresh.log" 2>&1 || true
+  mkdir -p "$w"
+  cat > "$w/msb" <<EOF
+#!/bin/sh
+exec 2>>"$w/msb.err"
+echo "+ msb \$*" >&2
+"$(command -v msb)" "\$@"; rc=\$?
+echo "(exit \$rc)" >&2
+exit \$rc
+EOF
+  chmod +x "$w/msb"
+  echo "--- the same /all once more: what msb said"
+  rm -f "$CAGE_HOME/outbox/.last-$A" "$CAGE_HOME/outbox/.seen"   # (else cage takes the same question only once)
+  ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 \
+    CC_HOOK_CONTENT='/all is carol@example.org still at Acme Corp?' bash /cage/hook.sh ask 2>&1 || echo "(the hook failed)"
+  CAGE_MSB="$w/msb" "$ROOT/cage" _outbox 2>&1 || echo "(cage _outbox failed)"
+  cat "$w/msb.err" 2>&1 || true
+  echo "--- $B's mask after that"; bx sh -c 'ls -l /home/agent/.cage/mask; cat /etc/cage/mask.terms' 2>&1 || true
+}
 # Ready, as $A is above: provisioned, then set up (your terms, its memory and apps), and cc-connect started last
 retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A"
 retry 180 sh -c "msb exec --no-tty cage-$B -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect isn't running in $B"
@@ -292,8 +315,7 @@ pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
 retry 60 ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 \
   CC_HOOK_CONTENT='/all is carol@example.org still at Acme Corp?' bash /cage/hook.sh ask || fail "the hook failed in the VM"
 cage _outbox 2>/dev/null
-bx grep -qF 'carol@example.org' /home/agent/.cage/mask/map.json \
-  || fail "$B wasn't asked behind the mask: $(bx sh -c 'ls -l /home/agent/.cage/mask; cat /etc/cage/mask.terms' 2>&1)"
+if ! bx grep -qF 'carol@example.org' /home/agent/.cage/mask/map.json; then unasked; fail "$B wasn't asked behind the mask (why: above)"; fi
 bx grep -qF 'Acme Corp' /home/agent/.cage/mask/map.json || fail "your terms didn't reach $B's mask"
 cage ask "and is dave@example.net?" "$A" >/dev/null 2>"$CAGE_HOME/ask.err" || fail "cage ask: $(cat "$CAGE_HOME/ask.err")"
 gx grep -qF 'dave@example.net' /home/agent/.cage/mask/map.json || fail "cage ask didn't run $A's CLI behind its mask"

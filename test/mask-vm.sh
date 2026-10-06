@@ -7,7 +7,8 @@
 #   cage mask forget: the VM drops the values behind its placeholders, and AGENTS.md gets new ones
 #   cage ask: the CLI runs as the agent, behind the mask, with the question from a file that is then removed (also
 #             when the CLI fails), and the answer comes back unmasked; your terms as they are now are in place first,
-#             even before the VM's own setup has put them there, and the CLI doesn't run when they can't be
+#             from a file of their own for that ask, even before the VM's own setup has put them there and whatever
+#             happens to the copy it reads when it wakes up; the CLI doesn't run when they can't be
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -37,8 +38,13 @@ case "$cmd" in
         *) shift ;;   # the VM's name
       esac
     done
-    # a file cage wrote for the VM taken away before the VM reads it, as `cage up` can in between (cage ask, below)
-    if [ -n "${MSB_GONE:-}" ]; then rm -f "$MSB_GONE"; fi
+    # cage ask, below: the files cage wrote for the VM that MSB_GONE names (a pattern) taken away before the VM reads
+    # them, noted in $CAGE_HOME/took; and the copy of your terms the VM reads when it wakes up replaced meanwhile, with
+    # MSB_REPLACE's text, as `cage up` does
+    if [ -n "${MSB_GONE:-}" ]; then for f in $MSB_GONE; do [ ! -e "$f" ] || { rm -f "$f"; echo "$f"; } >> "$CAGE_HOME/took"; done; fi
+    if [ -n "${MSB_REPLACE:-}" ]; then
+      f="$CAGE_HOME/agents/claude/mask.terms"; printf '%s\n' "$MSB_REPLACE" > "$f.new" && mv -f "$f.new" "$f"
+    fi
     exec docker exec -i "${args[@]}" "$STANDIN" "$@" ;;
 esac
 exit 0
@@ -136,8 +142,9 @@ asked="$(vm cat /tmp/asked)"
 grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" || fail "the CLI didn't get your terms masked: $asked"
 if grep -qiE 'acme|zeta' <<<"$asked"; then fail "the CLI got your terms: $asked"; fi
 grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" || fail "cage ask: $out"
-[ "$(vm stat -c '%a %U' /etc/cage/mask.terms)" = "644 root" ] && [ "$(vm cat /etc/cage/mask.terms)" = "$(cat "$C/mask.terms")" ] \
-  && grep -qx 'Zeta Partners' "$C/mask.terms" || fail "the VM's terms: $(vm ls -l /etc/cage/mask.terms; vm cat /etc/cage/mask.terms)"
+[ "$(vm stat -c '%a %U' /etc/cage/mask.terms)" = "644 root" ] && [ "$(vm cat /etc/cage/mask.terms)" = "$(cat "$CAGE_HOME/mask.terms")" ] \
+  && grep -qx 'Zeta Partners' "$CAGE_HOME/mask.terms" && [ "$(vm ls -A /etc/cage)" = mask.terms ] \
+  || fail "the VM's terms: $(vm ls -lA /etc/cage; vm cat /etc/cage/mask.terms)"
 vm sh -c 'rm -f /tmp/asked && mv /etc/cage /etc/cage.d && touch /etc/cage'
 out="$(STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
 grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran without your terms in place: $out / $(vm cat /tmp/asked 2>&1)"
@@ -145,14 +152,27 @@ vm sh -c 'rm -f /etc/cage && mv /etc/cage.d /etc/cage'
 [ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
 ok "cage ask: the CLI gets your terms as they are now, masked, even before the VM has its own copy; it doesn't run when they can't be put in place"
 
-# The copy of your terms that cage writes for this ask is gone by the time the VM reads it: `cage up` removes it once
-# the agent no longer needs your terms (say, `cage mask off` and the restart cage offers, while a relay is on its way).
-# With nothing to say what your terms are, the CLI doesn't run, rather than run with none.
-vm rm -f /tmp/asked
-out="$(MSB_GONE="$C/mask.terms" STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
-[ ! -e "$C/mask.terms" ] || fail "the stand-in msb didn't take the copy away"
-grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran with your terms' copy gone: $out / $(vm cat /tmp/asked 2>&1)"
+# The file with your terms that cage writes for this ask is gone by the time the VM reads it (it looks 3 times): with
+# nothing to say what your terms are, the CLI doesn't run, rather than run with none.
+vm rm -f /tmp/asked; rm -f "$CAGE_HOME/took"
+out="$(MSB_GONE="$C/replies/*.terms" STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
+grep -q '/replies/[0-9-]*\.terms$' "$CAGE_HOME/took" || fail "the stand-in msb didn't take the file away: $(cat "$CAGE_HOME/took" 2>&1)"
+grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran with your terms' file gone: $out / $(vm cat /tmp/asked 2>&1)"
 [ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
-ok "cage ask: when the copy of your terms is gone before the VM reads it, the CLI doesn't run"
+ok "cage ask: when the file with your terms is gone before the VM reads it, the CLI doesn't run"
+
+# The copy of your terms the VM read when it woke up is replaced meanwhile (`cage up` does that, and in a microVM the
+# VM can go on seeing the old one for a moment, or a stale handle to it): the ask doesn't rely on that copy, so the CLI
+# gets your terms as they are now, from the file for this ask.
+vm rm -f /tmp/asked
+out="$(MSB_REPLACE="Other Corp" STANDIN="$NAME" cage ask "ask Acme Corp and Zeta Partners" claude 2>/dev/null)"
+[ "$(cat "$C/mask.terms")" = "Other Corp" ] || fail "the stand-in msb didn't replace the VM's copy: $(cat "$C/mask.terms")"
+asked="$(vm cat /tmp/asked)"
+grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" || fail "with the VM's copy replaced, the CLI didn't get your terms masked: $asked"
+grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" && [ "$(vm cat /etc/cage/mask.terms)" = "$(cat "$CAGE_HOME/mask.terms")" ] \
+  || fail "with the VM's copy replaced: $out / $(vm cat /etc/cage/mask.terms)"
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+cp "$CAGE_HOME/mask.terms" "$C/mask.terms"
+ok "cage ask: with the copy of your terms the VM woke up with replaced meanwhile, the CLI still gets your terms as they are now"
 
 echo "all $pass mask VM tests passed"
