@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-side tests for ./cage against a stub `msb` that records its arguments.
-# Optional: CAGE_TEST_CC_CONNECT=/path/to/cc-connect validates the generated configs with the real binary.
+# Optional: CAGE_TEST_CC_CONNECT=/path/to/cc-connect validates the generated configs with the real binary, and chats
+# through it (test/cc-chat.mjs, which needs node).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -445,6 +446,13 @@ if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
   grep -q 'config loaded' <<<"$out" || fail "cc-connect did not load a config with hooks, /all and speech: $out"
 fi
 ok "/all, stand-ins and voice notes: hooks, the /all command (/askall), local speech-to-text, the outbox mount"
+if [ -n "${CAGE_TEST_CC_CONNECT:-}" ]; then
+  # the real cc-connect, chatting with a stand-in claude, through the app's relay: test/cc-chat.mjs says what it checks
+  command -v node >/dev/null || fail "test/cc-chat.mjs needs node"
+  node "$ROOT/test/cc-chat.mjs" "$CAGE_TEST_CC_CONNECT" "$t" 2>"$T/cc-chat.err" || fail "chatting through cc-connect:
+$(cat "$T/cc-chat.err")"
+  ok "a real cc-connect: /all in any case and /askall reach the agent and ask the others; /allow is off, nothing is pre-allowed"
+fi
 
 # guest/hook.sh as cc-connect runs it: everything in environment variables
 pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true   # (the helper `ask-all on` started would race `cage _outbox` below)
