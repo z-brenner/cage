@@ -1605,16 +1605,17 @@ function approvalLine (ap, all) {
 function lineParts (ap) { return [[ap.what, false], ...moreOf(ap).parts].map(([t, prose]) => [visible(t).replace(/[\t\n ]+/g, ' '), prose]) }
 function approvalMore (ap) { return moreOf(ap).parts.map(([t]) => t).join('') }
 // What the line says after what it does: who it goes to (all of them), or else what it runs, opens, looks for or is
-// about; and Zapier's instructions, the words its AI acts on, after whoever it goes to too. As parts, [text, words to
-// read (a subject, a title, instructions) or not], with the names of what it asks that they show.
+// about. After whoever it goes to: Zapier's instructions, the words its AI acts on, or else the subject ("to
+// bob@acme.com, subject: Lunch on Friday"). As parts, [text, words to read (a subject, a title, instructions) or
+// not], with the names of what it asks that they show.
 const ON_LINE = ['command', 'url', 'file_path', 'notebook_path', 'path', 'query', 'subject', 'title', 'instructions', 'input']
 function moreOf (ap) {
   const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
   if (ap.bodyKey) f[ap.bodyKey] = ap.body
   const to = [['to', ''], ['cc', 'cc '], ['bcc', 'bcc ']].filter(([k]) => f[k])
-  const k = to.length ? (f.instructions ? 'instructions' : '') : ON_LINE.find((x) => f[x])
+  const k = to.length ? (f.instructions ? 'instructions' : f.subject ? 'subject' : '') : ON_LINE.find((x) => f[x])
   const parts = to.length ? [[' to ' + to.map(([x, w]) => w + f[x]).join(', '), false]] : []
-  if (k) parts.push([': ' + f[k], PROSE.includes(k)])
+  if (k) parts.push([(to.length && k === 'subject' ? ', subject: ' : ': ') + f[k], PROSE.includes(k)])
   return { parts, keys: [...to.map(([x]) => x), k].filter(Boolean) }
 }
 // Is that line all it asks, as far as saying yes goes? Only when it shows all of what it would send: every field, by
