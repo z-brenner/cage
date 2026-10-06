@@ -1155,6 +1155,87 @@ await page.locator('#nav-agents').getByRole('link', { name: /Claude Code/ }).cli
 await unreadClaude.waitFor({ state: 'detached', timeout: 10000 })
 ok('Allow on Home answers the approval it showed, or none: one that has changed meanwhile is refused, and the new one shown')
 
+// A card in the chat answers the approval it shows, or none: its answer goes with it. One the agent isn't waiting for
+// any more says so, and offers nothing: answered by a message, stopped, a new conversation, cc-connect restarted, or
+// asked anew. One the page still shows as waiting after the agent has moved on (the line that says so hasn't reached
+// it yet) is refused when it's clicked: nothing is sent, and it says so too. One that couldn't be sent at all (cage
+// isn't answering) offers its buttons again.
+await page.waitForFunction(() => CHAT && CHAT.agent === 'claude' && CHAT.loaded, null, { timeout: 15000 })
+const cards = chat.locator('.choices.approval')
+const asksNow = async (input) => { // the agent asks, as cc-connect does: its card, once it offers Allow
+  const n = await cards.count()
+  fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'buttons', session: 'you', buttons: permButtons, text: permText('Bash', input) }) + '\n')
+  await cards.nth(n).getByRole('button', { name: 'Allow', exact: true }).waitFor({ timeout: 10000 })
+  return cards.nth(n)
+}
+const notWaiting = async (c, why, says) => {
+  await c.locator('.chosen', { hasText: says }).waitFor({ timeout: 10000 }).catch(async () => fail(`a card ${why} doesn't say so: ` + await c.innerText()))
+  if (await c.getByRole('button', { name: /^(Allow|Deny)/ }).count()) fail(`a card ${why} still offers to answer it`)
+}
+const notNow = 'Claude Code isn’t waiting for this any more.'
+let shown = await asksNow('rm -rf ~/work/a')
+await composerBox.fill('Yes, go ahead')
+await composerBox.press('Enter')
+await notWaiting(shown, 'answered by a message', 'You answered it in a message.')
+for (const command of ['/stop', '/new']) {
+  shown = await asksNow('rm -rf ~/work/b')
+  await composerBox.fill(command)
+  await composerBox.press('Enter')
+  await notWaiting(shown, 'ended by ' + command, notNow)
+}
+shown = await asksNow('rm -rf ~/work/c')
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'status', session: 'you', connected: true }) + '\n')   // (cc-connect restarted)
+await notWaiting(shown, 'whose cc-connect restarted', notNow)
+shown = await asksNow('rm -rf ~/work/d')
+const newest = await asksNow('ls ~/work')
+await notWaiting(shown, 'asked anew', notNow)
+// (the one asked anew is answered by its own card: the server checks it's the one it says it answers)
+const allowedCard = allowed()
+await newest.getByRole('button', { name: 'Allow', exact: true }).click()
+await newest.locator('.chosen', { hasText: 'You chose: Allow' }).waitFor({ timeout: 5000 })
+for (let i = 0; i < 50 && allowed() === allowedCard; i++) await page.waitForTimeout(100)
+if (allowed() !== allowedCard + 1) fail('Allow on the card the agent waits for did not reach it')
+// all of a long request, with characters that JavaScript counts as two (it says which, counted as server.py counts)
+shown = await asksNow('echo ' + '\u{1F600}'.repeat(4100))
+const allowedLong = allowed()
+await shown.getByRole('button', { name: 'Allow', exact: true }).click()
+for (let i = 0; i < 50 && allowed() === allowedLong; i++) await page.waitForTimeout(100)
+if (allowed() !== allowedLong + 1 || await shown.locator('.chosen.over').count()) fail('Allow on a long card with emoji did not reach the agent: ' + await shown.locator('.chosen').innerText())
+// one this page still shows as waiting, answered meanwhile in another window
+shown = await asksNow('rm -rf ~/work/e')
+await page.evaluate(() => { window.__held = []; window.__chatLive = window.chatLive; window.chatLive = (C, d) => window.__held.push([C, d]) })
+fs.appendFileSync(claudeLog, JSON.stringify({ at: Date.now(), t: 'action', session: 'you', action: 'perm:deny', label: 'Deny' }) + '\n')
+await page.waitForFunction(() => window.__held.some(([, d]) => d.e.t === 'action'), null, { timeout: 10000 })
+const allowedStale = allowed()
+const errorsBefore = errors.length
+await shown.getByRole('button', { name: 'Allow', exact: true }).click()
+await notWaiting(shown, 'clicked after the agent moved on', notNow)
+errors.splice(errorsBefore, errors.length, ...errors.slice(errorsBefore).filter((m) => !/status of 409/.test(m)))   // (refused: that's the point)
+await page.evaluate(() => { window.chatLive = window.__chatLive; for (const [C, d] of window.__held) chatLive(C, d) })
+await page.waitForTimeout(300)
+if (allowed() !== allowedStale) fail('a card’s Allow, clicked once the agent had moved on, reached the agent')
+// one that couldn't be sent: its buttons again, and it can be answered then
+shown = await asksNow('rm -rf ~/work/f')
+await page.evaluate(() => {
+  const real = window.api
+  window.api = (p, o) => { if (!/\/action$/.test(p)) return real(p, o); window.api = real; return Promise.reject(new Error(NOT_ANSWERING)) }
+})
+await shown.getByRole('button', { name: 'Allow', exact: true }).click()
+await page.locator('#toasts .toast', { hasText: 'cage isn’t answering' }).waitFor({ timeout: 5000 })
+await shown.getByRole('button', { name: 'Allow', exact: true }).waitFor({ timeout: 5000 }).catch(() => fail('a card whose answer couldn’t be sent doesn’t offer it again'))
+if (await shown.locator('.chosen').count() || await shown.getByRole('button', { name: 'Deny', exact: true }).isDisabled()) fail('a card whose answer couldn’t be sent still says it was chosen, or its buttons are off')
+// and drawn again from the start (the chat's history): only the newest one waits
+await page.evaluate(() => chatLoad(CHAT, true))
+await page.waitForFunction(() => CHAT.loaded, null, { timeout: 10000 })
+const offering = await cards.evaluateAll((els) => els.map((el, i) => [i, !!el.querySelector('.choice-row')]).filter(([, live]) => live).map(([i]) => i))
+if (JSON.stringify(offering) !== JSON.stringify([await cards.count() - 1])) fail('drawn again, these cards offer an answer: ' + JSON.stringify(offering) + ' of ' + await cards.count())
+const wontSendCard = wontSend()
+await cards.last().getByRole('button', { name: 'Deny', exact: true }).click()
+for (let i = 0; i < 100 && wontSend() === wontSendCard; i++) await page.waitForTimeout(100)
+if (wontSend() !== wontSendCard + 1) fail('Deny on the card the agent waits for did not reach it')
+await page.waitForFunction((n) => LIVE.offsets.claude >= n, fs.statSync(claudeLog).size, { timeout: 10000 })   // (read here, not news later)
+ok('a card in the chat answers the approval it shows, or none: one answered, stopped, ended, asked anew or answered elsewhere offers nothing, and says so')
+
 // how much is left of each plan, on Home: bars from each agent's /usage card; one that ran out is offered a stand-in
 await page.locator('#nav').getByRole('link', { name: 'Home' }).click()
 const plans = page.locator('.plans')

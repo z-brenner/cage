@@ -32,6 +32,8 @@ Standard library only.
 The chat with an agent goes through ~/.cage/app/<agent>, a folder its VM shares (guest/app.mjs relays it to
 cc-connect). The VM writes there, so nothing in it is trusted: no links are followed, only regular files are read,
 and only pictures are shown in the page (everything else downloads).
+A line that ends the wait for an approval (an answer to it, /stop, cc-connect restarted: see ends()) comes to the page
+with "ends": true, in history and stream alike, so its card stops offering answers.
   GET  /api/chat/<a>/history?tail=N     the end of the chat (log.jsonl, after the end of log.1.jsonl when the VM has
                                         just started a new one): {"o": offset in log.jsonl, "entries", "more"}
   GET  /api/chat/stream?from=a:N:I,b:M  server-sent events for all your agents' chats at once (a browser allows only a
@@ -44,9 +46,11 @@ and only pictures are shown in the page (everything else downloads).
   POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}  (409 for one cc-connect
                                         would read as a second answer to an approval, as for action)
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
-  POST /api/chat/<a>/action             {"action", "label"?, "pending"?}  (a button in the chat; from Home, with the
-                                        approval it answers, as /api/activity gave it: 409 if it isn't that one now.
-                                        409 too for a second answer to one, until the VM has taken the first)
+  POST /api/chat/<a>/action             {"action", "label"?, "pending"?}  (a button in the chat or on Home. An answer to
+                                        an approval (perm:) comes with the one it answers, {"text", "at"}, as
+                                        /api/activity gave it or as its line in the log says it: 409 if it isn't that one
+                                        now, or says none. 409 too for a second answer to one, until the VM has taken the
+                                        first)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
   POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
                                         seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
@@ -584,9 +588,49 @@ def answers(e):
     return any(w in ANSWER_WORDS for w in ANSWER_SPLIT.split(said))
 
 
+def ends(e):
+    """Does this line of the chat log end the wait for whatever approval waits: an answer (see answers()), or cc-connect
+    starting afresh (the relay registers with it again: it keeps what it waits for only in memory)?"""
+    return answers(e) or (e.get("t") == "status" and e.get("connected") is True)
+
+
+def marked(e):
+    """A line of the chat log as the page gets it: with "ends": true when it ends the wait for an approval, so a card
+    in the chat stops offering answers to what nobody waits for any more (as this server reads it: the page doesn't
+    read cc-connect's words again). Whatever "ends" the VM wrote is replaced."""
+    e.pop("ends", None)
+    if ends(e):
+        e["ends"] = True
+    return e
+
+
+def moment(at):
+    """A time from the log, in ms: not Infinity or NaN, which json reads but a browser doesn't (so one agent's log could
+    keep Home from showing any agent's approvals), nor anything else that isn't a time; else 0."""
+    return at if isinstance(at, (int, float)) and not isinstance(at, bool) and 0 <= at < 1e15 else 0
+
+
+def approval(text, at):
+    """An approval as Home has it, and as an answer says which one it answers: the start of what it asks (its first
+    4,000 characters, as Python counts them: one this long, Home reads as cut) and when it asked."""
+    return {"text": str(text or "")[:4000], "at": moment(at)}
+
+
+def same(sent, now):
+    """Is the approval an answer came with (Home's, as /api/activity gave it, or a card's, as its log line says it) the
+    one that waits now (activity()'s)? Both are read the same way (approval()). The page holds text as UTF-16, and
+    joins two halves of a character that Python, reading a log with them apart, keeps as two: so they're compared as
+    UTF-16 too, where those are the same."""
+    if not (isinstance(sent, dict) and set(sent) == {"text", "at"} and now):
+        return False
+    sent = approval(sent["text"], sent["at"])
+    utf16 = lambda s: s.encode("utf-16-le", "surrogatepass")   # noqa: E731
+    return sent["at"] == now["at"] and utf16(sent["text"]) == utf16(now["text"])
+
+
 def activity(c, since):
     """What an agent is doing, from the end of its chat log (read like the chat: no links followed): an approval
-    waiting for you (cc-connect's "perm:" buttons, until something answers them, see answers()),
+    waiting for you (cc-connect's "perm:" buttons, until something ends the wait, see ends()),
     since when it's been working (typing on, until it answers), what it said last, and how many questions, answers
     and files there were from `since` on (ms: the page's midnight). The log is the VM's, so every value is checked."""
     size, _ = c.size()
@@ -596,15 +640,12 @@ def activity(c, since):
     for _, e in entries:
         if (e.get("session") or "you") != "you":
             continue
-        t, at = e.get("t"), e.get("at")
-        # (a time, in ms: not Infinity or NaN, which json reads but a browser doesn't, so one agent's log could keep Home
-        # from showing any agent's approvals)
-        at = at if isinstance(at, (int, float)) and not isinstance(at, bool) and 0 <= at < 1e15 else 0
+        t, at = e.get("t"), moment(e.get("at"))
         rows = e.get("buttons") if isinstance(e.get("buttons"), list) else []
         if t == "buttons" and any(isinstance(b, dict) and str(b.get("data", "")).startswith("perm:")
                                   for row in rows if isinstance(row, list) for b in row):
-            pending = {"text": str(e.get("text") or "")[:4000], "at": at}   # (one this long, Home reads as cut)
-        elif answers(e) or (t == "status" and e.get("connected") is True):
+            pending = approval(e.get("text"), at)
+        elif ends(e):
             pending = None
         if t == "typing":
             typing = at if e.get("on") is True else None
@@ -1106,7 +1147,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ostart = c.line_start(ostart, "log.1.jsonl")
                     older, _ = c.read_log(ostart, 8 << 20, "log.1.jsonl", ino) if osize else ([], 0)
                     more = ostart > 0
-                return self.send(200, {"o": end, "entries": [e for _, e in older + entries], "more": more})
+                return self.send(200, {"o": end, "entries": [marked(e) for _, e in older + entries], "more": more})
             if what == "file" and method == "GET":
                 return self.file(c, query.get("p", [""])[0], query.get("dl", [""])[0] == "1")
             if method != "POST":
@@ -1148,15 +1189,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if what == "action":
                 action = str(b.get("action", ""))[:512]
                 said = {"t": "action", "action": action}
+                # An answer to an approval (a perm: button, on Home or on its card in the chat) comes with the approval
+                # it answers, and goes only while that's still the one the agent waits for (in the chat). Answered
+                # since (by a message, from another window), ended (/stop, /new, cc-connect restarted) or asked anew,
+                # it may be asking something else, which an Allow meant for that one would say yes to. One that doesn't
+                # say which it answers can't be told apart from those. And nowhere a second answer to one (Answered).
+                asks = "pending" in b or action.startswith("perm:")
                 with Answered.of(c.agent):
-                    now = activity(c, 0)["pending"] if session == "you" and ("pending" in b or answers(said)) else None
+                    now = activity(c, 0)["pending"] if session == "you" and (asks or answers(said)) else None
                     again = now is not None and Answered.last.get(c.agent) == now
-                    # From Home, with the approval it showed: only while that's still the one the agent waits for (in the
-                    # chat). Answered since (in another window, say), it may be asking something else, which an Allow
-                    # from here would say yes to. And nowhere a second answer to one (see Answered).
-                    if "pending" in b and (now is None or now != b["pending"]):
+                    if asks and not same(b.get("pending"), now):
                         error = "It isn’t waiting for that any more. Open its chat to see what it’s doing."
-                    elif again and ("pending" in b or action.startswith("perm:")):
+                    elif again and asks:
                         error = "You answered that already."
                     else:
                         error = None
@@ -1222,14 +1266,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if now != ino[a] or size < pos[a]:   # the VM started a new log: the rest of the old one first
                         if now != ino[a]:
                             old, _ = c.read_log(pos[a], name="log.1.jsonl", ino=ino[a])
-                            out = [{"a": a, "o": o, "e": e} for o, e in old]
+                            out = [{"a": a, "o": o, "e": marked(e)} for o, e in old]
                         out.append({"a": a, "reset": True, "o": 0, "ino": str(now)})   # (as a string: it may not fit a JS number)
                         ino[a], pos[a] = now, 0
                     was = pos[a]
                     entries, pos[a] = c.read_log(pos[a])
                     # read again only once it changes, unless the window held only part of what's there
                     seen[a] = (size, now) if pos[a] in (was, size) else None
-                    for msg in out + [{"a": a, "o": o, "e": e} for o, e in entries]:
+                    for msg in out + [{"a": a, "o": o, "e": marked(e)} for o, e in entries]:
                         self.wfile.write(b"data: " + json.dumps(msg).encode() + b"\n\n")
                         sent = True
                 if sent:

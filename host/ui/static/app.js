@@ -1248,7 +1248,7 @@ const isPicture = (name) => /\.(png|jpe?g|gif|webp)$/i.test(name || '')
 function chatOpen (a) {
   if (CHAT && CHAT.agent === a) return CHAT
   chatClose()
-  const C = { agent: a, offset: 0, previews: new Map(), shared: [], waking: false, attached: [], connected: null, lastWho: '' }
+  const C = { agent: a, offset: 0, previews: new Map(), shared: [], waking: false, attached: [], connected: null, lastWho: '', asking: null }
   C.list = h('div', { class: 'chat-list', role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation with ' + nameOf(a) })
   C.typing = h('div', { class: 'typing', hidden: true }, h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), h('span', {}, nameOf(a) + ' is working…'),
     h('button', { type: 'button', class: 'btn sm ghost', title: 'Stop it (Esc)', onclick: () => chatSend(C, '/stop') }, icon('square'), 'Stop'))
@@ -1317,6 +1317,7 @@ async function chatLoad (C, again) { // the end of the conversation; what comes 
   } catch (e) { if (CHAT === C) C.retry = setTimeout(() => chatLoad(C, again), 3000); return }
   const near = nearEnd()
   C.list.replaceChildren()
+  C.asking = null
   C.previews.clear()
   C.shared = []
   C.lastWho = ''
@@ -1391,6 +1392,7 @@ function chatAdd (C, e, history) {
     case 'error': C.typing.hidden = true; settled(C); add(C, h('div', { class: 'chat-note bad' }, icon('circle-alert'), sentence(e.text || 'Something went wrong')), ''); break
     case 'status': C.connected = e.connected; break
   }
+  if (e.ends) over(C, e.t === 'you' && !String(e.text || '').trim().startsWith('/') ? 'You answered it in a message.' : '')
 }
 function settled (C) { // what was being written stays as it is (cc-connect keeps it when it stops to ask, or on an error)
   for (const m of C.previews.values()) { m.removeAttribute('aria-busy'); m.classList.remove('streaming') }
@@ -1615,7 +1617,12 @@ function approvalView (ap) { // what the card shows above its buttons
     h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', { class: 'exact' }, visible(ap.raw)))
   ]
 }
-// Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons).
+// Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons). cc-connect's
+// buttons say allow or deny, not to what, so an answer from a card goes with the approval it shows: what it asked and
+// when, as its line in the log says them (cut as server.py's approval() cuts them: the first 4,000 characters, counted
+// by code point as Python counts them, not in UTF-16 units as slice() would). The server sends it only while that's
+// the approval the agent waits for. Only the newest one waits, until a line ends the wait ("ends", as server.py reads
+// it: a message that answers it, /stop, /new, cc-connect restarted); then its card says so, and offers nothing.
 function buttonsMsg (C, e) {
   const all = (e.buttons || []).flat()
   const perm = all.some((b) => /^perm:/.test(b.data))
@@ -1623,21 +1630,42 @@ function buttonsMsg (C, e) {
   box.dataset.values = all.map((b) => b.data).join('\n')
   const body = perm ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants your OK')), approvalView(approvalOf(e.text))]
     : [md(e.text || '')]
+  const pending = perm ? { text: [...String(e.text || '')].slice(0, 4000).join(''), at: e.at ?? null } : undefined
   box.append(...body.flat().filter(Boolean), h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) => {
     const label = (perm && PERM_LABEL[b.data]) || b.text
-    return h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, label) }, label)
+    return h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, label, pending) }, label)
   }))))
+  if (perm) { over(C); C.asking = box }   // (one asked before it isn't waited for any more)
   return agentMsg(C, box, '', e.at)
 }
-function choose (C, box, value, label) {
+function choose (C, box, value, label, pending) {
+  const row = box.querySelector('.choice-row')
   answered(box, label)
-  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label } }).catch((err) => { box.classList.remove('is-answered'); toast(err.message) })
+  api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label, pending } }).catch((err) => {
+    if (err.status === 409 && pending) { // the agent has moved on, or it was answered already: nothing was sent
+      answered(box, '', /^You answered/.test(err.message) ? 'You answered it already.' : nameOf(C.agent) + ' isn’t waiting for this any more.')
+      return
+    }
+    // it didn't go (cage isn't answering, say): its buttons again, to answer once it can
+    box.classList.remove('is-answered')
+    const chosen = box.querySelector('.chosen')
+    if (row && chosen) chosen.replaceWith(row)
+    box.querySelectorAll('button').forEach((b) => { b.disabled = false })
+    toast(err.message)
+  })
 }
-function answered (box, label) {
+// What a card says once it's answered (what you chose), or once it can't be (why), instead of its buttons
+function answered (box, label, why) {
   box.classList.add('is-answered')
   box.querySelectorAll('button').forEach((b) => { b.disabled = true })
-  const row = box.querySelector('.choice-row')
-  if (row) row.replaceWith(h('div', { class: 'chosen' }, icon('check'), 'You chose: ', h('b', {}, label.replace(/^[^\p{L}\p{N}]+/u, ''))))
+  const row = box.querySelector('.choice-row, .chosen')
+  if (row) row.replaceWith(why ? h('div', { class: 'chosen over' }, icon('info'), why) : h('div', { class: 'chosen' }, icon('check'), 'You chose: ', h('b', {}, label.replace(/^[^\p{L}\p{N}]+/u, ''))))
+}
+// The approval card that waited no longer does (answered, ended, or asked anew): it says so, if nothing answered it here
+function over (C, why) {
+  const box = C.asking
+  C.asking = null
+  if (box && !box.classList.contains('is-answered')) answered(box, '', why || nameOf(C.agent) + ' isn’t waiting for this any more.')
 }
 // cc-connect's cards (/help, /usage, model pickers…): headers, text, notes and buttons
 function cardOf (C, card) {

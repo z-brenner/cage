@@ -747,6 +747,7 @@ dialog.keys::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparen
 .choice-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .chosen { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
 .chosen .i { color: var(--ok-fg); }
+.chosen.over .i { color: var(--muted); }
 .card-box .card-title { color: var(--ink); font-weight: 600; }
 .card-box hr { width: 100%; margin: 0; border: 0; border-top: 1px solid var(--line-soft); }
 .card-box .list-item { display: flex; align-items: center; gap: 10px; font-size: 13.5px; }

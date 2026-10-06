@@ -609,7 +609,8 @@ class Live(unittest.TestCase):
         return {"text": text, "at": Live.AT[0]}
 
     def answer(self, agent, action, *pending, **more):
-        """Allow or Deny as Home sends it, with the approval it showed (or, without one, as a card in the chat does)."""
+        """Allow or Deny as Home or a card in the chat sends it, with the approval it showed (or, without one, as only
+        a page from before cards said which they answer would)."""
         body = dict(more, action=action, label=action)
         if pending:
             body["pending"] = pending[0]
@@ -630,6 +631,14 @@ class Live(unittest.TestCase):
             os.unlink(os.path.join(server.APPDIR, agent, "in", r["id"] + ".json"))
             self.log(agent, {"t": "action", "session": r["session"], "id": r["id"], "action": r["action"], "label": r["label"]} if r["type"] == "action"
                      else {"t": "you", "session": r["session"], "id": r["id"], "text": r["text"], "files": r["files"]})
+
+    def card(self, agent):
+        """What the newest approval's card in the chat answers with: what it asked and when, as the page has them from
+        its line in the log (/history). The page sends what it asked cut at 4,000 characters (counted as Python does);
+        this is all of it, which the server cuts the same way."""
+        status, _, body = self.call("GET", f"/api/chat/{agent}/history")
+        e = [e for e in strict(body)["entries"] if e.get("t") == "buttons"][-1]
+        return {"text": e.get("text"), "at": e.get("at")}
 
     def test_who_may_ask(self):
         """Only cage's own page, on this computer, with the token: without it or with a wrong one (in the header or the
@@ -712,6 +721,94 @@ class Live(unittest.TestCase):
         self.assertEqual(self.answer("claude", "perm:allow", q, session="usage")[0], 409)   # (Home shows the chat's)
         self.assertEqual(self.sent("claude"), [])
 
+    def test_a_card_answers_the_approval_it_shows(self):
+        """A card in the chat answers with the approval it shows, and reaches that one or none. Once the wait for it has
+        ended, its Allow (or Deny, or Allow everything) gets 409 and nothing goes to the agent: answered by a message
+        (taken by the VM or not yet), stopped (/stop, its Stop button), a new conversation (/new) or another command that
+        starts the agent's session afresh, cc-connect restarted (the relay registers with it again), asked anew, or
+        answered from another window. An answer to an approval that doesn't say which it answers can't be told apart
+        from those: 409 too, even while one waits."""
+        def stale(why, end, actions=("perm:allow", "perm:deny", "perm:allow_all")):
+            self.asks("claude", "Bash(rm -rf ~/work/old)")
+            card = self.card("claude")
+            end()
+            before = self.sent("claude")
+            for action in actions:
+                status, _, body = self.answer("claude", action, card)
+                self.assertEqual(status, 409, (why, action))
+                self.assertIn(strict(body)["error"], ("It isn’t waiting for that any more. Open its chat to see what it’s doing.",
+                                                      "You answered that already."), (why, action))
+            self.assertEqual(self.sent("claude"), before, why)
+            self.taken("claude")
+
+        def typed(text):
+            return lambda: self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": text})[0], 200)
+
+        def then(*steps):
+            return lambda: [step() for step in steps]
+        stale("a message that answers it, not yet taken", typed("yes, go ahead"))
+        stale("a message that answers it", then(typed("No, keep it."), lambda: self.taken("claude")))
+        for command in ("/stop", "/new", "/new client call", "/model opus", "/cd ~/other"):
+            stale(command, then(typed(command), lambda: self.taken("claude")))
+        stale("its Stop button", then(lambda: self.answer("claude", "act:/stop"), lambda: self.taken("claude")))
+        stale("cc-connect restarted", lambda: self.log("claude", {"t": "status", "session": "you", "connected": True}))
+        stale("answered from another window", then(lambda: self.answer("claude", "perm:deny", self.card("claude")), lambda: self.taken("claude")))
+        stale("asked anew", lambda: self.asks("claude", "Bash(ls)"))
+        # (and what waits now, asked anew, is answered by its own card)
+        self.assertEqual(self.answer("claude", "perm:deny", self.card("claude"))[0], 200)
+        self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:deny"])
+        self.taken("claude")
+        # an answer that doesn't say which it answers, or says it in another shape
+        p = self.asks("claude", "Bash(ls)")
+        for action in ("perm:allow", "perm:deny", "perm:allow_all", "perm:anything"):
+            for pending in ((), (None,), ({},), (p["text"],), ([p],), (dict(p, label="Allow"),), ({"text": p["text"]},)):
+                self.assertEqual(self.answer("claude", action, *pending)[0], 409, (action, pending))
+        self.assertEqual(self.sent("claude"), [])
+        self.assertEqual(self.answer("claude", "perm:allow", p)[0], 200)
+
+    def test_a_card_says_what_its_line_says(self):
+        """A card has what was asked, and when, as the agent's log line says it, and Home has what activity() made of
+        them: all the same, they're the same approval. All of what it asked (more than 4,000 characters, with
+        characters outside the BMP, which JavaScript counts as two) or the first 4,000, as Python counts them; a time
+        that's missing, not a time, too big for a float (1e400), or a fraction; a character whose two halves the log
+        has apart (Python reads them as two, the page as one)."""
+        long = "Bash(echo " + "\U0001F600" * 4100 + ")"
+        for text, at, raw in ((long, 1791000000123, None), ("Bash(ls)", "absent", None), ("Bash(ls)", "soon", None), ("Bash(ls)", 1791000000000.5, None),
+                              ("Bash(ls)", None, b'{"t": "buttons", "session": "you", "text": "Bash(ls)", "buttons": [[{"data": "perm:allow"}]], "at": 1e400}'),
+                              ("Bash(echo \U0001F600)", None, b'{"t": "buttons", "session": "you", "text": "Bash(echo \xed\xa0\xbd\xed\xb8\x80)", "buttons": [[{"data": "perm:allow"}]], "at": 5}')):
+            for n, who in enumerate(("card", "card, cut as the page cuts it", "Home")):
+                # (each asked anew: with no time to tell them apart, by what it asked first)
+                if raw:
+                    self.log("claude", raw.replace(b'"text": "', b'"text": "%d ' % n))
+                elif at == "absent":
+                    self.log("claude", {"t": "buttons", "session": "you", "text": f"{n} {text}", "buttons": self.PERM})
+                else:
+                    self.log("claude", {"t": "buttons", "session": "you", "text": f"{n} {text}", "buttons": self.PERM, "at": at})
+                if who == "Home":
+                    pending = strict(self.call("GET", "/api/activity?agents=claude")[2])["agents"]["claude"]["pending"]
+                else:
+                    pending = self.card("claude")
+                    if who != "card":
+                        pending["text"] = pending["text"][:4000]
+                self.assertEqual(self.answer("claude", "perm:allow", pending)[0], 200, (text[:20], at, who))
+                self.taken("claude")
+
+    def test_what_ends_the_wait_is_marked(self):
+        """A line that ends the wait for an approval comes to the page with "ends": true, from history and stream alike,
+        as activity() reads it; the page doesn't read cc-connect's words again. Whatever "ends" the VM wrote is
+        replaced."""
+        lines = [({"t": "buttons", "text": "Bash(ls)", "buttons": self.PERM, "ends": True}, False), ({"t": "you", "text": "yes"}, True),
+                 ({"t": "you", "text": "What's in it?", "ends": True}, False), ({"t": "you", "text": "/stop"}, True),
+                 ({"t": "you", "text": "/stop", "files": [{"name": "a.png", "mime": "image/png"}]}, False), ({"t": "status", "connected": True}, True),
+                 ({"t": "status", "connected": False}, False), ({"t": "action", "action": "act:/stop"}, True),
+                 ({"t": "action", "action": "perm:allow"}, True), ({"t": "reply", "text": "ok", "ends": "yes"}, False)]
+        self.log("claude", *[dict(e, session="you", at=i) for i, (e, _) in enumerate(lines)])
+        want = [True if end else None for _, end in lines]
+        entries = strict(self.call("GET", "/api/chat/claude/history")[2])["entries"]
+        self.assertEqual([e.get("ends") for e in entries], want)
+        _, events = self.stream("from=claude:0", lambda events: len([e for e in events if "e" in e]) == len(lines))
+        self.assertEqual([e["e"].get("ends") for e in events if "e" in e], want)
+
     def test_one_answer_per_approval(self):
         """cc-connect's buttons say allow or deny, not to what: an answer goes to whatever waits when it gets there.
         Until the VM has taken an answer (and its log says so), the approval it answers still seems to wait, and a
@@ -720,9 +817,9 @@ class Live(unittest.TestCase):
         nothing more is sent. A command still goes, and what it asks next is answered as ever."""
         p = self.asks("claude", "Bash(ls)")
         self.assertEqual(self.answer("claude", "perm:allow", p)[0], 200)
-        for action, pending in (("perm:allow", (p,)), ("perm:deny", (p,)), ("perm:allow", ()), ("perm:allow_all", ())):
-            status, _, body = self.answer("claude", action, *pending)
-            self.assertEqual((status, strict(body)["error"]), (409, "You answered that already."), (action, pending))
+        for action in ("perm:allow", "perm:deny", "perm:allow_all"):
+            status, _, body = self.answer("claude", action, p)
+            self.assertEqual((status, strict(body)["error"]), (409, "You answered that already."), action)
         self.assertEqual(self.answer("claude", "act:/stop")[0], 200)
         self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow", "act:/stop"])
         self.taken("claude")
@@ -740,7 +837,7 @@ class Live(unittest.TestCase):
         self.assertEqual([r["text"] for r in self.sent("claude")], ["No, keep it."])
         self.taken("claude")
         last = self.asks("claude", "Bash(ls)")
-        self.assertEqual(self.answer("claude", "perm:allow")[0], 200)   # a card in the chat answers it first
+        self.assertEqual(self.answer("claude", "perm:allow", self.card("claude"))[0], 200)   # its card in the chat answers it first
         self.assertEqual(self.answer("claude", "perm:allow", last)[0], 409)
         self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
 
@@ -770,7 +867,7 @@ class Live(unittest.TestCase):
         p = self.asks("claude", "Bash(ls)")
         inbox = os.path.join(server.APPDIR, "claude", "in")
         for method, path, body in (("POST", "/api/chat/claude/action", {"action": "perm:allow", "label": "Allow", "pending": p}),
-                                   ("POST", "/api/chat/claude/action", {"action": "perm:allow", "label": "Allow"}),
+                                   ("POST", "/api/chat/claude/action", {"action": "perm:allow", "label": "Allow", "pending": self.card("claude")}),
                                    ("POST", "/api/chat/claude/send", {"text": "yes"})):
             with open(inbox, "w"):
                 pass
