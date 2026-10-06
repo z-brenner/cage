@@ -750,6 +750,10 @@ class Live(unittest.TestCase):
             self.log(agent, {"t": "action", "session": r["session"], "id": r["id"], "action": r["action"], "label": r["label"]} if r["type"] == "action"
                      else {"t": "you", "session": r["session"], "id": r["id"], "text": r["text"], "files": r["files"]})
 
+    def activity(self, agent):
+        """What Home gets of the agent (/api/activity)."""
+        return strict(self.call("GET", f"/api/activity?agents={agent}")[2])["agents"][agent]
+
     def card(self, agent):
         """What the newest approval's card in the chat answers with: what it asked and when, as the page has them from
         its line in the log (/history). The page sends what it asked cut at 4,000 characters (counted as Python does);
@@ -954,9 +958,11 @@ class Live(unittest.TestCase):
     def test_not_while_its_vm_is_stopped(self):
         """An answer to an approval while the agent's VM isn't running (asleep, say), as msb says, though its log still
         has it waiting: cc-connect keeps what it asked only in memory, so it forgot it when it stopped, and started
-        afresh, it would drop the answer without a word. So it gets 409 (from Home or a card), and nothing is sent; once
-        the VM runs again, the answer goes. When msb can't say (it fails, or isn't there), it goes: the page offers none
-        while the agent isn't up. Anything else (a card's button, a message) still goes, and waits for the agent."""
+        afresh, it would drop the answer without a word. So it gets 409 (from Home or a card), and nothing is sent; and
+        so does one once the VM runs again, until the log says the wait is over (the relay registers with the new
+        cc-connect a while later), and /api/activity says it can't be answered. One asked after that goes. When msb
+        can't say (it fails, or isn't there), it goes: the page offers none while the agent isn't up. Anything else (a
+        card's button, a message) still goes, and waits for the agent."""
         try:
             for running in ("", "cage-codex\ncage-claude-2\n"):
                 with open(RUNNING, "w") as f:
@@ -970,8 +976,16 @@ class Live(unittest.TestCase):
                 self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "What does it delete?"})[0], 200)
                 self.assertEqual([r.get("action") or r["text"] for r in self.sent("claude")], ["nav:/help", "What does it delete?"])
                 self.taken("claude")
-            with open(RUNNING, "w") as f:   # running again (with the approval still waiting: it only looked away)
+            with open(RUNNING, "w") as f:   # running again: its log still has that one waiting, but it was forgotten
                 f.write(EVERY_VM)
+            for action, pending in (("perm:deny", p), ("perm:allow", self.card("claude"))):
+                status, _, body = self.answer("claude", action, pending)
+                self.assertEqual((status, strict(body)["error"]), (409, "It stopped while waiting for your OK, so it won’t go ahead."), action)
+            self.assertEqual(self.sent("claude"), [])
+            self.assertEqual(self.activity("claude")["pending"], p)
+            self.assertIs(self.activity("claude")["stopped"], True)
+            p = self.asks("claude", "Bash(rm -rf ~/work/old)")   # asked anew, by the cc-connect that runs now
+            self.assertIs(self.activity("claude")["stopped"], False)
             self.assertEqual(self.answer("claude", "perm:deny", p)[0], 200)
             self.taken("claude")
             os.unlink(RUNNING)   # msb fails
@@ -984,6 +998,56 @@ class Live(unittest.TestCase):
             os.environ["CAGE_MSB"] = MSB
             with open(RUNNING, "w") as f:
                 f.write(EVERY_VM)
+
+    def test_not_one_it_waited_for_while_asleep(self):
+        """`cage _state` (which the page asks for every few seconds) calls an agent asleep, as msb says: the approval
+        its log has it waiting for was forgotten. So once the agent is up again, an answer to it gets 409 (from Home or
+        a card), and nothing is sent, until the log says the wait is over; /api/activity says it can't be answered.
+        Only one its log had before cage looked: a line the log got while cage was looking may be a question the agent
+        asked just after it woke up, so then nothing is taken for forgotten. What cage says of an agent that has no chat,
+        or that isn't one, changes nothing."""
+        states, then = os.path.join(HOME, "states.json"), os.path.join(HOME, "then.jsonl")
+        stub = os.path.join(HOME, "cage-states")
+        log = os.path.join(server.APPDIR, "claude", "log.jsonl")
+        with open(stub, "w") as f:   # (`cage _state`, and a line the agent's log gets while it looks, if there's one)
+            f.write('#!/bin/sh\n[ -e "%s" ] && cat "%s" >> "%s" && rm "%s"\ncat "%s"\n' % (then, then, log, then, states))
+        os.chmod(stub, 0o755)
+
+        def state(**agents):   # what cage says of each agent now, as the page asks for it
+            with open(states, "w") as f:
+                json.dump({"agents": [{"name": a, "state": s} for a, s in agents.items()] + ["claude", {"name": ["claude"], "state": "asleep"}]}, f)
+            server.State.stale()
+            self.assertEqual(self.call("GET", "/api/state")[0], 200)
+        saved = server.CAGE, server.State.at, server.State.body, server.State.ok
+        server.CAGE = stub
+        try:
+            p = self.asks("claude", "Bash(rm -rf ~/work/old)")
+            state(claude="ready", codex="asleep", cursor="asleep")
+            self.assertIs(self.activity("claude")["stopped"], False)
+            state(claude="asleep", codex="asleep")   # it went to sleep...
+            self.assertIs(self.activity("claude")["stopped"], True)
+            state(claude="ready", codex="asleep")   # ...and woke up again
+            for action, pending in (("perm:allow", p), ("perm:deny", p), ("perm:allow", self.card("claude"))):
+                status, _, body = self.answer("claude", action, pending)
+                self.assertEqual((status, strict(body)["error"]), (409, "It stopped while waiting for your OK, so it won’t go ahead."), action)
+            self.assertEqual(self.sent("claude"), [])
+            self.assertEqual(self.activity("claude")["pending"], p)
+            self.log("claude", {"t": "status", "connected": True, "at": Live.AT[0] + 1})   # the relay registers with the new cc-connect
+            self.assertIsNone(self.activity("claude")["pending"])
+            p = self.asks("claude", "Bash(rm -rf ~/work/old)")   # asked anew
+            self.assertEqual(self.answer("claude", "perm:deny", p)[0], 200)
+            self.taken("claude")
+            Live.AT[0] += 1000
+            q = {"text": "Bash(ls -la)", "at": Live.AT[0]}
+            with open(then, "w") as f:   # asked while cage looked, which still says it's asleep
+                f.write(json.dumps({"t": "buttons", "session": "you", "text": q["text"], "buttons": self.PERM, "at": q["at"]}) + "\n")
+            state(claude="asleep")
+            self.assertEqual((self.activity("claude")["pending"], self.activity("claude")["stopped"]), (q, False))
+            state(claude="ready")
+            self.assertEqual(self.answer("claude", "perm:allow", q)[0], 200)
+            self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
+        finally:
+            server.CAGE, server.State.at, server.State.body, server.State.ok = saved
 
     def test_one_answer_per_approval(self):
         """cc-connect's buttons say allow or deny, not to what: an answer goes to whatever waits when it gets there.

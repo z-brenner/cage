@@ -30,6 +30,7 @@ let page = 'home'
 let ASK = null     // the last question you asked from Home, and its answers (kept in this tab only)
 let ACTIVITY = {}  // what each agent is doing, from the end of its chat (server.py's activity()): {pending, working, last, today}
 const ANSWERED = {}   // approvals answered from Home, by when they were asked: gone at once, not at the next look
+const FORGOTTEN = {}  // approvals that can't be answered any more, though an agent's chat says it waits for them (forgot())
 
 // --- tiny DOM helpers: text always goes in as text, never as HTML ------------------------------------------------
 function h (tag, attrs, ...kids) {
@@ -247,8 +248,10 @@ function loadActivity () {
     let got
     try { got = names.length ? (await api(`/api/activity?agents=${names.join(',')}&since=${midnight.getTime()}`)).agents || {} : {} } catch (e) { return }
     if (n !== ACT_SEQ) return
+    for (const [name, x] of Object.entries(got)) if (x.stopped && x.pending) forgot(name, x.pending)
     ACTIVITY = got
     render()
+    if (CHAT) drawAsking(CHAT)
   })()
   return ACT_LOAD
 }
@@ -260,7 +263,14 @@ function waitingOf (name) { // the approval an agent waits for, unless you answe
 }
 // ...and can still be answered: cc-connect forgets an approval when it stops (asleep, say), and drops an answer to one
 // it forgot without a word, so an Allow would seem to work and do nothing
-function askingOf (a) { return a.state === 'ready' ? waitingOf(a.name) : null }
+function askingOf (a) { const p = a.state === 'ready' ? waitingOf(a.name) : null; return p && !forgotten(a.name, p) ? p : null }
+// Nor once it's up again, for one it was waiting for while its VM wasn't running: the cc-connect that started when it
+// woke never asked it, though its chat says it waits until the relay registers with that one, a while later. Kept
+// here for each agent, by what it asked and when, from what server.py says of it ("stopped" in /api/activity, or its
+// refusal of an answer). The page doesn't tell by itself: cage's state, which says an agent is asleep, can be seconds
+// older than what its chat says, so an approval asked just after it woke up would look like one asked before.
+function forgot (name, p) { FORGOTTEN[name] = { text: p.text, at: p.at } }
+function forgotten (name, p) { const f = FORGOTTEN[name]; return !!f && !!p && f.text === p.text && (f.at || 0) === (p.at || 0) }
 // The line at the top when cage itself is in the way: not answering at all (dots greyed, sending off), or slow
 function notice (kind) {
   const el = document.getElementById('notice')
@@ -747,6 +757,7 @@ function approvalRow (a, p, pos, placed) {
       }
       toast(`${action === 'perm:deny' ? 'Denied' : 'Allowed'}: ${a.label}, ${line}`, action === 'perm:deny' ? 'info' : 'ok')
     } catch (err) {
+      if (err.status === 409 && /^It stopped/.test(err.message)) { forgot(a.name, p); render() }   // (for good, and on its card too)
       toast(err.message)
       li.querySelectorAll('button').forEach((x) => { x.disabled = false })
       if (had && b.isConnected) b.focus()
@@ -1690,6 +1701,7 @@ function buttonsMsg (C, e) {
   const body = perm ? [h('div', { class: 'approval-head' }, icon('hand'), h('b', {}, nameOf(C.agent) + ' wants your OK')), approvalView(approvalOf(e.text))]
     : [md(e.text || '')]
   const pending = perm ? { text: [...String(e.text || '')].slice(0, 4000).join(''), at: e.at ?? null } : undefined
+  box.pending = pending
   box.append(...body.flat().filter(Boolean), h('div', { class: 'choice-row' }, (e.buttons || []).map((row) => row.map((b) => {
     const label = (perm && PERM_LABEL[b.data]) || b.text
     return h('button', { type: 'button', class: 'btn sm' + (/allow$/.test(b.data) ? ' primary' : ''), onclick: () => choose(C, box, b.data, label, pending) }, label)
@@ -1702,6 +1714,7 @@ function choose (C, box, value, label, pending) {
   answered(box, label)
   api(`/api/chat/${C.agent}/action`, { method: 'POST', body: { action: value, label, pending } }).catch((err) => {
     if (err.status === 409 && pending) { // the agent has moved on, it was answered already, or its VM stopped: nothing was sent
+      if (/^It stopped/.test(err.message)) forgot(C.agent, pending)   // (for good, and on Home too)
       answered(box, '', /^You answered/.test(err.message) ? 'You answered it already.' : /^It stopped/.test(err.message) ? stoppedWaiting(C.agent)
         : nameOf(C.agent) + ' isn’t waiting for this any more.')
       return
@@ -1717,7 +1730,8 @@ function choose (C, box, value, label, pending) {
 }
 // cc-connect forgets an approval when it stops (asleep, say), and drops an answer to one it forgot without a word: so
 // while its agent isn't up, the card that waits offers no answers, and says why, as Home offers none (askingOf). Up
-// again with nothing that ended the wait (it only looked away), it offers them again.
+// again, it offers them only if its VM didn't stop meanwhile (it only looked away: cage's state said it was signing
+// in, say): one it was waiting for while its VM wasn't running, it never offers again (forgotten()).
 // (server.py refuses an answer while the agent's VM isn't running, for when this page doesn't know yet.)
 function stoppedWaiting (agent) { return nameOf(agent) + ' stopped while waiting for your OK, so it won’t go ahead.' }
 function drawAsking (C) {
@@ -1726,7 +1740,8 @@ function drawAsking (C) {
   const a = agentOf(C.agent)
   const row = box.querySelector('.choice-row')
   const note = box.querySelector('.chosen')
-  if (a && a.state === 'ready') { if (note && note.row) note.replaceWith(note.row) }
+  if (forgotten(C.agent, box.pending)) answered(box, '', stoppedWaiting(C.agent))
+  else if (a && a.state === 'ready') { if (note && note.row) note.replaceWith(note.row) }
   else if (row) row.replaceWith(Object.assign(h('div', { class: 'chosen over' }, icon('info'), stoppedWaiting(C.agent)), { row }))   // (its buttons kept for then)
 }
 // What a card says once it's answered (what you chose), or once it can't be (why), instead of its buttons. Only its
@@ -2584,7 +2599,7 @@ function render (force) {
   document.body.classList.toggle('unconfigured', !STATE.configured)
   drawNav()
   // (Home shows what each agent is doing: not "today", which changes with every message and would only take the focus)
-  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE) + (page === 'home' ? JSON.stringify([Object.entries(ACTIVITY).map(([a, x]) => [a, x.pending, x.working, x.last]), ANSWERED]) : '')
+  const key = page + '\n' + LATEST + '\n' + JSON.stringify(STATE) + (page === 'home' ? JSON.stringify([Object.entries(ACTIVITY).map(([a, x]) => [a, x.pending, x.working, x.last]), ANSWERED, FORGOTTEN]) : '')
   const main = document.getElementById('main')
   if (!force && key === SEEN && main.dataset.page === page) return   // nothing changed
   // keep what you're typing: don't redraw a page while you're in one of its fields

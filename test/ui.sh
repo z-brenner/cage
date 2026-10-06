@@ -302,10 +302,10 @@ import json, sys
 a = json.load(open(sys.argv[1]))["agents"]
 assert sorted(a) == ["antigravity", "codex", "cursor"], a
 g, c, x = a["antigravity"], a["cursor"], a["codex"]
-assert g["pending"]["text"] == "May I send it?" and not g["working"], g   # waiting for you isn't working
+assert g["pending"]["text"] == "May I send it?" and not g["working"] and g["stopped"] is False, g   # waiting for you isn't working
 assert g["last"]["text"] == "**Yesterday's** answer" and g["today"] == {"asked": 1, "answers": 0, "files": 0}, g
 assert c["pending"] is None and c["working"] and c["last"]["t"] == "file" and c["today"] == {"asked": 2, "answers": 1, "files": 1}, c
-assert x == {"pending": None, "last": None, "today": {"asked": 0, "answers": 0, "files": 0}, "working": False}, x   # the planted link
+assert x == {"pending": None, "stopped": False, "last": None, "today": {"asked": 0, "answers": 0, "files": 0}, "working": False}, x   # the planted link
 PY
 # Allow on Home goes with the approval Home showed: one the agent isn't waiting for any more is refused, and nothing is sent
 python3 - "$T/activity.json" "$T/allow" <<'PY'
@@ -321,11 +321,23 @@ for was in old other; do
     || fail "Home's Allow for an approval it isn't waiting for ($was): $(cat "$T/allowed.json")"
 done
 # ...and only while the agent's VM runs: one that stopped (asleep) has forgotten what it asked, and would drop the answer
-# without a word once it wakes
+# without a word once it wakes. So it's refused then too, until its chat says the wait is over; one asked after goes.
 [ "$(allow now)" = 409 ] && grep -q "It stopped while waiting for your OK" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
   || fail "Home's Allow for an agent whose VM isn't running: $(cat "$T/allowed.json")"
 echo cage-antigravity > "$STUB_RUNNING"
-[ "$(allow now)" = 200 ] && grep -q '"action": "perm:allow"' "$A"/antigravity/in/*.json || fail "Home's Allow for the approval it waits for: $(cat "$T/allowed.json")"
+[ "$(allow now)" = 409 ] && grep -q "It stopped while waiting for your OK" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
+  || fail "Home's Allow, with the VM up again, for what it was waiting for while it wasn't: $(cat "$T/allowed.json")"
+[ "$(activity antigravity | python3 -c 'import json,sys; print(json.load(sys.stdin)["agents"]["antigravity"]["stopped"])')" = True ] \
+  || fail "Home isn't told it can't be answered: $(activity antigravity)"
+python3 - "$A/antigravity/log.jsonl" "$T/allow-anew.json" <<'PY'
+import json, sys, time
+e = {"t": "buttons", "text": "May I send it now?", "buttons": [[{"text": "Allow", "data": "perm:allow"}]], "at": int(time.time() * 1000)}
+with open(sys.argv[1], "a") as f:
+    f.write(json.dumps(e) + "\n")
+with open(sys.argv[2], "w") as f:
+    json.dump({"action": "perm:allow", "label": "Allow", "pending": {"text": e["text"], "at": e["at"]}}, f)
+PY
+[ "$(allow anew)" = 200 ] && grep -q '"action": "perm:allow"' "$A"/antigravity/in/*.json || fail "Home's Allow for the approval it waits for: $(cat "$T/allowed.json")"
 rm "$STUB_RUNNING"
 rm -rf "$A/cursor" "$A/codex/log.jsonl"
 ln -s "$A/antigravity" "$A/cursor"   # a chat folder that is itself a link: skipped, not followed

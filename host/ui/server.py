@@ -41,8 +41,10 @@ ends()) comes to the page with "ends": true, in history and stream alike, so its
                                         {"a", "o", "e"} per new line, {"a", "reset", "ino"} when the VM starts a new
                                         log. I (optional): the log N is in, as "ino" said, to go on from the log before
   GET  /api/activity?agents=a,b&since=T what each agent is doing, from the end of its chat (for Home): {"agents": {a:
-                                        {"pending": {"text","at"}|null, "working", "last": {"t","text","at"}|null,
-                                        "today": {"asked","answers","files"} (from T, ms, on)}}}
+                                        {"pending": {"text","at"}|null, "stopped" (true: it was waiting for that while
+                                        its VM wasn't running, so it can't be answered: see Stopped), "working",
+                                        "last": {"t","text","at"}|null, "today": {"asked","answers","files"} (from T,
+                                        ms, on)}}}
   POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}  (409 for one cc-connect
                                         would read as a second answer to an approval, as for action)
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
@@ -50,7 +52,8 @@ ends()) comes to the page with "ends": true, in history and stream alike, so its
                                         an approval (perm:) comes with the one it answers, {"text", "at"}, as
                                         /api/activity gave it or as its line in the log says it: 409 if it isn't that one
                                         now, or says none. 409 too for a second answer to one, until the VM has taken the
-                                        first, and for one to an agent whose VM isn't running, as msb says)
+                                        first, and for one to an agent whose VM isn't running, as msb says, or wasn't
+                                        while it waited)
   POST /api/chat/<a>/request            {"type": "api"|"ls"|"fetch"|"put", …}  -> the VM's answer
   POST /api/chat/<a>/usage {"fresh"?}  your plan's usage, as cc-connect's /usage answers it, plus "asked" (when, in
                                         seconds) and "stale" (an older answer: the last one wasn't good), or {"error"}.
@@ -849,6 +852,52 @@ def vm_running(agent):
     return f"cage-{agent}" in r.stdout.decode("utf-8", "replace").split() if r.returncode == 0 else None
 
 
+class Stopped:
+    """The approval each agent was last seen waiting for while its VM wasn't running (asleep, say), as its log had it.
+    cc-connect forgot it when the VM stopped (see vm_running()), and the one that starts when the VM wakes drops an
+    answer to it without a word. Its log has it waiting until the relay registers with that new cc-connect (its status
+    line: see ends()), which comes a while after the agent is up again; so it's kept here, and an answer to it is
+    refused then too, and /api/activity says it can't be answered ("stopped"), so the page offers none. Seen when an
+    answer finds the VM not running, and when `cage _state` calls the agent asleep (which msb says too, see State):
+    then only if its log is as it was before cage looked, so it was asked before msb said that (the agent may have
+    woken since, and asked something new)."""
+    last, looked = {}, {}
+
+    @classmethod
+    def saw(cls, agent, pending):
+        if pending is not None:
+            cls.last[agent] = pending
+
+    @classmethod
+    def logs(cls):
+        """Each agent's chat log as it is now (its size and inode), to tell afterwards which ones changed."""
+        out = {}
+        for a in AGENTS:
+            try:
+                with Chat(a, create=False) as c:
+                    out[a] = c.size()
+            except OSError:   # no chat yet, or not a folder (a link a VM left)
+                pass
+        return out
+
+    @classmethod
+    def asleep(cls, state, before):
+        """After `cage _state`: what each agent it calls asleep was waiting for, if its log is as it was before (logs())."""
+        for a in state.get("agents") if isinstance(state.get("agents"), list) else []:
+            name = a.get("name") if isinstance(a, dict) and a.get("state") == "asleep" else None
+            if not isinstance(name, str) or name not in before or cls.looked.get(name) == before[name]:
+                continue   # (that log, as it was, has been looked at already: a VM that isn't running writes nothing)
+            try:
+                with Chat(name, create=False) as c:
+                    if c.size() != before[name]:
+                        continue
+                    pending = activity(c, 0)["pending"]
+            except OSError:
+                continue
+            cls.looked[name] = before[name]
+            cls.saw(name, pending)
+
+
 def ask_usage(c, timeout=25):
     """Asks an agent for its plan's usage (/usage, in a conversation of its own that the chat doesn't show), and waits
     a while for the answer: {"rid": the question's id, "pos": how far its log has been read for the answer, "entry": the
@@ -909,18 +958,21 @@ class State:
     @classmethod
     def get(cls):
         """`cage _state`, at most every 2 seconds. While it runs, others get the last answer; if it hangs, they get
-        that too, marked stale (and with no answer at all yet, an error)."""
+        that too, marked stale (and with no answer at all yet, an error). An agent it calls asleep has forgotten the
+        approval it was waiting for (Stopped)."""
         if not cls.lock.acquire(blocking=not cls.ok):
             return cls.body
         try:
             if time.time() - cls.at > 2:
                 env = dict(os.environ)
                 env.pop("CAGE_PROTO", None)
+                logs = Stopped.logs()
                 try:
                     out = subprocess.run([CAGE, "_state"], capture_output=True, env=env, timeout=cls.TIMEOUT).stdout
                     d = json.loads(out)
                     if isinstance(d, dict):
                         cls.body, cls.ok = out, True
+                        Stopped.asleep(d, logs)
                 except subprocess.TimeoutExpired:
                     if not cls.ok:
                         raise Refused(504, "cage is taking too long to answer")
@@ -1212,6 +1264,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     continue
                 typing = act.pop("typing")
                 act["working"] = bool(typing) and not act["pending"] and now - typing < WORKING * 1000
+                act["stopped"] = act["pending"] is not None and Stopped.last.get(a) == act["pending"]
                 out[a] = act
             return self.send(200, {"agents": out})
         if len(parts) == 3 and parts[0] == "chat":
@@ -1362,7 +1415,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # it may be asking something else, which an Allow meant for that one would say yes to. One that doesn't
                 # say which it answers can't be told apart from those. And nowhere a second answer to one (Answered).
                 # Nor while its VM isn't running (asleep, say), though its log still has it waiting: cc-connect forgot
-                # it when it stopped (see vm_running()). The page offers no answer then, but it may not know yet.
+                # it when it stopped (see vm_running()). Nor once it's running again, for one it was waiting for then
+                # (Stopped): the new cc-connect never asked it. The page offers no answer then, but it may not know yet.
                 asks = "pending" in b or action.startswith("perm:")
                 with Answered.of(c.agent):
                     now = activity(c, 0)["pending"] if session == "you" and (asks or answers(said)) else None
@@ -1371,7 +1425,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         error = "It isn’t waiting for that any more. Open its chat to see what it’s doing."
                     elif again and asks:
                         error = "You answered that already."
-                    elif asks and vm_running(c.agent) is False:
+                    elif asks and Stopped.last.get(c.agent) == now:
+                        error = STOPPED
+                    elif asks and vm_running(c.agent) is False:   # (asked after the approval was read: see Stopped)
+                        Stopped.saw(c.agent, now)
+                        State.stale()   # (cage's state, which the page looks at next, may still say it's up)
                         error = STOPPED
                     else:
                         error = None
