@@ -1188,6 +1188,7 @@ async function useRecipe (a, r, where, button) {
   if (where === 'chat') {
     const C = CHAT
     if (!C || C.agent !== a.name) return
+    recipesBy(C, false)
     C.ta.value = r.prompt
     grow(C.ta)
     blanksHint(C)
@@ -1259,21 +1260,33 @@ function chatOpen (a) {
   C.chips = h('div', { class: 'attached' })
   const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => { attach(C, picker.files); picker.value = '' } })
   C.sendBtn = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send', title: 'Send (Enter)', disabled: DOWN }, icon('arrow-up'))
+  // the recipes, by the message box once the chat isn't empty any more (an empty one shows them itself)
+  C.recipePanel = h('div', { class: 'chat-recipes', id: 'chat-recipes', hidden: true })
+  C.recipeBtn = h('button', { type: 'button', class: 'icon-btn', title: 'Start from a recipe', 'aria-label': 'Recipes', 'aria-expanded': 'false', 'aria-controls': 'chat-recipes', hidden: true,
+    onclick: () => recipesBy(C, C.recipePanel.hidden) }, icon('list-checks'))
   C.form = h('form', { class: 'composer chat-composer' }, C.chips, C.ta, h('div', { class: 'composer-bar' },
-    h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker,
+    h('button', { type: 'button', class: 'icon-btn', title: 'Attach files', 'aria-label': 'Attach files', onclick: () => picker.click() }, icon('paperclip')), picker, C.recipeBtn,
     C.hint = h('span', { class: 'grow small muted hint' }, 'Enter to send · Shift+Enter for a new line'), C.sendBtn))
   C.form.addEventListener('submit', (e) => { e.preventDefault(); chatSend(C) })
   C.ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(C) } })
   C.ta.addEventListener('input', () => { grow(C.ta); if (C.hint.querySelector('mark') || blanksLeft(C.ta.value).length) blanksHint(C) })
   C.ta.addEventListener('paste', (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); attach(C, fs) } })
   C.banner = h('div', { class: 'chat-banner', hidden: true })
-  C.el = h('div', { class: 'chat' }, C.empty, C.list, C.typing, h('div', { class: 'chat-dock' }, C.banner, C.form))
+  C.el = h('div', { class: 'chat' }, C.empty, C.list, C.typing, h('div', { class: 'chat-dock' }, C.banner, C.recipePanel, C.form))
   C.el.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); C.el.classList.add('drop') } })
   C.el.addEventListener('dragleave', (e) => { if (!C.el.contains(e.relatedTarget)) C.el.classList.remove('drop') })
   C.el.addEventListener('drop', (e) => { e.preventDefault(); C.el.classList.remove('drop'); attach(C, e.dataTransfer.files) })
   CHAT = C
   chatLoad(C)
   return C
+}
+function recipesBy (C, show) { // the recipes by the message box: shown (drawn afresh: what's connected may have changed), or not
+  C.recipePanel.hidden = !show
+  C.recipeBtn.setAttribute('aria-expanded', String(show))
+  const a = agentOf(C.agent)
+  if (!show || !a) return
+  C.recipePanel.replaceChildren(h('div', { class: 'recipes-head' }, h('p', { class: 'recipes-title' }, 'Start from a recipe'),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close the recipes', onclick: () => { recipesBy(C, false); C.recipeBtn.focus() } }, icon('x'))), recipeTiles(a, 'chat'))
 }
 function chatClose () {
   if (!CHAT) return
@@ -1641,6 +1654,8 @@ function drawChatState (C, nudge) {
   if (a.state === 'ready' || a.state === 'installing') { C.waking = false; C.woke = null }   // it's up (after all)
   const ban = (tone, ic, text, action) => { C.banner.className = 'chat-banner ' + tone; C.banner.replaceChildren(icon(ic), h('span', { class: 'grow' }, text), action || ''); C.banner.hidden = false }
   C.empty.hidden = C.list.childElementCount > 0 || !C.loaded
+  C.recipeBtn.hidden = !C.loaded || !C.empty.hidden
+  if (C.recipeBtn.hidden && !C.recipePanel.hidden) recipesBy(C, false)
   const needs = RECIPES.map((r) => r.needs.filter((n) => !NEEDS[n].has(a.name)).join()).join('|')
   if (!C.empty.hidden && C.recipesFor !== needs) {
     C.recipesFor = needs

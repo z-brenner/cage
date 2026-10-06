@@ -164,6 +164,15 @@ await chat.locator('.msg-you', { hasText: 'Summarize the attached document' }).l
 // while it's being written, a screen reader waits for the answer instead of reading out every update
 await chat.locator('.msg-agent.streaming[aria-busy="true"]').waitFor({ timeout: 10000 })
 await chat.locator('.msg-agent', { hasText: 'second point' }).locator('strong', { hasText: 'first' }).waitFor({ timeout: 10000 })
+// once the chat isn't empty, its recipes are by the message box (Recipes): two of them (a contract, receipts) are
+// nowhere else
+if (await chat.locator('.chat-empty .recipes').isVisible()) fail('the empty chat\'s recipes show in a chat that isn\'t empty')
+await chat.getByRole('button', { name: 'Recipes' }).click()
+const byBox = chat.locator('.chat-recipes')
+const [receipts] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5000 }), byBox.getByRole('button', { name: 'Use: Receipts into a spreadsheet' }).click()])
+if (!receipts.isMultiple() || !(await composerBox.inputValue()).startsWith('Read the attached receipts')) fail('the receipts recipe, by the message box, does not fill in the message and ask for the receipts')
+if (await byBox.isVisible()) fail('the recipes by the message box stay open once one is picked')
+await composerBox.fill('')
 if (await chat.locator('.msg-agent.streaming').count()) fail('the streamed preview stayed after the answer')
 if (await chat.locator('[aria-busy]').count()) fail('the answer is still marked busy')
 const back = chat.locator('.file-chip', { hasText: 'reviewed-brief.pdf' })

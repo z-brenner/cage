@@ -910,6 +910,11 @@ body.in-setup .shell { grid-template-columns: minmax(0, 1fr); background: none; 
 mark.blank { padding: 0 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--ink); }
 .recipes-wrap { width: 100%; max-width: 760px; }
 .recipes-title { margin: 14px 0 10px; color: var(--ink); font-size: 13.5px; font-weight: 600; }
+/* by the message box, once the chat isn't empty: over the conversation, scrolling on its own */
+.chat-recipes { max-height: min(50vh, 440px); overflow-y: auto; padding: 4px 14px 14px; border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--card); box-shadow: var(--shadow); }
+.recipes-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recipes-head .recipes-title { margin: 10px 0; }
 .sched-form .row select, .sched-form .row input.time { width: auto; }
 input[type=time] { height: 36px; padding: 0 10px; border: 1px solid var(--input); border-radius: var(--r); background: var(--card); color: var(--ink); font: inherit; }
 .badge.unread { background: var(--primary); color: var(--primary-fg); }
