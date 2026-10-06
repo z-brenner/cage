@@ -20,6 +20,11 @@ diagnose() { # what the VM was doing: its output, its processes, and apt's own l
   msb logs "$VM" > "$d/vm.log" 2>&1 || true
   echo "--- last guest output (all of it: $d/vm.log) ---"
   tail -n 60 "$d/vm.log"
+  if [ -n "$B" ]; then   # the second agent's too, while there is one (asking across agents, below)
+    msb logs "cage-$B" > "$d/vm-$B.log" 2>&1 || true
+    echo "--- $B's last guest output (all of it: $d/vm-$B.log) ---"
+    tail -n 60 "$d/vm-$B.log"
+  fi
   timeout 60 msb exec --no-tty "$VM" -- sh -c 'echo "--- processes"; ps -eo pid,etime,args --forest
     echo "--- the step provisioning is on"; cat /run/cage-step.* 2>/dev/null
     echo "--- apt: the end of term.log"; tail -n 40 /var/log/apt/term.log 2>/dev/null
@@ -278,7 +283,9 @@ ok "privacy mask: the real CLI runs behind it, your terms and emails become toke
 # The question goes to each VM in a file (never on a command line), which is gone afterwards. Neither CLI is signed
 # in here, so the proof is in each VM's map.
 bx() { msb exec --no-tty "cage-$B" -- "$@"; }
-retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A: $(msb logs "cage-$B" 2>&1 | tail -20)"
+# Ready, as $A is above: provisioned, then set up (your terms, its memory and apps), and cc-connect started last
+retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A"
+retry 180 sh -c "msb exec --no-tty cage-$B -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect isn't running in $B"
 # The background helper `cage up` started takes requests too, every 3 s. Had it taken this one, `cage _outbox` would
 # return while $B is still being asked, and the checks below would run too early. So `cage _outbox` is the only one.
 pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
