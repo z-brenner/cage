@@ -37,6 +37,7 @@ case "$cmd" in
       if [ -e "${STUB_RUNNING:-/nonexistent}" ]; then cat "$STUB_RUNNING"; fi ;;   # (more VMs that run)
   run) if [ -e "${STUB_NOWAKE:-/nonexistent}" ]; then echo "msb: no room for another VM" >&2; exit 1; fi ;;
   exec) case "$*" in
+    *cage-codex*cage:ready*) if [ -e "${STUB_LOGIN:-/nonexistent}" ]; then echo cage:login; else echo cage:ready; fi ;;   # (signed out)
     *cage:ready*) echo cage:ready ;;
     *strict-mcp-config*) echo 'Paris, says **the stub**' ;;
     *skip-git-repo-check*) echo 'Lyon, says *the other* stub (snake_case_ok)' ;;
@@ -62,7 +63,7 @@ cat > "$T/bin/xdg-open" <<'STUB'
 printf '%s\n' "$*" >> "$OPENED"
 STUB
 chmod +x "$T/bin/xdg-open"
-export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake" STUB_EVIL="$T/evil-signin" STUB_NOWAKE="$T/no-wake" STUB_RUNNING="$T/running" CAGE_BACKUP_DIR="$T/backups" OPENED="$T/opened"
+export CAGE_HOME="$T/home" CAGE_MSB="$T/bin/msb" CAGE_NO_SELF_UPDATE=1 STUB_AWAKE="$T/codex-awake" STUB_EVIL="$T/evil-signin" STUB_NOWAKE="$T/no-wake" STUB_RUNNING="$T/running" STUB_LOGIN="$T/codex-login" CAGE_BACKUP_DIR="$T/backups" OPENED="$T/opened"
 export PATH="$T/bin:$PATH" DISPLAY="${DISPLAY:-:99}"
 unset SSH_CONNECTION WSL_DISTRO_NAME
 "$ROOT/cage" init 2>/dev/null
