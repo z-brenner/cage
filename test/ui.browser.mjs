@@ -1436,6 +1436,12 @@ const marks = 'echo "**hi**" `whoami` <b>x</b> [a](https://evil.example) > /tmp/
 r = await asked(permText('Bash', marks))
 shownAsIs('a command with markup', r)
 check('a command with markup', field(r, 'Command') === marks && r.home.allow && r.home.line === command(marks), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.text]))
+// (and a request not in cc-connect's words, which Home shows as it is too: its "*", ">", "`" and "_" are kept)
+const plain = 'Agent wants to run rm -rf ~/* > /dev/null && echo `whoami` # done_now'
+r = await asked(plain)
+shownAsIs('a request not in cc-connect\'s words', r)
+check('a request not in cc-connect\'s words', r.card.raw === plain && r.home.line === plain, 'shown as ' + JSON.stringify([r.card.raw, r.home.line]))
+notAtOnce('a request not in cc-connect\'s words', r, partOnly)
 
 // Names like the card's own ("TO", "Command") next to the real "to": each value is shown with the name it was sent
 // with, where another reads the same, as the app it goes to may use either; so not at once on Home. And none of what

@@ -1566,9 +1566,10 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   return { raw, tool, what, via, fields, body, cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0 }
 }
 // In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
-// U+FEFF or U+2028 is a space to \s, and then a space is all it would show.)
+// U+FEFF or U+2028 is a space to \s, and then a space is all it would show.) A question not in cc-connect's words is
+// as it is, but for its bold ("**delete**"): its "*", ">" and "`" may be what runs.
 function approvalLine (ap, all) {
-  if (!ap.what) return visible(ap.raw.replace(/[*_`#>]/g, '')).replace(/[\t\n ]+/g, ' ').trim().slice(0, 160)
+  if (!ap.what) return visible(ap.raw.replace(/\*\*([^*\n]+)\*\*/g, '$1')).replace(/[\t\n ]+/g, ' ').trim().slice(0, 160)
   const line = visible(ap.what + approvalMore(ap)).replace(/[\t\n ]+/g, ' ')
   return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
 }
