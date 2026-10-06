@@ -1,7 +1,7 @@
 // Plays an agent's VM for the web app's tests: what guest/app.mjs and cc-connect would write to its chat folder.
 //   node test/fixtures/fake-vm.mjs <chat folder, e.g. ~/.cage/app/claude> <work folder>
-// A message gets a streamed reply; "email" asks before acting; "/usage" answers with a card; files come back; scheduled
-// tasks live in cron.json, and running one answers in the chat.
+// A message gets a streamed reply; "email" or "Tell Bob…" asks before acting; "/usage" answers with a card; files come
+// back; scheduled tasks live in cron.json, and running one answers in the chat.
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -35,6 +35,10 @@ async function handle (r) {
     if (/email/i.test(r.text)) {
       await sleep(300)
       return log({ t: 'buttons', session, ctx: r.id, text: permission('mcp__zapier__gmail_send_email', EMAIL), buttons: PERM_BUTTONS })
+    }
+    if (/^tell bob/i.test(r.text)) { // as Zapier's tools are often asked: in words (its instructions), and to whom
+      await sleep(300)
+      return log({ t: 'buttons', session, ctx: r.id, text: permission('mcp__zapier__gmail_send_email', JSON.stringify({ instructions: r.text, to: 'bob@acme.com' })), buttons: PERM_BUTTONS })
     }
     const handle = 'p-' + r.id
     log({ t: 'preview', session, ctx: r.id, handle, text: 'Working on it' })

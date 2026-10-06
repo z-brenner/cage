@@ -760,8 +760,11 @@ function approvalRow (a, p, pos, placed) {
     if (action === 'perm:allow' && wait > 0) { b.setAttribute('aria-disabled', 'true'); setTimeout(() => b.removeAttribute('aria-disabled'), wait) }
     return b
   }
-  // (on its own, so the time after it can't be drawn into it; and in the order it's written, but for words to read)
-  const sub = [h('span', { dir: 'ltr', class: ap.what && moreOf(ap)[1] ? null : 'exact' }, line), p.at ? ' · ' + when(p.at) : '']
+  // (on its own, so the time after it can't be drawn into it; what runs or where it goes in the order it's written, and
+  // words to read, a subject or instructions, as written words are, each in a part of its own)
+  let end = 0
+  const parts = ap.what ? lineParts(ap).map(([t, prose]) => { const s = line.slice(end, end += t.length); return s ? h('span', prose ? {} : { class: 'exact' }, s) : null }) : [h('span', { class: 'exact' }, line)]
+  const sub = [h('span', { dir: 'ltr' }, parts), p.at ? ' · ' + when(p.at) : '']
   if (!approvalWhole(ap)) return row([...sub, ap.unseen ? '. It has characters that don’t show: open it to see where.' : ap.mixed ? '. It mixes letters from different alphabets: open it to see where.' : '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
 }
@@ -1465,7 +1468,7 @@ const APPROVAL_FIELDS = [['to', 'To'], ['cc', 'Cc'], ['bcc', 'Bcc'], ['subject',
 const APPROVAL_BODY = ['body', 'text', 'message', 'content', 'instructions']
 // Words to read, drawn as written words are; the rest (what runs, or where it goes) is drawn in the order it's written,
 // letter by letter (.exact)
-const PROSE = ['subject', 'title']
+const PROSE = ['subject', 'title', 'instructions']
 function words (name) { return String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[\s_.-]+/g, ' ').trim().toLowerCase() }
 function capital (s) { return s ? s[0].toUpperCase() + s.slice(1) : s }
 function toolWords (tool, path) { // what a tool does: {what: 'Gmail: send email', via: 'Zapier'}
@@ -1532,7 +1535,7 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const raw = String(text || '')
   const fence = /```[^\n`]*\n?([\s\S]*)```/.exec(raw)
   const bold = fence && [...raw.slice(0, fence.index).matchAll(/\*\*([^*\n]+)\*\*/g)].pop()   // the tool: the last bold before it
-  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', unseen: UNSEEN.test(raw), mixed: mixesAlphabets(raw), alike: false }
+  if (!bold) return { raw, tool: '', what: '', fields: [], body: '', keys: [], unseen: UNSEEN.test(raw), mixed: mixesAlphabets(raw), alike: false }
   const tool = bold[1].trim()
   const input = fence[1].replace(/\n$/, '')
   const parsed = RAW_INPUT.test(tool) ? null : looseJSON(input)
@@ -1565,35 +1568,46 @@ function approvalOf (text) { // {raw, tool, what, via, fields: [[label, value, k
   const body = bodyKey ? args[bodyKey] : ''
   // (in what it asked, or in what's read from its JSON: Go writes U+2028 and the control characters there as \u2028)
   const all = [raw, body, ...fields.flatMap(([, v, k]) => [k, v])]
-  return { raw, tool, what, via, fields, body, cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0 }
+  return { raw, tool, what, via, fields, body, bodyKey, inWhat, keys: Object.keys(args), cut, unseen: all.some((s) => UNSEEN.test(s)), mixed: all.some(mixesAlphabets), alike: alike.length > 0 }
 }
 // In one line, for Home and notifications: "Gmail: send email to bob@acme.com"; all: not cut. (Marked first: a
 // U+FEFF or U+2028 is a space to \s, and then a space is all it would show.) A question not in cc-connect's words is
 // as it is, but for its bold ("**delete**"): its "*", ">" and "`" may be what runs.
 function approvalLine (ap, all) {
   if (!ap.what) return visible(ap.raw.replace(/\*\*([^*\n]+)\*\*/g, '$1')).replace(/[\t\n ]+/g, ' ').trim().slice(0, 160)
-  const line = visible(ap.what + approvalMore(ap)).replace(/[\t\n ]+/g, ' ')
+  const line = lineParts(ap).map(([t]) => t).join('')
   return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
 }
-function approvalMore (ap) { return moreOf(ap)[0] }
-// What the line says after what it does: who it goes to (all of them), or what it runs, opens…; and whether that's
-// words to read (a subject, a title)
+// ...in parts, each marked and on one line: [text, words to read], what it does first
+function lineParts (ap) { return [[ap.what, false], ...moreOf(ap).parts].map(([t, prose]) => [visible(t).replace(/[\t\n ]+/g, ' '), prose]) }
+function approvalMore (ap) { return moreOf(ap).parts.map(([t]) => t).join('') }
+// What the line says after what it does: who it goes to (all of them), or else what it runs, opens, looks for or is
+// about; and Zapier's instructions, the words its AI acts on, after whoever it goes to too. As parts, [text, words to
+// read (a subject, a title, instructions) or not], with the names of what it asks that they show.
+const ON_LINE = ['command', 'url', 'file_path', 'notebook_path', 'path', 'query', 'subject', 'title', 'instructions', 'input']
 function moreOf (ap) {
   const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
-  const to = [f.to, f.cc && 'cc ' + f.cc, f.bcc && 'bcc ' + f.bcc].filter(Boolean).join(', ')
-  if (to) return [' to ' + to, false]
-  const k = ['command', 'url', 'file_path', 'notebook_path', 'path', 'query', 'subject', 'title'].find((x) => f[x])
-  return k ? [': ' + f[k], PROSE.includes(k)] : ['', false]
+  if (ap.bodyKey) f[ap.bodyKey] = ap.body
+  const to = [['to', ''], ['cc', 'cc '], ['bcc', 'bcc ']].filter(([k]) => f[k])
+  const k = to.length ? (f.instructions ? 'instructions' : '') : ON_LINE.find((x) => f[x])
+  const parts = to.length ? [[' to ' + to.map(([x, w]) => w + f[x]).join(', '), false]] : []
+  if (k) parts.push([': ' + f[k], PROSE.includes(k)])
+  return { parts, keys: [...to.map(([x]) => x), k].filter(Boolean) }
 }
-// Is that line all it asks, as far as saying yes goes? Not when it isn't cc-connect's question, when cc-connect cut what
-// it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end of a
-// command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
+// Is that line all it asks, as far as saying yes goes? Only when it shows all of what it would send: every field, by
+// name. None may be left off: each is something the app acts on, and what it does may hang on any of them (an email's
+// body, a calendar event's guests, a search's limit). An app may read words in any field as what to do, as Zapier's
+// tools read their instructions, filling in from them whatever they weren't given. Nor is an empty one left off
+// ("assignees": [] can take everyone off an issue). And not when it isn't cc-connect's question, when cc-connect cut
+// what it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end
+// of a command is what matters), when it puts a command's lines on one (each one runs), or when what it asks has
 // characters that don't show, letters from another alphabet that look like these, or names that read alike. Nor when
 // it's as long as what Home has of it: server.py's activity() keeps the first 4,000 characters, and a "```" in a
 // longer one would end what Home reads of it there.
 function approvalWhole (ap) {
+  const shown = new Set([ap.inWhat, ...moreOf(ap).keys])
   return !!ap.what && !ap.cut && !ap.unseen && !ap.mixed && !ap.alike && [...ap.raw].length < 4000 &&
-    approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap))
+    approvalLine(ap, true).length <= 160 && !/\n/.test(approvalMore(ap)) && ap.keys.every((k) => shown.has(k))
 }
 function approvalView (ap) { // what the card shows above its buttons
   const odd = [ // (why Home offers no Allow for it, where that's in what it asks)
