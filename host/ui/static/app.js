@@ -731,13 +731,26 @@ function approvalRow (a, p, pos, placed) {
     h('span', { class: 'grow' }, h('b', {}, `${a.label} wants your OK`), h('span', { class: 'sub' }, sub)), h('span', { class: 'attn-acts' }, acts))
   const decide = (action) => async (e) => {
     if (e.currentTarget.getAttribute('aria-disabled') === 'true') return   // (not yet)
-    const li = e.currentTarget.closest('li')
-    li.querySelectorAll('button').forEach((b) => { b.disabled = true })
+    const b = e.currentTarget
+    const li = b.closest('li')
+    const had = li.contains(document.activeElement)   // (the keyboard's, or a click's)
+    li.querySelectorAll('button').forEach((x) => { x.disabled = true })
     try {
       await api(`/api/chat/${a.name}/action`, { method: 'POST', body: { action, label: PERM_LABEL[action], pending: { text: p.text, at: p.at } } })
       ANSWERED[a.name] = p.at
       render()
-    } catch (err) { toast(err.message); li.querySelectorAll('button').forEach((b) => { b.disabled = false }) }
+      // The row is gone: the focus goes to the top of what needs you (not onto the next Allow, where a second Enter
+      // would say yes to that), and a screen reader is told it went (the toasts are a status)
+      if (had) {
+        const head = [...document.querySelectorAll('#main h2')].find((x) => x.textContent === 'Needs you') || document.querySelector('#main h1')
+        if (head) { head.tabIndex = -1; head.focus({ preventScroll: true }) }
+      }
+      toast(`${action === 'perm:deny' ? 'Denied' : 'Allowed'}: ${a.label}, ${line}`, action === 'perm:deny' ? 'info' : 'ok')
+    } catch (err) {
+      toast(err.message)
+      li.querySelectorAll('button').forEach((x) => { x.disabled = false })
+      if (had && b.isConnected) b.focus()
+    }
     activitySoon()
   }
   // (what a screen reader says for each, out of context: two agents may be waiting)
@@ -2376,10 +2389,14 @@ function render (force) {
   if (!force && main.contains(document.activeElement) && typing(document.activeElement) && main.dataset.page === page) return
   const kept = main.dataset.page === page ? formState(main) : null
   const was = main.contains(document.activeElement) ? document.activeElement : null
-  // what has the focus, to give it back: by its label (a switch, Allow for one agent), or a link by where it goes and
-  // what it says (an agent's Chat)
-  const keyOf = (el) => el.getAttribute('aria-label') || (el.tagName === 'A' ? el.getAttribute('href') + '\n' + el.textContent : '')
+  // what has the focus, to give it back: by its label (a switch, Allow for one agent), a link by where it goes and what
+  // it says (an agent's Chat), or a heading by what it says (Needs you, after an answer there). A link whose words
+  // changed (an agent's row on Home, which says what it's doing) by where it goes and what kind it is, if only one is.
+  const keyOf = (el) => el.getAttribute('aria-label') || (el.tagName === 'A' ? el.getAttribute('href') + '\n' + el.textContent
+    : /^H[2-6]$/.test(el.tagName) ? el.tagName + '\n' + el.textContent : '')
+  const kindOf = (el) => el.tagName === 'A' && !el.hasAttribute('aria-label') ? el.getAttribute('href') + '\n' + el.className : ''
   const focused = was && keyOf(was)
+  const kind = was && kindOf(was)
   const onHead = !!was && was.tagName === 'H1'   // the page's heading, where arriving put it
   document.body.classList.toggle('in-setup', page === 'setup')
   const fn = page === 'setup' ? pageSetup : !STATE.configured ? pageHome
@@ -2391,7 +2408,12 @@ function render (force) {
   main.replaceChildren(fn())
   ARRIVED = false
   if (kept) keepForm(main, kept)
-  if (same && focused) { const el = [...main.querySelectorAll('[aria-label], a[href]')].find((x) => keyOf(x) === focused); if (el) el.focus({ preventScroll: true }) }
+  if (same && focused) {
+    const all = [...main.querySelectorAll('[aria-label], a[href], h2, h3')]
+    const like = kind ? all.filter((x) => kindOf(x) === kind) : []
+    const el = all.find((x) => keyOf(x) === focused) || (like.length === 1 ? like[0] : null)
+    if (el) { if (/^H\d$/.test(el.tagName)) el.tabIndex = -1; el.focus({ preventScroll: true }) }
+  }
   if (!same) window.scrollTo(0, 0)
   // On arriving at a page (not on a redraw), focus goes to its heading: a screen reader says where you are, and Tab
   // goes on from there. Not from under a side panel or a question that's open. A redraw keeps it there (it draws a new
