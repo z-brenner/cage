@@ -41,7 +41,8 @@ and only pictures are shown in the page (everything else downloads).
   GET  /api/activity?agents=a,b&since=T what each agent is doing, from the end of its chat (for Home): {"agents": {a:
                                         {"pending": {"text","at"}|null, "working", "last": {"t","text","at"}|null,
                                         "today": {"asked","answers","files"} (from T, ms, on)}}}
-  POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}
+  POST /api/chat/<a>/send               {"text", "session"?, "files"?: [{"path","name","mime"}]}  (409 for one cc-connect
+                                        would read as a second answer to an approval, as for action)
   POST /api/chat/<a>/upload?name=…      the file's bytes                     -> {"path","name","size","mime"}
   POST /api/chat/<a>/action             {"action", "label"?, "pending"?}  (a button in the chat; from Home, with the
                                         approval it answers, as /api/activity gave it: 409 if it isn't that one now.
@@ -557,6 +558,11 @@ ENDS_TURN = ("/stop", "/new", "/cancel")
 STARTS_AFRESH = ("/switch", "/model", "/reasoning", "/effort", "/dir", "/cd", "/chdir", "/workdir")
 
 
+def picture(files):
+    """Is one of these files (sent with a message) a picture? cc-connect then gives the agent the message, command or not."""
+    return any(isinstance(f, dict) and re.fullmatch(r"image/(png|jpeg|gif|webp)", str(f.get("mime"))) for f in files)
+
+
 def answers(e):
     """Does this line of the chat log answer an approval cc-connect waits for (or end the turn it waits in)?"""
     t = e.get("t")
@@ -571,8 +577,7 @@ def answers(e):
             return False
     said = said.strip().lower()
     files = e.get("files") if t == "you" and isinstance(e.get("files"), list) else []
-    picture = any(isinstance(f, dict) and re.fullmatch(r"image/(png|jpeg|gif|webp)", str(f.get("mime"))) for f in files)
-    if said.startswith("/") and not picture:   # (with a picture, cc-connect gives it to the agent, command or not)
+    if said.startswith("/") and not picture(files):
         cmd = said.split()
         afresh = len(cmd) > 1 and (cmd[0] in STARTS_AFRESH or (cmd[0] == "/provider" and cmd[1] in ("switch", "clear", "reset", "none")))
         return cmd[0] in ENDS_TURN or afresh
@@ -1134,6 +1139,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with Answered.of(c.agent):   # (an answer typed in the chat: see Answered)
                     typed = session == "you" and answers({"t": "you", "text": text, "files": files})
                     waits = activity(c, 0)["pending"] if typed else None
+                    # (as from the chat's card: but for a command, which still goes)
+                    if waits is not None and Answered.last.get(c.agent) == waits and not (text.strip().startswith("/") and not picture(files)):
+                        raise Refused(409, "You answered that already. Send this again once the chat shows your answer.")
                     rid = c.send({"type": "message", "session": session, "text": text, "files": files})
                     Answered.sent(c.agent, waits)   # (once it's sent: one that couldn't be isn't an answer)
                 return self.send(200, {"id": rid})

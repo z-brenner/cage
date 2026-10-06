@@ -744,6 +744,26 @@ class Live(unittest.TestCase):
         self.assertEqual(self.answer("claude", "perm:allow", last)[0], 409)
         self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:allow"])
 
+    def test_typed_after_an_answer(self):
+        """A message cc-connect reads as an answer ("yes", "ok, and…", "no") is one, typed or not. Typed after Allow (from
+        Home, or another window's card) while the approval still seems to wait, it would answer what the agent asks
+        next, which nobody has seen. So it gets 409, and nothing is sent (the page keeps it in the box). A command
+        (/stop) still goes, and so does anything once the VM has taken the answer."""
+        p = self.asks("claude", "Bash(ls)")
+        self.assertEqual(self.answer("claude", "perm:allow", p)[0], 200)
+        for text in ("Yes, go on.", "ok, and then run the tests", "No!", "好的", "/stop yes"):
+            files = [{"path": "files/a.png", "name": "a.png", "mime": "image/png"}] if text.startswith("/") else []
+            if files:
+                os.makedirs(os.path.join(server.APPDIR, "claude", "files"), exist_ok=True)
+                open(os.path.join(server.APPDIR, "claude", "files", "a.png"), "wb").close()
+            status, _, body = self.call("POST", "/api/chat/claude/send", {"text": text, "files": files})
+            self.assertEqual((status, strict(body)["error"]), (409, "You answered that already. Send this again once the chat shows your answer."), text)
+        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "What does it do?"})[0], 200)   # (not an answer)
+        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "/stop"})[0], 200)
+        self.assertEqual(sorted(r.get("action") or r["text"] for r in self.sent("claude")), ["/stop", "What does it do?", "perm:allow"])
+        self.taken("claude")
+        self.assertEqual(self.call("POST", "/api/chat/claude/send", {"text": "Yes, go on."})[0], 200)
+
     def test_an_answer_that_didnt_go(self):
         """An answer that couldn't be sent (nothing can be written in the agent's in/: the disk is full, or the VM
         made it a file) is no answer: the page is told, and Allow or Deny can be given again, from Home or the chat."""
