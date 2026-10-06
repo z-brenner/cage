@@ -651,8 +651,15 @@ await page.getByRole('link', { name: 'Settings' }).click()
 const standIn = page.getByLabel('Stand-in for Claude Code')
 await standIn.focus()
 if (await redrawn('select[aria-label="Stand-in for Claude Code"]')) fail('a list you have open was drawn again')
-await standIn.evaluate((el) => el.setAttribute('aria-busy', 'true'))   // as when you've picked someone and cage is on it
+// As when you've picked someone and cage is on it: busy by its name (asked()), which the page keeps through a redraw.
+// Busy, it's drawn again from what's true now, which was left alone while the list was open (Codex asleep): so the
+// next change is one from what's drawn. (Waking Codex up again would only make it what was drawn before, nothing to
+// draw; and a list made busy only on the element would not be after a redraw, which a look under way when it was made
+// busy can bring, so the change after it would be left alone. Either way, this failed now and then.)
+await standIn.evaluate((el) => { BUSY = el.getAttribute('aria-label'); el.setAttribute('aria-busy', 'true') })
+await page.evaluate(async () => { await refresh(); await ACT_LOAD })
 if (!(await redrawn('select[aria-label="Stand-in for Claude Code"]'))) fail('a list cage changed was not drawn again from the state')
+await page.evaluate(() => { BUSY = '' })
 fs.rmSync(process.env.STUB_AWAKE)
 await page.getByRole('link', { name: 'Sign-ins & keys' }).click()
 await page.getByPlaceholder('GITHUB_TOKEN').waitFor({ timeout: 10000 })
