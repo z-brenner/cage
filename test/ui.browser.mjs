@@ -1345,6 +1345,13 @@ shownAsIs('a recipient that turns around', r)
 check('a recipient that turns around', field(r, 'To') === marked(turnedTo), 'the card shows ' + JSON.stringify(field(r, 'To')))
 check('a recipient that turns around', r.home.line === 'Gmail: send email to ' + marked(turnedTo), 'Home shows ' + JSON.stringify(r.home.line))
 notAtOnce('a recipient that turns around', r, hiddenWhy, /characters that don’t show/)
+// and letters written right to left (Hebrew, Arabic), with no such character: a ">" between two of them is drawn the
+// other way round, on their other side (with A and B in Hebrew, "cat A>B" would show as "cat B<A"), and the time
+// after Home's line would be drawn into it
+const rtl = 'cat \u{5D0}>\u{5D1} && rm -rf ~/\u{5D2}'
+r = await asked(permText('Bash', rtl))
+shownAsIs('a command written partly right to left', r)
+check('a command written partly right to left', field(r, 'Command') === rtl && r.home.line === command(rtl), 'shown as ' + JSON.stringify([field(r, 'Command'), r.home.line]))
 
 // Characters that don't show: zero-width ones, U+2060, U+FEFF, a soft hyphen and other format characters (a tag
 // character, U+E0041, is a way to hide text from people and show it to a model), a carriage return; a variation

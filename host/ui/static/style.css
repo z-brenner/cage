@@ -722,6 +722,10 @@ dialog.keys::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparen
 .approval-head .i { color: var(--warn-fg); }
 .approval-what { margin: 0; color: var(--ink); font-size: 14.5px; overflow-wrap: anywhere; }
 .approval-what b { font-weight: 600; }
+/* What runs, or where it goes, drawn in the order it's written. Letters written right to left (Hebrew, Arabic) would
+   draw a ">" between two of them the other way round, on their other side, and draw the text next to them into it
+   (Home's time). */
+.exact { direction: ltr; unicode-bidi: bidi-override; unicode-bidi: isolate-override; }
 /* (a name takes two-fifths of the width at most, and wraps: however long the agent made it, it doesn't push what it
    says past the edge) */
 .approval-fields { display: grid; grid-template-columns: fit-content(40%) minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 13.5px; }

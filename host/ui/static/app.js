@@ -760,7 +760,8 @@ function approvalRow (a, p, pos, placed) {
     if (action === 'perm:allow' && wait > 0) { b.setAttribute('aria-disabled', 'true'); setTimeout(() => b.removeAttribute('aria-disabled'), wait) }
     return b
   }
-  const sub = [line, p.at ? ' · ' + when(p.at) : '']
+  // (on its own, so the time after it can't be drawn into it; and in the order it's written, but for words to read)
+  const sub = [h('span', { dir: 'ltr', class: ap.what && moreOf(ap)[1] ? null : 'exact' }, line), p.at ? ' · ' + when(p.at) : '']
   if (!approvalWhole(ap)) return row([...sub, ap.unseen ? '. It has characters that don’t show: open it to see where.' : ap.mixed ? '. It mixes letters from different alphabets: open it to see where.' : '. Only part of it fits here: open it to see all it asks.'], open(true), answer('perm:deny', 'sm'))
   return row(sub, answer('perm:allow', 'sm primary'), answer('perm:deny', 'sm'), open(false))
 }
@@ -1460,6 +1461,9 @@ const ZAPIER_APPS = [['google_calendar', 'Google Calendar'], ['google_sheets', '
 const APPROVAL_FIELDS = [['to', 'To'], ['cc', 'Cc'], ['bcc', 'Bcc'], ['subject', 'Subject'], ['title', 'Title'], ['file_path', 'File'],
   ['notebook_path', 'File'], ['path', 'File'], ['url', 'Address'], ['query', 'Search for'], ['command', 'Command']]
 const APPROVAL_BODY = ['body', 'text', 'message', 'content', 'instructions']
+// Words to read, drawn as written words are; the rest (what runs, or where it goes) is drawn in the order it's written,
+// letter by letter (.exact)
+const PROSE = ['subject', 'title']
 function words (name) { return String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[\s_.-]+/g, ' ').trim().toLowerCase() }
 function capital (s) { return s ? s[0].toUpperCase() + s.slice(1) : s }
 function toolWords (tool, path) { // what a tool does: {what: 'Gmail: send email', via: 'Zapier'}
@@ -1564,10 +1568,15 @@ function approvalLine (ap, all) {
   const line = visible(ap.what + approvalMore(ap)).replace(/[\t\n ]+/g, ' ')
   return all || line.length <= 160 ? line : line.slice(0, 159) + '…'
 }
-function approvalMore (ap) { // what the line says after what it does: who it goes to (all of them), or what it runs, opens…
+function approvalMore (ap) { return moreOf(ap)[0] }
+// What the line says after what it does: who it goes to (all of them), or what it runs, opens…; and whether that's
+// words to read (a subject, a title)
+function moreOf (ap) {
   const f = Object.fromEntries(ap.fields.map(([, v, k]) => [k, v]))
   const to = [f.to, f.cc && 'cc ' + f.cc, f.bcc && 'bcc ' + f.bcc].filter(Boolean).join(', ')
-  return to ? ' to ' + to : f.command ? ': ' + f.command : f.url ? ': ' + f.url : f.query ? ': ' + f.query : f.subject ? ': ' + f.subject : f.title ? ': ' + f.title : ''
+  if (to) return [' to ' + to, false]
+  const k = ['command', 'url', 'query', 'subject', 'title'].find((x) => f[x])
+  return k ? [': ' + f[k], PROSE.includes(k)] : ['', false]
 }
 // Is that line all it asks, as far as saying yes goes? Not when it isn't cc-connect's question, when cc-connect cut what
 // it asks (an email's "to" comes after its body, and may be in the part cut off), when the line is cut (the end of a
@@ -1581,7 +1590,7 @@ function approvalView (ap) { // what the card shows above its buttons
     ap.unseen && 'This has characters that don’t show, or don’t show as what they are. They can make it look like it does something it doesn’t. They’re marked like ⟨U+202E⟩.',
     ap.mixed && 'Some words in this mix letters from different alphabets that look alike. An address can look like one you know and be someone else’s. The letters from another alphabet are marked like ⟨\u{430}⟩.'
   ].filter(Boolean).map((text) => h('p', { class: 'note warn' }, icon('triangle-alert'), text))
-  if (!ap.what) return [...odd, h('pre', { class: 'approval-text' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
+  if (!ap.what) return [...odd, h('pre', { class: 'approval-text exact' }, visible(ap.raw.replace(/\n*Reply \*\*allow\*\*[^\n]*$/, '').trim()))]
   const clamp = h('div', { class: 'clamp' }, visible(ap.body))
   const body = ap.body ? h('div', { class: 'approval-body' }, clamp) : null
   const more = body && h('button', { type: 'button', class: 'linkish approval-more', 'aria-expanded': 'false', hidden: true, onclick: (e) => { const open = body.classList.toggle('open'); e.currentTarget.textContent = open ? 'Show less' : 'Show all'; e.currentTarget.setAttribute('aria-expanded', String(open)) } }, 'Show all')
@@ -1590,11 +1599,11 @@ function approvalView (ap) { // what the card shows above its buttons
   return [
     h('p', { class: 'approval-what' }, h('b', {}, ap.what), ap.via ? h('span', { class: 'muted small' }, ' through ' + ap.via) : null),
     ...odd,
-    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v]) => h('div', {}, h('dt', {}, visible(label)), h('dd', {}, visible(v))))) : null,
+    ap.fields.length ? h('dl', { class: 'approval-fields' }, ap.fields.map(([label, v, k]) => h('div', {}, h('dt', {}, visible(label)), h('dd', PROSE.includes(k) ? {} : { class: 'exact' }, visible(v))))) : null,
     body,
     more,
     ap.cut ? h('p', { class: 'small muted' }, 'Only the start of this was shown here. Allow lets it do all of it.') : null,
-    h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', {}, visible(ap.raw)))
+    h('details', { class: 'approval-raw' }, h('summary', {}, 'Exactly what it asked'), h('pre', { class: 'exact' }, visible(ap.raw)))
   ]
 }
 // Buttons in the chat: a question from the agent, or asking before it acts (cc-connect's "perm:" buttons).
