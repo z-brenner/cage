@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: actionlint, for test/all.sh to check the workflow files (a pinned release, its checksum checked)
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Playwright
@@ -90,7 +90,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Windows PowerShell 5.1, as a file
@@ -131,7 +131,7 @@ jobs:
       # people's agents do
       CAGE_TEST_DOCKER_ARGS: ${{ github.event_name != 'schedule' && '-e CAGE_APT_MIRROR=http://azure.archive.ubuntu.com/ubuntu/' || '' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: guest smoke
@@ -142,7 +142,7 @@ jobs:
         run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/offline-wake.sh ${{ matrix.agent }}
       - name: what the guest was doing
         if: failure()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: guest-${{ matrix.agent }}
           path: ${{ runner.temp }}/artifacts
@@ -160,7 +160,7 @@ jobs:
       # as for guest-smoke; cage up passes it to the VMs
       CAGE_APT_MIRROR: ${{ github.event_name != 'schedule' && 'http://azure.archive.ubuntu.com/ubuntu/' || '' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: enable KVM for the runner user
@@ -176,7 +176,7 @@ jobs:
       - run: CAGE_TEST_ARTIFACTS="$RUNNER_TEMP/artifacts" test/microvm-e2e.sh ${{ matrix.agent }}
       - name: what the VM was doing
         if: failure()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: microvm-${{ matrix.agent }}
           path: ${{ runner.temp }}/artifacts
