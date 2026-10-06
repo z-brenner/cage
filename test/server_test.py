@@ -394,6 +394,31 @@ class Activity(unittest.TestCase):
             self.assertEqual(server.activity(self.chat, 0)["pending"], {"text": "May I?", "at": 7}, after)
             self.assertFalse(server.ends(line), after)
 
+    # the agent's question (AskUserQuestion) as cc-connect v1.5.1-beta.3 sends it to the app
+    QUESTION = {"t": "card", "card": {"header": {"color": "blue", "title": "Agent Question"}, "elements": [
+        {"type": "markdown", "content": "**Which branch should I push to?**"},
+        {"type": "list_item", "text": "main — production", "btn_text": "main", "btn_type": "default", "btn_value": "askq:0:1"},
+        {"type": "list_item", "text": "dev — staging", "btn_text": "dev", "btn_type": "default", "btn_value": "askq:0:2"},
+        {"type": "note", "text": "If buttons are unresponsive, reply with the option number (e.g. 1) or type your answer"}]}}
+
+    def test_a_question_ends_the_wait(self):
+        """cc-connect asks one thing at a time: once the agent asks a question, the approval asked before it isn't
+        waited for any more (and an Allow would be that question's answer, "allow"). A question you may pick several
+        answers to has no buttons, only cc-connect's title for it, in any of its languages; another card (/help's) is
+        no question."""
+        multi = {"t": "card", "card": {"header": {"title": "Agent 提问 (1/2)"}, "elements": [{"type": "markdown", "content": "**Which?**"}]}}
+        buttons = {"t": "buttons", "text": "Which?", "buttons": [[{"text": "main", "data": "askq:0:1"}]]}
+        for question in (self.QUESTION, multi, buttons):
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(question, at=8))
+            self.assertIsNone(server.activity(self.chat, 0)["pending"], question)
+            self.assertTrue(server.ends(question), question)
+        for card in ({"t": "card", "card": {"header": {"title": "Help"}, "elements": [{"type": "actions", "buttons": [{"text": "Stop", "value": "act:/stop"}]}]}},
+                     {"t": "card", "card": {"header": {"title": "Agent Question (1/2) about it"}}}, {"t": "card", "card": {"elements": "askq:0:1"}},
+                     {"t": "reply", "text": "askq:0:1"}):
+            self.write({"t": "buttons", "text": "May I?", "buttons": self.PERM, "at": 7}, dict(card, at=8))
+            self.assertEqual(server.activity(self.chat, 0)["pending"], {"text": "May I?", "at": 7}, card)
+            self.assertFalse(server.ends(card), card)
+
     def test_working_and_last(self):
         self.write({"t": "you", "text": "hi", "at": 1}, {"t": "reply", "text": "hello", "at": 2},
                    {"t": "card", "card": {"header": {"title": "Usage"}}, "at": 3}, {"t": "file", "name": "a.md", "at": 4},
@@ -833,6 +858,19 @@ class Live(unittest.TestCase):
         self.assertEqual([e.get("ends") for e in entries], want)
         _, events = self.stream("from=claude:0", lambda events: len([e for e in events if "e" in e]) == len(lines))
         self.assertEqual([e["e"].get("ends") for e in events if "e" in e], want)
+
+    def test_a_question_after_it(self):
+        """Once the agent asks a question, the approval it asked before isn't waited for: an Allow for it (from Home or
+        its card) would be the question's answer, so it gets 409 and nothing is sent; Home shows no approval."""
+        p = self.asks("claude", "Bash(rm -rf ~/work/old)")
+        card = self.card("claude")
+        self.log("claude", dict(Activity.QUESTION, session="you", at=self.AT[0] + 1))
+        for pending in (p, card):
+            status, _, body = self.answer("claude", "perm:allow", pending)
+            self.assertEqual((status, strict(body)["error"]), (409, "It isn’t waiting for that any more. Open its chat to see what it’s doing."))
+        self.assertEqual(self.sent("claude"), [])
+        self.assertIsNone(strict(self.call("GET", "/api/activity?agents=claude")[2])["agents"]["claude"]["pending"])
+        self.assertTrue(strict(self.call("GET", "/api/chat/claude/history")[2])["entries"][-1].get("ends"))
 
     def test_one_answer_per_approval(self):
         """cc-connect's buttons say allow or deny, not to what: an answer goes to whatever waits when it gets there.

@@ -32,8 +32,8 @@ Standard library only.
 The chat with an agent goes through ~/.cage/app/<agent>, a folder its VM shares (guest/app.mjs relays it to
 cc-connect). The VM writes there, so nothing in it is trusted: no links are followed, only regular files are read,
 and only pictures are shown in the page (everything else downloads).
-A line that ends the wait for an approval (an answer to it, /stop, cc-connect restarted: see ends()) comes to the page
-with "ends": true, in history and stream alike, so its card stops offering answers.
+A line that ends the wait for an approval (an answer to it, /stop, a question from the agent, cc-connect restarted: see
+ends()) comes to the page with "ends": true, in history and stream alike, so its card stops offering answers.
   GET  /api/chat/<a>/history?tail=N     the end of the chat (log.jsonl, after the end of log.1.jsonl when the VM has
                                         just started a new one): {"o": offset in log.jsonl, "entries", "more"}
   GET  /api/chat/stream?from=a:N:I,b:M  server-sent events for all your agents' chats at once (a browser allows only a
@@ -679,10 +679,45 @@ def answers(e):
     return False
 
 
+QUESTION_TITLES = ("Agent Question", "Agent 提问", "Agent 提問", "エージェントの質問", "Pregunta del agente")   # (its languages)
+
+
+def values_of(e):
+    """What the buttons of a "buttons" or "card" line send, as the page reads them."""
+    if e.get("t") == "buttons":
+        rows = e.get("buttons") if isinstance(e.get("buttons"), list) else []
+        found = [b.get("data") for row in rows if isinstance(row, list) for b in row if isinstance(b, dict)]
+    else:
+        card = e.get("card") if isinstance(e.get("card"), dict) else {}
+        found = []
+        for el in card.get("elements") if isinstance(card.get("elements"), list) else []:
+            if isinstance(el, dict):
+                found.append(el.get("btn_value"))
+                for key in ("buttons", "options"):
+                    found += [b.get("value") for b in (el.get(key) if isinstance(el.get(key), list) else []) if isinstance(b, dict)]
+    return [v for v in found if isinstance(v, str)]
+
+
+def asks_question(e):
+    """Is this line the agent asking you a question (AskUserQuestion): cc-connect's card with askq: buttons, or for one
+    you may pick several answers to, its title ("Agent Question (1/2)")? cc-connect asks one thing at a time, and asks
+    the next only once it has the answer to the one before; so an approval asked before it isn't waited for any more.
+    (An Allow now would be the question's answer: "allow".)"""
+    if e.get("t") not in ("buttons", "card"):
+        return False
+    if any(v.startswith("askq:") for v in values_of(e)):
+        return True
+    card = e.get("card") if isinstance(e.get("card"), dict) else {}
+    header = card.get("header") if isinstance(card.get("header"), dict) else {}
+    title = header.get("title")
+    return isinstance(title, str) and re.sub(r" \(\d+/\d+\)$", "", title) in QUESTION_TITLES
+
+
 def ends(e):
-    """Does this line of the chat log end the wait for whatever approval waits: an answer (see answers()), or cc-connect
-    starting afresh (the relay registers with it again: it keeps what it waits for only in memory)?"""
-    return answers(e) or (e.get("t") == "status" and e.get("connected") is True)
+    """Does this line of the chat log end the wait for whatever approval waits: an answer (see answers()), the agent
+    asking a question (see asks_question()), or cc-connect starting afresh (the relay registers with it again: it keeps
+    what it waits for only in memory)?"""
+    return answers(e) or asks_question(e) or (e.get("t") == "status" and e.get("connected") is True)
 
 
 def marked(e):
