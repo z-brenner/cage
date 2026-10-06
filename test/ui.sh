@@ -99,6 +99,7 @@ ok "only this computer, with the token, and only cage's own commands; a strict c
 # A leaked token can't do the worst things: delete an agent, skip a question with a flag, restore a planted backup.
 # And other websites get nothing at all, not even a picture, so they can't tell that cage runs here.
 H=(-H "X-Cage-Token: $TOK")
+J=("${H[@]}" -H "Content-Type: application/json")   # and a body in JSON, as the page sends one to a chat
 job() { curl --noproxy '*' -s -o "$T/job.out" -w '%{http_code}' "${H[@]}" -X POST --data-binary "$1" "$B/api/jobs"; }
 jid() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$T/job.out"; }
 for args in '["destroy","claude","--yes"]' '["status"]' '["version"]' '["onboard"]' '[""]' '["up","--refresh"]' '["up","nobody"]' \
@@ -266,7 +267,7 @@ ln -s "$T/elsewhere" "$A/cursor/in"
 [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=files/../../cage.env")" = 404 ] && [ "$(code "${H[@]}" "$B/api/chat/claude/file?p=../cage.env")" = 404 ] || fail "a path out of the chat folder"
 head_of "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-page.html" | grep -qi '^content-disposition: attachment' || fail "an agent's page shown in the app"
 head_of "${H[@]}" "$B/api/chat/claude/file?p=files/1-ab-pic.png" | grep -qi '^content-type: image/png' || fail "pictures are shown"
-[ "$(code "${H[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
+[ "$(code "${J[@]}" -X POST -d '{"text":"hi"}' "$B/api/chat/cursor/send")" != 200 ] && [ -z "$(ls -A "$T/elsewhere")" ] || fail "wrote through a link"
 [ "$(code "${H[@]}" "$B/api/chat/evil/history")" = 400 ] || fail "not an agent"
 rm -f "$A/claude/files/1-ab-evil.png" "$A/cursor/in"
 ok "chat folders: no links followed, no way out, an agent's pages download instead of opening"
@@ -313,7 +314,7 @@ for name, p in (("now", pending), ("old", dict(pending, at=pending["at"] - 1)), 
     with open(f"{sys.argv[2]}-{name}.json", "w") as f:
         json.dump({"action": "perm:allow", "label": "Allow", "pending": p}, f)
 PY
-allow() { curl --noproxy '*' -s -o "$T/allowed.json" -w '%{http_code}' "${H[@]}" -X POST --data-binary @"$T/allow-$1.json" "$B/api/chat/antigravity/action"; }
+allow() { curl --noproxy '*' -s -o "$T/allowed.json" -w '%{http_code}' "${J[@]}" -X POST --data-binary @"$T/allow-$1.json" "$B/api/chat/antigravity/action"; }
 for was in old other; do
   [ "$(allow $was)" = 409 ] && grep -q "waiting for that any more" "$T/allowed.json" && [ -z "$(ls -A "$A/antigravity/in" 2>/dev/null)" ] \
     || fail "Home's Allow for an approval it isn't waiting for ($was): $(cat "$T/allowed.json")"
@@ -464,14 +465,14 @@ node "$ROOT/test/fixtures/fake-vm.mjs" "$A/claude" "$T/work" & VM=$!
 
 # A work-folder file keeps its whole name when you download it (the VM hands it over as files/<time>-<random>-<name>)
 for _ in $(seq 50); do [ -d "$A/claude/out" ] && break; sleep 0.1; done
-curl --noproxy '*' -s "${H[@]}" -X POST -d '{"type":"fetch","path":"reports/q3-results.txt"}' "$B/api/chat/claude/request" > "$T/fetch.json"
+curl --noproxy '*' -s "${J[@]}" -X POST -d '{"type":"fetch","path":"reports/q3-results.txt"}' "$B/api/chat/claude/request" > "$T/fetch.json"
 p="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$T/fetch.json")" || fail "fetch: $(cat "$T/fetch.json")"
 head_of "${H[@]}" "$B/api/chat/claude/file?p=$p&dl=1" | grep -qi "filename=\"q3-results.txt\"; filename\*=UTF-8''q3-results.txt" || fail "q3-results.txt lost part of its name"
 ok "a work-folder file downloads under its own name"
 
 # Plan usage on Home asks the agent (/usage) at most every 10 minutes, however often the page asks, also with "fresh"
 for body in '{}' '{}' '{"fresh":true}'; do
-  curl --noproxy '*' -s "${H[@]}" -X POST -d "$body" "$B/api/chat/claude/usage" > "$T/usage.json"
+  curl --noproxy '*' -s "${J[@]}" -X POST -d "$body" "$B/api/chat/claude/usage" > "$T/usage.json"
 done
 python3 -c 'import json,sys,time; u=json.load(open(sys.argv[1])); assert "Remaining: 58%" in u["card"]["elements"][0]["content"] and time.time() - u["asked"] < 60, u' "$T/usage.json" \
   && [ "$(grep -c '"t":"card","session":"usage"' "$A/claude/log.jsonl")" = 1 ] || fail "plan usage, asked three times: $(cat "$T/usage.json"); $(grep -c usage "$A/claude/log.jsonl")"

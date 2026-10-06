@@ -1078,6 +1078,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rel = c.write_new("files", f"{int(time.time() * 1000)}-{os.urandom(2).hex()}-{name}", data)
                 mime = MIME.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
                 return self.send(200, {"path": rel, "name": name, "size": len(data), "mime": mime})
+            if self.headers.get_content_type() != "application/json":   # as the page sends it: a form elsewhere can't
+                raise Refused(415, "send that as JSON")
             b = self.body()
             session = str(b.get("session") or "you")
             if not re.fullmatch(r"[a-z0-9-]{1,32}", session):

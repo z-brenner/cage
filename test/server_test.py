@@ -655,6 +655,25 @@ class Live(unittest.TestCase):
             self.assertEqual(self.call("POST", f"/api/chat/claude/{what}", b"[]", {"Content-Type": "application/json"})[0], 400)
         self.assertEqual(self.sent("claude"), [])
 
+    def test_only_json(self):
+        """An answer, a message, a request or plan usage comes as JSON, said to be JSON, as the page's api() sends it.
+        A body said to be anything else (a form, text, a beacon: what a page elsewhere can send without the browser
+        asking first) is refused (415) before it's read, and nothing goes to the agent. A file you upload is its own
+        bytes, whatever their type."""
+        p = self.asks("claude", "Bash(ls)")
+        body = json.dumps({"action": "perm:allow", "pending": p, "text": "yes", "type": "ls", "path": "."}).encode()
+        for what in ("action", "usage", "send", "request"):
+            for kind in (None, "", "text/plain", "text/plain; charset=utf-8", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x",
+                         "application/jsonx", "text/json", "application/json-patch+json"):
+                self.assertEqual(self.call("POST", f"/api/chat/claude/{what}", body, {"Content-Type": kind})[0], 415, (what, kind))
+        self.assertEqual(self.sent("claude"), [])
+        for kind in ("application/json", "application/json; charset=utf-8", "Application/JSON"):
+            p = self.asks("claude", "Bash(ls)")
+            self.assertEqual(self.call("POST", "/api/chat/claude/action", json.dumps({"action": "perm:deny", "pending": p}).encode(), {"Content-Type": kind})[0], 200, kind)
+        self.assertEqual([r["action"] for r in self.sent("claude")], ["perm:deny"] * 3)
+        status, _, body = self.call("POST", "/api/chat/claude/upload?name=a.pdf", b"%PDF-1.4", {"Content-Type": "application/pdf"})
+        self.assertEqual((status, strict(body)["mime"]), (200, "application/pdf"))
+
     def test_home_answers_the_approval_it_showed(self):
         """Allow or Deny from Home goes with the approval Home showed, and reaches that one or none: one asked before
         the one that waits now, or since, one another agent asked, one cc-connect forgot when it restarted (the relay
