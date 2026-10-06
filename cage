@@ -633,8 +633,13 @@ port = \"9830\"
     rm -f "$dir/mask.on"
   fi
   # Your terms go to a masked agent, and to one that /all or a stand-in can pass what you told a masked agent: its
-  # own mask.py hides them there (ask_agent). Nowhere else: they'd tell that AI company who you keep private.
-  if mask_terms_for "$a"; then ( umask 077; cat "$MASK_TERMS" 2>/dev/null > "$dir/mask.terms" || true ); else rm -f "$dir/mask.terms"; fi
+  # own mask.py hides them there (ask_agent, which also brings them as they are then). Nowhere else: they'd tell that
+  # AI company who you keep private. (That includes what an ask stopped before it could clean up left of them.)
+  if mask_terms_for "$a"; then
+    mask_terms_copy "$a" || die "couldn't pass your privacy mask's terms on to $a ($dir/mask.terms)"
+  else
+    rm -f "$dir/mask.terms" "$dir"/replies/*.terms
+  fi
   [ -n "$cmd" ] && cmdline="cmd = \"$cmd\""
   if [ "$a" = claude ] && [ "$(cvar APPROVE "$a")" = on ] && [ "$CAGE_MODE" = yolo ]; then
     tools="allowed_tools = [$(printf '"%s",' $CLAUDE_INSIDE | sed 's/,$//')]"
@@ -3124,32 +3129,49 @@ ask_script() { # the agent's CLI answering one question ($1): read-only, no apps
 
 ask_agent() { # ask_agent <from> <to> <question>: <to>'s answer on stdout (empty if it couldn't); <from> is the agent
   # whose chat it came from, or empty (cage ask)
-  local from="$1" to="$2" script m id f n=0
+  local from="$1" to="$2" script m id f d="$CAGE_HOME/agents/$2/replies" t="" n=0 root
   script="$(ask_script "$to")"
+  # The question goes in a file in the VM's read-only /cage-config, like deliver()'s messages: on a command line,
+  # anyone on this computer could read it with ps. The VM reads it as root, then runs the CLI as its own user.
+  # A new file every time (set -C): two relays to one agent in the same second never swap questions.
+  # What the VM sees in /cage-config can lag by about a second (msb mounts it with virtiofs, which caches which names
+  # are there and what they point to), so a file only just written, or a replies folder only just made, is looked for
+  # 3 times, a second apart.
+  root='again() { "$@" || { sleep 1; "$@"; } || { sleep 1; "$@"; }; }
+      q="$(again cat "$1")" || exit 1'
+  mkdir -p "$d"
+  while :; do
+    id="$(date +%s)-$$-$RANDOM"
+    f="$d/$id.q"
+    ( umask 077; set -C; printf '%s' "$3" > "$f" ) 2>/dev/null && break
+    n=$((n + 1)); [ "$n" -lt 20 ] || return 0
+  done
   # Its own privacy mask applies here, and so does the asking agent's: what you told a masked agent stays masked when
   # /all or a stand-in passes it on. The target's mask.py hides it, with that VM's map, and unmasks the answer.
   if mask_on "$from" || mask_on "$to"; then
     m="$(mask_cmd)" || m="python3 /cage/mask.py"
-    script="exec $m ${script#exec }"
+    script="$MASK_TERMS_FD exec $m ${script#exec }"
+    # mask.py hides your own terms only with the VM's copy of them in place. The VM's setup (guest/entry.sh) puts
+    # them there once it has installed everything, and as they were when it woke up; this can come sooner, or after
+    # `cage mask add`. So your terms as they are now go with the question, in a file of their own next to it, and
+    # the VM puts them in place, as root, before the CLI runs (MASK_TERMS_SYNC); if it can't, the CLI doesn't run.
+    # The CLI's mask reads that very copy (MASK_TERMS_FD), whatever replaces the VM's copy meanwhile. A name the VM
+    # has never looked up can't come from what it cached, and `cage up` can't take it away meanwhile (it removes
+    # leftovers only from an agent that no longer needs your terms, render_config).
+    t="/cage-config/replies/$id.terms"
+    ( umask 077; if [ -e "$MASK_TERMS" ]; then cat "$MASK_TERMS"; fi > "$d/$id.terms" ) 2>/dev/null \
+      || { rm -f "$f" "$d/$id.terms"; return 0; }
+    root="$root
+      $MASK_TERMS_SYNC"
   fi
-  # The question goes in a file in the VM's read-only /cage-config, like deliver()'s messages: on a command line,
-  # anyone on this computer could read it with ps. The VM reads it as root, then runs the CLI as its own user.
-  # A new file every time (set -C): two relays to one agent in the same second never swap questions.
-  mkdir -p "$CAGE_HOME/agents/$to/replies"
-  while :; do
-    id="$(date +%s)-$$-$RANDOM"
-    f="$CAGE_HOME/agents/$to/replies/$id.q"
-    ( umask 077; set -C; printf '%s' "$3" > "$f" ) 2>/dev/null && break
-    n=$((n + 1)); [ "$n" -lt 20 ] || return 0
-  done
   # A CLI that fails (signed out, out of quota, too slow) or says more than 12 KB still ends here, so the question
   # never stays on disk: `|| true`, as under set -e (cmd_ask) a failed pipeline would leave before the rm.
-  timeout "$ASK_TIMEOUT" "$MSB" exec --no-tty -w /home/agent/work "$(vm "$to")" -- bash -c 'q="$(cat "$1")" || exit 1
+  timeout "$ASK_TIMEOUT" "$MSB" exec --no-tty -w /home/agent/work "$(vm "$to")" -- bash -c "$root"'
       exec runuser -u agent -- env -i HOME=/home/agent USER=agent LOGNAME=agent SHELL=/bin/bash LANG=C.UTF-8 \
         PATH=/usr/local/bin:/usr/bin:/bin TERM=xterm-256color bash -c "$2" _ "$q"' _ "/cage-config/replies/$id.q" \
     'set -a; [ -r /etc/cage/env ] && . /etc/cage/env; [ -r /etc/cage/runtime.env ] && . /etc/cage/runtime.env; set +a
-      '"$script" 2>/dev/null | head -c 12000 || true
-  rm -f "$f"
+      '"$script" ${t:+"$t"} 2>/dev/null | head -c 12000 || true
+  rm -f "$f" "$d/$id.terms"
 }
 
 deliver() { # deliver <agent> <session key> <text>: a message into that chat, from the agent's own bot
@@ -3465,6 +3487,23 @@ voice_config() { # voice_config <agent>: its [speech] block, and the settings fo
 MASK_TERMS="$CAGE_HOME/mask.terms"
 MASK_KINDS="email phone card iban ssn secret term ip mac crypto dob passport id bank address"
 mask_on() { [ -n "$1" ] && [[ " ${CAGE_MASK:-} " == *" $1 "* ]]; }   # (no agent, like cage ask's source: off)
+mask_terms_copy() { # mask_terms_copy <agent>: your terms as they are now, for its VM's mask when it wakes up (its
+  # /cage-config/mask.terms, which guest/entry.sh puts in place); asks bring their own (ask_agent)
+  local d="$CAGE_HOME/agents/$1" t   # written whole, then swapped in (mktemp: readable by you only)
+  t="$(mktemp "$d/.mask.terms.XXXXXX")" || return 1
+  if { [ ! -e "$MASK_TERMS" ] || cat "$MASK_TERMS" > "$t"; } && mv -f "$t" "$d/mask.terms"; then return 0; fi
+  rm -f "$t"
+  return 1
+}
+# Run as root in a VM, before a CLI answers behind its mask (ask_agent): the copy of your terms that guest/mask.py reads
+# becomes exactly the file cage wrote for this ask ($3, empty when you have no terms), swapped in whole, so a mask
+# reading it meanwhile never gets half of it. If that file can't be read or put in place, the CLI doesn't run.
+# The CLI's own mask reads this copy through fd 9, opened before the swap (MASK_TERMS_FD, for the agent's side): the
+# VM's copy can be replaced again before that mask gets to it (the VM's setup, still waking up, putting in the terms it
+# woke up with; an ask that started earlier, with the terms you had then), which leaves this one's terms as they are.
+MASK_TERMS_SYNC='again install -D -m 644 "$3" "/etc/cage/.mask.terms.$$" && exec 9<"/etc/cage/.mask.terms.$$" &&
+        mv -f "/etc/cage/.mask.terms.$$" /etc/cage/mask.terms || exit 1'
+MASK_TERMS_FD='CAGE_MASK_TERMS=/proc/self/fd/9'
 mask_terms_for() { # mask_terms_for <agent>: does its VM need your terms (its own mask, or a relay from a masked agent)?
   local m
   mask_on "$1" && return 0

@@ -20,6 +20,11 @@ diagnose() { # what the VM was doing: its output, its processes, and apt's own l
   msb logs "$VM" > "$d/vm.log" 2>&1 || true
   echo "--- last guest output (all of it: $d/vm.log) ---"
   tail -n 60 "$d/vm.log"
+  if [ -n "$B" ]; then   # the second agent's too, while there is one (asking across agents, below)
+    msb logs "cage-$B" > "$d/vm-$B.log" 2>&1 || true
+    echo "--- $B's last guest output (all of it: $d/vm-$B.log) ---"
+    tail -n 60 "$d/vm-$B.log"
+  fi
   timeout 60 msb exec --no-tty "$VM" -- sh -c 'echo "--- processes"; ps -eo pid,etime,args --forest
     echo "--- the step provisioning is on"; cat /run/cage-step.* 2>/dev/null
     echo "--- apt: the end of term.log"; tail -n 40 /var/log/apt/term.log 2>/dev/null
@@ -278,20 +283,44 @@ ok "privacy mask: the real CLI runs behind it, your terms and emails become toke
 # The question goes to each VM in a file (never on a command line), which is gone afterwards. Neither CLI is signed
 # in here, so the proof is in each VM's map.
 bx() { msb exec --no-tty "cage-$B" -- "$@"; }
-retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A: $(msb logs "cage-$B" 2>&1 | tail -20)"
+unasked() { # why $B wasn't asked: its /cage-config as it sees it, the background helper's log, and the same /all once
+  # more, with what msb says (ask_agent drops its errors) and its exit codes
+  local w="$CAGE_HOME/unasked"
+  echo "--- $B's /cage-config, as $B sees it"; bx ls -la /cage-config /cage-config/replies 2>&1 || true
+  echo "--- the end of $CAGE_HOME/refresh.log"; tail -n 30 "$CAGE_HOME/refresh.log" 2>&1 || true
+  mkdir -p "$w"
+  cat > "$w/msb" <<EOF
+#!/bin/sh
+exec 2>>"$w/msb.err"
+echo "+ msb \$*" >&2
+"$(command -v msb)" "\$@"; rc=\$?
+echo "(exit \$rc)" >&2
+exit \$rc
+EOF
+  chmod +x "$w/msb"
+  echo "--- the same /all once more: what msb said"
+  rm -f "$CAGE_HOME/outbox/.last-$A" "$CAGE_HOME/outbox/.seen"   # (else cage takes the same question only once)
+  ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 \
+    CC_HOOK_CONTENT='/all is carol@example.org still at Acme Corp?' bash /cage/hook.sh ask 2>&1 || echo "(the hook failed)"
+  CAGE_MSB="$w/msb" "$ROOT/cage" _outbox 2>&1 || echo "(cage _outbox failed)"
+  cat "$w/msb.err" 2>&1 || true
+  echo "--- $B's mask after that"; bx sh -c 'ls -l /home/agent/.cage/mask; cat /etc/cage/mask.terms' 2>&1 || true
+}
+# Ready, as $A is above: provisioned, then set up (your terms, its memory and apps), and cc-connect started last
+retry 1500 bx test -e "/opt/cage/provisioned-$B" || fail "$B wasn't provisioned next to $A"
+retry 180 sh -c "msb exec --no-tty cage-$B -- ps -o user= -C cc-connect | grep -qx agent" || fail "cc-connect isn't running in $B"
 # The background helper `cage up` started takes requests too, every 3 s. Had it taken this one, `cage _outbox` would
 # return while $B is still being asked, and the checks below would run too early. So `cage _outbox` is the only one.
 pkill -f -- "$ROOT/cage _refresh" 2>/dev/null || true
 retry 60 ax env CC_HOOK_EVENT=message.received CC_HOOK_SESSION_KEY=telegram:111:111 \
   CC_HOOK_CONTENT='/all is carol@example.org still at Acme Corp?' bash /cage/hook.sh ask || fail "the hook failed in the VM"
 cage _outbox 2>/dev/null
-bx grep -qF 'carol@example.org' /home/agent/.cage/mask/map.json \
-  || fail "$B wasn't asked behind the mask: $(bx sh -c 'ls -l /home/agent/.cage/mask; cat /etc/cage/mask.terms' 2>&1)"
+if ! bx grep -qF 'carol@example.org' /home/agent/.cage/mask/map.json; then unasked; fail "$B wasn't asked behind the mask (why: above)"; fi
 bx grep -qF 'Acme Corp' /home/agent/.cage/mask/map.json || fail "your terms didn't reach $B's mask"
 cage ask "and is dave@example.net?" "$A" >/dev/null 2>"$CAGE_HOME/ask.err" || fail "cage ask: $(cat "$CAGE_HOME/ask.err")"
 gx grep -qF 'dave@example.net' /home/agent/.cage/mask/map.json || fail "cage ask didn't run $A's CLI behind its mask"
-left="$(find "$CAGE_HOME/agents/$A/replies" "$CAGE_HOME/agents/$B/replies" -name '*.q' 2>/dev/null || true)"
-[ -z "$left" ] || fail "a question stayed on disk: $left"
+left="$(find "$CAGE_HOME/agents/$A/replies" "$CAGE_HOME/agents/$B/replies" \( -name '*.q' -o -name '*.terms' \) 2>/dev/null || true)"
+[ -z "$left" ] || fail "a question, or the terms that went with it, stayed on disk: $left"
 cage destroy "$B" --yes >/dev/null 2>&1; B=""
 cage ask-all off </dev/null 2>/dev/null; cage mask off </dev/null 2>/dev/null; cage mask rm "Acme Corp" </dev/null 2>/dev/null
 ok "asking other agents keeps the mask: /all from a masked agent's chat, and cage ask, reach each CLI through its VM's mask"

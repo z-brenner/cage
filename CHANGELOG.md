@@ -66,6 +66,7 @@ Nothing yet.
 - `cage approve codex on`, and the app's switch for it, said Codex would ask you in the chat. It can't; both now say Codex works read-only.
 - A backup that wouldn't open again could still be reported as saved. Restore now checks the passphrase and free space first.
 - `/all` in an agent's chat ran another command, `/allow`: that agent never got your question, and a tool named like its first word could then run without asking first (`/all Write a poem` allowed Write). Now that agent answers too, however you capitalize `/all`, with your question exactly as you wrote it, and `/allow` is turned off. Chat apps' command menus list it as `/askall`.
+- When `cage ask`, `/all` or a stand-in had an agent answer behind the privacy mask, your own terms (such as a client's name) could reach that AI company as they were: right after it woke up, for terms you added since, and for as long as it ran if it woke up before you turned on `/all` or a stand-in. Emails, numbers and keys were still masked. Now your current terms are in place before it answers, and if they can't be, it doesn't answer.
 
 **After updating:**
 - Nothing to do for most. Your agents are rebuilt with fresh downloads, and keep their logins and files.

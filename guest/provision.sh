@@ -352,6 +352,18 @@ finish_dpkg() { # entry.sh's time limit can stop provisioning in the middle of d
   dpkg --force-confdef --force-confold --configure -a >/dev/null
 }
 
+mark_provisioned() { # the CLI must run; then "done", and last of all the mark that says provisioning has finished
+  local bin v
+  case "$KIND" in cursor) bin=cursor-agent ;; antigravity) bin=agy ;; *) bin="$KIND" ;; esac
+  command -v "$bin" >/dev/null || { echo "provision: $bin is not on PATH after install" >&2; exit 1; }
+  # A wrapper on PATH isn't enough (npm can install a launcher without its platform binary): it must run.
+  v="$(timeout 60 "$bin" --version 2>/dev/null)" || { echo "provision: $bin is installed but does not run; will retry" >&2; exit 1; }
+  log "done: $bin $(head -n 1 <<<"$v"); $(cc-connect --version 2>/dev/null | head -n 1 || true)"
+  # Nothing after this: `cage status` and the tests take the mark to mean provisioning has finished
+  mkdir -p "$(dirname "$MARK")"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$MARK"
+}
+
 guest_env() {
   # Sourced by guest/entry.sh before starting cc-connect. Non-secret defaults only.
   mkdir -p /etc/cage
@@ -414,10 +426,4 @@ adapters_node
 if grep -q '^browser|local:browser|' "$CONFIG/connectors.list" 2>/dev/null; then browser_wrapper; fi
 install_cc_connect
 guest_env
-case "$KIND" in cursor) BIN=cursor-agent ;; antigravity) BIN=agy ;; *) BIN="$KIND" ;; esac
-command -v "$BIN" >/dev/null || { echo "provision: $BIN is not on PATH after install" >&2; exit 1; }
-# A wrapper on PATH isn't enough (npm can install a launcher without its platform binary): it must run.
-timeout 60 "$BIN" --version >/dev/null 2>&1 || { echo "provision: $BIN is installed but does not run; will retry" >&2; exit 1; }
-mkdir -p /opt/cage
-date -u +%Y-%m-%dT%H:%M:%SZ > "$MARK"
-log "done: $BIN $(timeout 60 "$BIN" --version 2>/dev/null | head -1 || true); $(cc-connect --version 2>/dev/null | head -1)"
+mark_provisioned

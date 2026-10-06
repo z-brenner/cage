@@ -6,7 +6,10 @@
 #              when the mask can't run, nothing is written unmasked
 #   cage mask forget: the VM drops the values behind its placeholders, and AGENTS.md gets new ones
 #   cage ask: the CLI runs as the agent, behind the mask, with the question from a file that is then removed (also
-#             when the CLI fails), and the answer comes back unmasked
+#             when the CLI fails), and the answer comes back unmasked; your terms as they are now are in place first,
+#             from a file of their own for that ask, even before the VM's own setup has put them there and whatever
+#             happens to the copy it reads when it wakes up, or to the VM's copy before the CLI's mask reads it; the
+#             CLI doesn't run when they can't be
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"
@@ -36,6 +39,13 @@ case "$cmd" in
         *) shift ;;   # the VM's name
       esac
     done
+    # cage ask, below: the files cage wrote for the VM that MSB_GONE names (a pattern) taken away before the VM reads
+    # them, noted in $CAGE_HOME/took; and the copy of your terms the VM reads when it wakes up replaced meanwhile, with
+    # MSB_REPLACE's text, as `cage up` does
+    if [ -n "${MSB_GONE:-}" ]; then for f in $MSB_GONE; do [ ! -e "$f" ] || { rm -f "$f"; echo "$f"; } >> "$CAGE_HOME/took"; done; fi
+    if [ -n "${MSB_REPLACE:-}" ]; then
+      f="$CAGE_HOME/agents/claude/mask.terms"; printf '%s\n' "$MSB_REPLACE" > "$f.new" && mv -f "$f.new" "$f"
+    fi
     exec docker exec -i "${args[@]}" "$STANDIN" "$@" ;;
 esac
 exit 0
@@ -122,5 +132,67 @@ out="$(STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is dana.tester@example.com 
 grep -q "no answer" <<<"$out" || fail "cage ask, the CLI failing: $out"
 [ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk when the CLI failed"
 ok "cage ask: the CLI runs as the agent, masked, with the question as typed; its file is removed, also when it fails"
+
+# The VM's copy of your terms isn't there yet (its own setup puts it there only once it has installed everything), and
+# a term was added since it woke up: the CLI still gets your terms as they are now, masked. When they can't be put in
+# place (here: /etc/cage isn't a folder), the CLI doesn't run at all.
+vm rm -f /tmp/fail /tmp/asked /etc/cage/mask.terms
+cage mask add "Zeta Partners" </dev/null >/dev/null 2>&1
+out="$(STANDIN="$NAME" cage ask "ask Acme Corp and Zeta Partners" claude 2>/dev/null)"
+asked="$(vm cat /tmp/asked)"
+grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" || fail "the CLI didn't get your terms masked: $asked"
+if grep -qiE 'acme|zeta' <<<"$asked"; then fail "the CLI got your terms: $asked"; fi
+grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" || fail "cage ask: $out"
+[ "$(vm stat -c '%a %U' /etc/cage/mask.terms)" = "644 root" ] && [ "$(vm cat /etc/cage/mask.terms)" = "$(cat "$CAGE_HOME/mask.terms")" ] \
+  && grep -qx 'Zeta Partners' "$CAGE_HOME/mask.terms" && [ "$(vm ls -A /etc/cage)" = mask.terms ] \
+  || fail "the VM's terms: $(vm ls -lA /etc/cage; vm cat /etc/cage/mask.terms)"
+vm sh -c 'rm -f /tmp/asked && mv /etc/cage /etc/cage.d && touch /etc/cage'
+out="$(STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
+grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran without your terms in place: $out / $(vm cat /tmp/asked 2>&1)"
+vm sh -c 'rm -f /etc/cage && mv /etc/cage.d /etc/cage'
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+ok "cage ask: the CLI gets your terms as they are now, masked, even before the VM has its own copy; it doesn't run when they can't be put in place"
+
+# The file with your terms that cage writes for this ask is gone by the time the VM reads it (it looks 3 times): with
+# nothing to say what your terms are, the CLI doesn't run, rather than run with none.
+vm rm -f /tmp/asked; rm -f "$CAGE_HOME/took"
+out="$(MSB_GONE="$C/replies/*.terms" STANDIN="$NAME" timeout 120 "$ROOT/cage" ask "is Acme Corp in?" claude 2>/dev/null)" || fail "cage ask hung"
+grep -q '/replies/[0-9-]*\.terms$' "$CAGE_HOME/took" || fail "the stand-in msb didn't take the file away: $(cat "$CAGE_HOME/took" 2>&1)"
+grep -q "no answer" <<<"$out" && ! vm test -e /tmp/asked || fail "the CLI ran with your terms' file gone: $out / $(vm cat /tmp/asked 2>&1)"
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+ok "cage ask: when the file with your terms is gone before the VM reads it, the CLI doesn't run"
+
+# The copy of your terms the VM read when it woke up is replaced meanwhile (`cage up` does that, and in a microVM the
+# VM can go on seeing the old one for a moment, or a stale handle to it): the ask doesn't rely on that copy, so the CLI
+# gets your terms as they are now, from the file for this ask.
+vm rm -f /tmp/asked
+out="$(MSB_REPLACE="Other Corp" STANDIN="$NAME" cage ask "ask Acme Corp and Zeta Partners" claude 2>/dev/null)"
+[ "$(cat "$C/mask.terms")" = "Other Corp" ] || fail "the stand-in msb didn't replace the VM's copy: $(cat "$C/mask.terms")"
+asked="$(vm cat /tmp/asked)"
+grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" || fail "with the VM's copy replaced, the CLI didn't get your terms masked: $asked"
+grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" && [ "$(vm cat /etc/cage/mask.terms)" = "$(cat "$CAGE_HOME/mask.terms")" ] \
+  || fail "with the VM's copy replaced: $out / $(vm cat /etc/cage/mask.terms)"
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+cp "$CAGE_HOME/mask.terms" "$C/mask.terms"
+ok "cage ask: with the copy of your terms the VM woke up with replaced meanwhile, the CLI still gets your terms as they are now"
+
+# After the VM has put this ask's terms in place, and before the CLI's mask reads them, something else replaces them
+# with other terms (the VM's own setup, still waking up, putting in the ones it woke up with; or an ask that started
+# earlier, with the terms you had then): here, a runuser that does that first. The CLI's mask still reads the terms
+# put in place for this ask.
+printf '#!/bin/sh\nprintf "Other Corp\\n" > /etc/cage/.other && chmod 644 /etc/cage/.other && mv -f /etc/cage/.other /etc/cage/mask.terms\nexec %s "$@"\n' \
+  "$(vm sh -c 'command -v runuser')" > "$T/runuser"
+chmod 755 "$T/runuser"
+docker cp "$T/runuser" "$NAME:/usr/local/bin/runuser" >/dev/null
+vm rm -f /tmp/asked
+out="$(STANDIN="$NAME" cage ask "ask Acme Corp and Zeta Partners" claude 2>/dev/null)"
+[ "$(vm cat /etc/cage/mask.terms)" = "Other Corp" ] || fail "the VM's copy wasn't replaced before the CLI ran: $(vm cat /etc/cage/mask.terms)"
+asked="$(vm cat /tmp/asked)"
+grep -qE 'ask \[TERM_[0-9]+\] and \[TERM_[0-9]+\]$' <<<"$asked" && ! grep -qiE 'acme|zeta' <<<"$asked" \
+  || fail "with the VM's copy replaced before its mask read it, the CLI didn't get your terms masked: $asked"
+grep -qF 'answer: ask Acme Corp and Zeta Partners' <<<"$out" || fail "cage ask, the VM's copy replaced: $out"
+vm rm -f /usr/local/bin/runuser
+[ -z "$(ls -A "$C/replies" 2>/dev/null)" ] || fail "the question stayed on disk"
+ok "cage ask: the CLI's mask reads the terms put in place for its ask, even when they're replaced before it gets there"
 
 echo "all $pass mask VM tests passed"
